@@ -10,8 +10,8 @@
                    key on Home -- those are marked honestly.
    * APP-REMOVE  : remove the package for all users, then deprovision so new
                    users don't get it.
- Reinstall-blocking on this Home machine = registry keys + deprovision +
- (separately) Store/ContentDeliveryManager suppression. No AppLocker/WDAC here.
+ Reinstall-blocking on Windows Home = registry keys + deprovision +
+ (separately) Store/ContentDeliveryManager suppression. AppLocker/WDAC are not used.
 
  Requires Common.ps1 (dot-sourced first).
 ================================================================================
@@ -36,7 +36,7 @@ $script:WHDAiModules = @(
         FeatureOff=@(
             _reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'AllowRecallEnablement' 0
         )
-        Note='On THIS machine Recall is already DisabledWithPayloadRemoved. Key is set anyway to keep it off; app-remove uses Disable-WindowsOptionalFeature.'
+        Note='Policy AllowRecallEnablement=0 keeps Recall off. Turning Recall off this way also deletes existing Recall snapshots. Feature-off only: WHD does not remove the Recall optional feature itself.'
     }
     [ordered]@{
         Key='powerautomate'; Name='Power Automate'; Packages=@('Microsoft.PowerAutomateDesktop')
@@ -59,7 +59,7 @@ $script:WHDAiModules = @(
             _reg 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 0
             _reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarDa' 0
         )
-        Note='Feature-off disables Widgets. The HKLM Dsh policy is best-effort (often locked on Home); TaskbarDa reliably hides the Widgets button per-user. Removing the package disables Widgets entirely.'
+        Note='Feature-off disables Widgets. The HKLM Dsh policy is best-effort (often locked on Home); TaskbarDa hides the Widgets button where Windows allows the value to be written (newer builds protect it; it then shows as skipped). Removing the package disables Widgets entirely.'
     }
     [ordered]@{
         Key='notepad'; Name='Notepad (Rewrite AI)'; Packages=@('Microsoft.WindowsNotepad')
@@ -101,7 +101,7 @@ $script:WHDAiModules = @(
             _reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis' 1
             _reg 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'DisableAIDataAnalysis' 1
         )
-        Note='Policy CSP WindowsAI DisableAIDataAnalysis = no Recall snapshots. Recall payload is already removed here; this is a second lock if it ever returns.'
+        Note='Policy CSP WindowsAI DisableAIDataAnalysis = no Recall snapshots. A second lock next to the Recall switch, in case Recall is present or comes back.'
     }
     [ordered]@{
         Key='paintai'; Name='Paint AI (Cocreator/Image Creator/Fill)'; Packages=@()
@@ -111,7 +111,7 @@ $script:WHDAiModules = @(
             _reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Paint' 'DisableImageCreator' 1
             _reg 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\Paint' 'DisableGenerativeFill' 1
         )
-        Note='Policy CSP WindowsAI (Paint): keeps Paint but turns its AI tools off. Paint is not installed now - this protects a reinstall.'
+        Note='Policy CSP WindowsAI (Paint): keeps Paint but turns its AI tools off. If Paint is not installed, the values stay in place and apply when it is installed again.'
     }
     [ordered]@{
         Key='notepadai'; Name='Notepad AI (Rewrite/Summarize)'; Packages=@()
@@ -119,7 +119,7 @@ $script:WHDAiModules = @(
         FeatureOff=@(
             _reg 'HKLM:\SOFTWARE\Policies\WindowsNotepad' 'DisableAIFeatures' 1
         )
-        Note='Microsoft policy "DisableAIFeaturesInNotepad" (Notepad 11.2503+). Registry path taken from a widely used community tool because Microsoft''s page does not state it. Notepad is removed here - protects a reinstall.'
+        Note='Microsoft policy "DisableAIFeaturesInNotepad" (Notepad 11.2503+). Registry path taken from a widely used community tool because Microsoft''s page does not state it. If Notepad is not installed, the value stays in place and applies when it is installed again.'
     }
     [ordered]@{
         Key='edgeai'; Name='Edge: Copilot + sidebar'; Packages=@()

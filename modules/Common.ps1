@@ -110,6 +110,19 @@ function Test-WHDAdmin {
     (New-Object Security.Principal.WindowsPrincipal($id)
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
+# Warns when the elevated process runs as a different account than the user who is signed in
+# (the UAC prompt was answered with another administrator's name and password): per-user
+# settings then go to the elevated account. Read-only, never throws, silent when they match.
+function Write-WHDAccountWarning {
+    try {
+        $awRun  = "{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME
+        $awUser = "$((Get-CimInstance Win32_ComputerSystem -EA Stop).UserName)"
+        if ($awUser -and ($awUser -ne $awRun)) {
+            Write-WHDLog ("WHD is running as {0} but the signed-in user is {1}." -f $awRun, $awUser) 'WARN'
+            Write-WHDLog ("Per-user settings (app permissions, Copilot, suggestions, privacy switches, proxy auto-detect) and the update guard task will apply to {0}, not to the signed-in user. Sign in with the administrator account itself, or make the daily account an administrator for the run." -f $awRun) 'WARN'
+        }
+    } catch {}
+}
 
 # ---- risk labelling ---------------------------------------------------------
 function Write-WHDRisk {
@@ -158,6 +171,10 @@ function Backup-WHDRegistryKey {
     param([string]$PsPath)   # PowerShell form: HKLM:\...  or  HKCU:\...
     if (-not $script:WHDExecute) { return }
     Initialize-WHDPaths
+    # Each key is handled only ONCE per session (first write): a later export would already contain WHD's own values.
+    if (-not $script:WHDRegBackupSeen) { $script:WHDRegBackupSeen = @{} }
+    if ($script:WHDRegBackupSeen.ContainsKey($PsPath)) { return }
+    $script:WHDRegBackupSeen[$PsPath] = $true
     # Only export keys that already exist. A key we are about to CREATE has
     # nothing to back up (rollback = delete it), and running reg.exe on a
     # missing key just throws a noisy (caught) error into the transcript.
@@ -165,6 +182,7 @@ function Backup-WHDRegistryKey {
     $regPath = $PsPath -replace '^HKLM:\\', 'HKLM\' -replace '^HKCU:\\', 'HKCU\'
     $safe = ($PsPath -replace '[:\\]', '_')
     $out  = Join-Path $script:WHDRestore ("$safe.reg")
+    if (Test-Path -LiteralPath $out -EA SilentlyContinue) { return }   # never overwrite an export already in this session folder
     $ErrorActionPreference = 'Continue'
     try { & reg.exe export "$regPath" "$out" /y 2>$null 1>$null } catch {}
 }
@@ -259,10 +277,15 @@ function Set-WHDRegistryValue {
     # never spill a result table onto the console.
     Invoke-WHDChange -Description $desc -Force -Journal $jr -Action {
         Backup-WHDRegistryKey -PsPath $Path
-        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
+        # -LiteralPath: a path is never treated as a wildcard pattern (one key only).
+        if (-not (Test-Path -LiteralPath $Path)) {
+            # New-Item has no -LiteralPath for the registry, so a key that has to be created must not hold wildcard characters.
+            if ($Path -match '[*?\[\]]') { throw 'registry path contains wildcard characters' }
+            New-Item -Path $Path -Force | Out-Null
+        }
         # Set-ItemProperty creates-or-updates; New-ItemProperty -Force throws
         # "unauthorized operation" when the value already exists.
-        Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force
+        Set-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -Type $Type -Force
         # F21: read it back - a silently ignored write (policy lock) is a failure.
         $after = Get-WHDRegValueState -Path $Path -Name $Name
         if (-not $after.Exists -or -not (Test-WHDRegValueEqual $after.Value $Value $Type)) {
@@ -312,10 +335,11 @@ function Remove-WHDAppxAllUsers {
     if (-not $pkgs) { Write-WHDLog ("no installed package matches '{0}'" -f $NameLike) 'INFO'; return }
     foreach ($p in $pkgs) {
         $jr = @{ Kind = 'appx'; Package = "$($p.Name)"; FullName = "$($p.PackageFullName)" }
-        Invoke-WHDChange -Description ("remove Appx (all users): {0}" -f $p.PackageFullName) -Force -Journal $jr -Action {
+        # The result is the last object returned; mark only when the removal did not fail (dry-run: 'planned').
+        $rmRes = @(Invoke-WHDChange -Description ("remove Appx (all users): {0}" -f $p.PackageFullName) -Force -Journal $jr -Action {
             Remove-AppxPackage -Package $p.PackageFullName -AllUsers -EA Stop
-        }
-        if ("$($p.PackageFamilyName)") { Add-WHDDeprovisionMark -Pfn "$($p.PackageFamilyName)" }
+        })[-1]
+        if (("$($rmRes.Status)" -in @('done', 'planned')) -and "$($p.PackageFamilyName)") { Add-WHDDeprovisionMark -Pfn "$($p.PackageFamilyName)" }
     }
 }
 # Microsoft's "keep removed apps from returning during an update" mark (Microsoft Learn:
@@ -413,10 +437,11 @@ function Remove-WHDProvisioned {
     if (-not $prov) { Write-WHDLog ("no provisioned package matches '{0}'" -f $NameLike) 'INFO'; return }
     foreach ($p in $prov) {
         $jr = @{ Kind = 'provisioned'; Package = "$($p.DisplayName)"; FullName = "$($p.PackageName)" }
-        Invoke-WHDChange -Description ("deprovision (new users won't get): {0}" -f $p.PackageName) -Force -Journal $jr -Action {
+        # The result is the last object returned; mark only when the removal did not fail (dry-run: 'planned').
+        $rmRes = @(Invoke-WHDChange -Description ("deprovision (new users won't get): {0}" -f $p.PackageName) -Force -Journal $jr -Action {
             Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -AllUsers -EA Stop
-        }
-        if ("$($p.DisplayName)" -and "$($p.PublisherId)") { Add-WHDDeprovisionMark -Pfn ("{0}_{1}" -f $p.DisplayName, $p.PublisherId) }
+        })[-1]
+        if (("$($rmRes.Status)" -in @('done', 'planned')) -and "$($p.DisplayName)" -and "$($p.PublisherId)") { Add-WHDDeprovisionMark -Pfn ("{0}_{1}" -f $p.DisplayName, $p.PublisherId) }
     }
 }
 
@@ -744,7 +769,7 @@ function Invoke-WHDUndo {
     if (-not $todo.Count) { Write-WHDLog 'Nothing to undo (already undone or empty selection).' 'INFO'; return }
     $auto = @($todo | Where-Object { $_.UndoMode -eq 'auto' }).Count
     Write-WHDLog ("UNDO: {0} selected change(s), {1} can be undone automatically" -f $todo.Count, $auto) 'ACT'
-    Write-WHDRisk 'caution' 'Puts the previous values back. Each undo is itself journaled, so it can be undone again.'
+    Write-WHDRisk 'caution' 'Puts the previous values back. Each undo is recorded in the journal; registry undos can be undone again.'
     if (-not (Confirm-WHDProceed ("undo {0} change(s)" -f $todo.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
     # Entries written while undoing are marked ByUndo: they put Windows' own value back, so Verify and
     # re-apply must not treat them as a WHD setting to protect (bug seen 2026-09-29: re-apply wrote the
@@ -784,7 +809,7 @@ function Restore-WHDSessionHosts {
     if (-not (Confirm-WHDProceed 'replace the hosts file with this backup')) { Write-WHDLog 'skipped.' 'WARN'; return }
     $hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
     Invoke-WHDChange -Description ("restore hosts file from {0}" -f $f) -Force -Action {
-        Copy-Item -LiteralPath $hosts -Destination (Join-Path $script:WHDRestore 'hosts.bak') -Force -EA SilentlyContinue
+        Copy-Item -LiteralPath $hosts -Destination (Join-Path $script:WHDRestore ("hosts.before-restore_{0}.bak" -f (Get-Date -Format 'HHmmss'))) -Force -EA SilentlyContinue
         Copy-Item -LiteralPath $f -Destination $hosts -Force -EA Stop
         & ipconfig.exe /flushdns | Out-Null
     } | Out-Null
@@ -974,16 +999,16 @@ function Invoke-WHDArchiveOtherHistory {
     $claim = @($all | Where-Object { $_.Owner -eq 'legacy-this' })
     $inst = Get-WHDWindowsInstallDate
     Write-WHDLog 'HISTORY FROM OTHER PCs / PREVIOUS WINDOWS INSTALLS' 'ACT'
-    Write-WHDLog ("This PC: {0}   (Windows installed {1})" -f $env:COMPUTERNAME, $(if ($inst) { $inst.ToString('yyyy-MM-dd HH:mm') } else { 'unknown' })) 'INFO'
+    Write-WHDLog ("Current PC: {0}   (Windows installed {1})" -f $env:COMPUTERNAME, $(if ($inst) { $inst.ToString('yyyy-MM-dd HH:mm') } else { 'unknown' })) 'INFO'
     Write-WHDLog ("  {0} session(s) belong to another PC or an earlier install -> move to archive\other-pcs\" -f $other.Count) 'INFO'
     foreach ($o in $other) { Write-WHDLog ("     {0}" -f $o.Label) 'INFO' }
-    Write-WHDLog ("  {0} untagged session(s) from this install -> tag as this PC" -f $claim.Count) 'INFO'
-    if (-not $other.Count -and -not $claim.Count) { Write-WHDLog 'Nothing to do - all history belongs to this PC and is tagged.' 'OK'; return }
-    Write-WHDRisk 'reversible' 'Nothing is deleted: folders are moved to archive\other-pcs\ (move them back to restore\ to restore them). Verify, the update guard and CAME BACK flags then only use this PC''s history.'
-    if (-not (Confirm-WHDProceed 'archive other-PC history and tag this PC''s sessions')) { Write-WHDLog 'skipped.' 'WARN'; return }
+    Write-WHDLog ("  {0} untagged session(s) from the current Windows install -> tag as the current PC" -f $claim.Count) 'INFO'
+    if (-not $other.Count -and -not $claim.Count) { Write-WHDLog 'Nothing to do - all history belongs to the current PC and is tagged.' 'OK'; return }
+    Write-WHDRisk 'reversible' 'Nothing is deleted: folders are moved to archive\other-pcs\ (move them back to restore\ to restore them). Verify, the update guard and CAME BACK flags then only use the current PC''s history.'
+    if (-not (Confirm-WHDProceed 'archive other-PC history and tag the current PC''s sessions')) { Write-WHDLog 'skipped.' 'WARN'; return }
     if (-not $script:WHDExecute) {
         foreach ($o in $other) { Write-WHDLog ("would: move {0} -> archive\other-pcs\" -f $o.Stamp) 'DRY' }
-        foreach ($c in $claim) { Write-WHDLog ("would: tag {0} as this PC" -f $c.Stamp) 'DRY' }
+        foreach ($c in $claim) { Write-WHDLog ("would: tag {0} as the current PC" -f $c.Stamp) 'DRY' }
         return
     }
     $dest = Join-Path $script:WHDRoot ('archive\other-pcs\' + (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
@@ -994,7 +1019,7 @@ function Invoke-WHDArchiveOtherHistory {
         catch { Write-WHDLog ("could not move {0}: {1}" -f $o.Stamp, $_.Exception.Message) 'ERR' }
     }
     foreach ($c in $claim) { try { _WHDWriteSessionMachine -SessionPath $c.Path } catch { Write-WHDLog ("could not tag {0}: {1}" -f $c.Stamp, $_.Exception.Message) 'ERR' } }
-    Write-WHDLog ("Done: {0} session(s) archived to {1}; {2} tagged as this PC." -f $moved, $dest, $claim.Count) 'OK'
+    Write-WHDLog ("Done: {0} session(s) archived to {1}; {2} tagged as the current PC." -f $moved, $dest, $claim.Count) 'OK'
 }
 
 function Invoke-WHDVerify {
@@ -1046,7 +1071,7 @@ function Invoke-WHDVerify {
         $r
     })
     Write-WHDLog ("VERIFY: {0} - {1} item(s) checked" -f $label, $res.Count) 'ACT'
-    if (-not $res.Count) { Write-WHDLog 'No journaled changes to verify (journal starts with Phase 5; older sessions only have .reg backups).' 'INFO'; return @() }
+    if (-not $res.Count) { Write-WHDLog 'No journaled changes to verify (sessions from before the change journal existed only have .reg backups).' 'INFO'; return @() }
     foreach ($r in $res) {
         $lvl = switch ($r.Result) { 'PASS' { 'OK' } 'n/a' { 'INFO' } default { 'WARN' } }
         if (-not $Quiet -or $r.Result -ne 'PASS') {

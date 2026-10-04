@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  Inventory.ps1   (Phase 1, Module 1)
+ WinHardenDebloat  -  Inventory.ps1
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -18,7 +18,7 @@
    * Flags every "AI"-related surface (Copilot, Cortana, Power Automate,
      Recall, Web Experience/Widgets, and integrated AI apps).
 
- Target:  Windows 11 24H2 / 25H2.  Windows PowerShell 5.1 recommended.
+ Target:  Windows 11 (tested on 25H2 and 26H2).  Windows PowerShell 5.1 (powershell.exe).
  Elevation: run as Administrator for the FULL picture. Without admin, the
             provisioned-package and effective-AppLocker scans are skipped
             (clearly marked in the report), everything else still runs.
@@ -27,7 +27,7 @@
    powershell -ExecutionPolicy Bypass -File .\Inventory.ps1
    powershell -ExecutionPolicy Bypass -File .\Inventory.ps1 -OutputRoot "D:\WHD"
    powershell -ExecutionPolicy Bypass -File .\Inventory.ps1 -Compare
-       (Phase 5) compare the two newest scans - what appeared, disappeared or
+       Compare the two newest scans - what appeared, disappeared or
        changed. Add -Old / -New <folder name> to pick specific scans.
    Every normal scan also compares itself with the previous scan and adds a
    "CHANGES SINCE LAST SCAN" section to REPORT.txt (+ DIFF-vs-*.txt/.csv).
@@ -40,14 +40,20 @@ param(
     [string]$OutputRoot,
     # Skip self-elevation (used when a launcher already elevated us).
     [switch]$NoElevate,
-    # Phase 5: compare two existing scans instead of scanning (read-only, no admin).
+    # Compare two existing scans instead of scanning (read-only, no admin).
     [switch]$Compare,
     [string]$Old,
     [string]$New,
-    # Phase 9: project folder whose restore\ journals mark "CAME BACK" items
+    # Project folder whose restore\ journals mark "CAME BACK" items
     # (the update guard runs this script from its protected copy).
     [string]$ProjectRoot
 )
+
+# Windows PowerShell 5.1 only - the Appx / DISM cmdlets used here do not behave the same in PowerShell 7.
+if ($PSVersionTable.PSVersion.Major -ne 5) {
+    Write-Host 'The inventory needs Windows PowerShell 5.1 - start it with powershell.exe, not pwsh.' -ForegroundColor Red
+    exit 1
+}
 
 $ErrorActionPreference = 'Stop'
 # NOTE: StrictMode is intentionally NOT enabled. Admin inventory cmdlets often
@@ -174,6 +180,13 @@ function Invoke-WHDInventoryDiff {
     $lines = New-Object System.Collections.Generic.List[string]
     $oldName = Split-Path $OldDir -Leaf; $newName = Split-Path $NewDir -Leaf
     $lines.Add(('  Compared: {0}  ->  {1}' -f $oldName, $newName))
+    # A scan made without administrator rights has no optional features / capabilities / provisioned packages.
+    $elev = @(foreach ($sd in @($OldDir, $NewDir)) {
+        try { "$((Get-Content -LiteralPath (Join-Path $sd 'os-info.json') -Raw -EA Stop | ConvertFrom-Json).Elevated)" } catch { '' }
+    })
+    if ($elev[0] -and $elev[1] -and $elev[0] -ne $elev[1]) {
+        $lines.Add('  WARN: One scan was made without administrator rights - Appx packages of other users, optional features and capabilities are missing from it, so differences in those sections are not real.')
+    }
     foreach ($sf in $surfaces) {
         $rm = if ($sf.S -eq 'Appx packages') { $removed } else { $null }
         $rows = @(Compare-WHDSurface (Import-WHDCsvSafe $OldDir $sf.F) (Import-WHDCsvSafe $NewDir $sf.F) $sf.S $sf.K $sf.X $rm)
@@ -452,7 +465,7 @@ if (Test-Path $applockerDir) {
 }
 $appLockerCacheFiles | Export-Csv (Join-Path $OutDir 'applocker-cache-files.csv') -NoTypeInformation -Encoding UTF8
 
-# Application Identity service (AppIDSvc) drives enforcement — report its state,
+# Application Identity service (AppIDSvc) drives enforcement - report its state,
 # because AppLocker rules are silently ignored when it is not running.
 $appId = $null
 try { $appId = Get-Service AppIDSvc -EA Stop } catch {}

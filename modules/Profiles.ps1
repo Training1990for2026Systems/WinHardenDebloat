@@ -1,15 +1,15 @@
 <#
 ================================================================================
- WinHardenDebloat  -  modules\Profiles.ps1   (Phase 2)
+ WinHardenDebloat  -  modules\Profiles.ps1
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
  Profile-driven, non-interactive runner. Reads a JSON profile and drives the
- SAME engine functions the interactive menu uses - the "contract a GUI drives".
+ SAME engine functions the interactive menu and the GUI use.
 
  It does not own any UI: it injects an auto-approve confirm strategy (after one
  upfront gate, unless -Yes) and reads back structured results from the engine
- (Get-WHDResults). A future GUI drives the identical functions the same way.
+ (Get-WHDResults). The GUI (WHD-GUI.ps1) drives the identical functions the same way.
 
  Profile schema (JSON) - every section optional:
  {
@@ -19,7 +19,7 @@
              "remove":     ["copilot","powerautomate","phonelink"] },
    "storeSuppression": true,
    "general": { "removeRecommended": true, "remove": ["xboxapp","todos"], "oem": "ask" },
-   (general.oem = "ask": list the non-Microsoft apps found on THIS PC and ask which to remove; console only)
+   (general.oem = "ask": list the installed non-Microsoft apps and ask which to remove; console only)
    "privacyHardening": true,
    "disableDiagTrack": true,
    "permissions": "Balanced",                         // Lock | Lockdown | Balanced | Open
@@ -51,12 +51,16 @@
 
 function _WHDAiByKey  { param($Key) @($script:WHDAiModules   | Where-Object { $_.Key -eq $Key })[0] }
 function _WHDGenByKey { param($Key) @($script:WHDGeneralApps | Where-Object { $_.Key -eq $Key })[0] }
+# Profile summary lines: the GUI only shows Write-WHDLog output (its console is hidden), the terminal keeps its colours.
+function _WHDProfSay { param([string]$Text, [string]$Color) if ($script:WHDGuiMode) { Write-WHDLog $Text 'INFO' } elseif ($Color) { Write-Host $Text -ForegroundColor $Color } else { Write-Host $Text } }
 
 function Invoke-WHDApplyProfile {
     param([Parameter(Mandatory)][string]$Path)
 
     # Resolve a relative path against the project root (a self-elevated window's
-    # working directory is system32, not the project folder).
+    # working directory is system32, not the project folder). A path pasted with
+    # surrounding double quotes is accepted (IsPathRooted throws on a quote).
+    $Path = $Path.Trim().Trim('"')
     if (-not [System.IO.Path]::IsPathRooted($Path)) { $Path = Join-Path $script:WHDRoot $Path }
     if (-not (Test-Path -LiteralPath $Path)) { Write-WHDLog ("profile not found: {0}" -f $Path) 'ERR'; return }
     try { $p = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch {
@@ -65,67 +69,67 @@ function Invoke-WHDApplyProfile {
     Reset-WHDResults
     $pname = if ($p.name) { $p.name } else { Split-Path $Path -Leaf }
     Write-WHDLog ("================ APPLY PROFILE: {0} ================" -f $pname) 'ACT'
-    if ($p.description) { Write-Host ("  {0}" -f $p.description) -ForegroundColor DarkGray }
+    if ($p.description) { _WHDProfSay ("  {0}" -f $p.description) 'DarkGray' }
 
     # ---- summary of intended actions --------------------------------------
     Write-Host ''
-    Write-Host '  This profile will (in the current mode):' -ForegroundColor White
-    if ($p.ai.featureOff)          { Write-Host ("   - AI feature-off : {0}" -f (@($p.ai.featureOff) -join ', ')) }
-    if ($p.ai.remove)              { Write-Host ("   - AI remove      : {0}" -f (@($p.ai.remove) -join ', ')) }
-    if ($p.storeSuppression)       { Write-Host  '   - Store / silent-reinstall suppression' }
-    if ($p.general.removeRecommended) { Write-Host '   - General: remove ALL recommended apps' }
-    if ($p.general.remove)         { Write-Host ("   - General remove : {0}" -f (@($p.general.remove) -join ', ')) }
-    if ("$($p.general.oem)" -eq 'ask') { Write-Host  '   - General: list the non-Microsoft apps found on THIS PC and ask which to remove' }
-    if ($p.privacyHardening)       { Write-Host  '   - Privacy / telemetry hardening' }
-    if ($p.disableDiagTrack)       { Write-Host  '   - Disable DiagTrack service' }
-    if ($p.privacy)                { Write-Host ("   - More privacy settings : {0}" -f (@($p.privacy) -join ', ')) }
+    _WHDProfSay '  This profile will (in the current mode):' 'White'
+    if ($p.ai.featureOff)          { _WHDProfSay ("   - AI feature-off : {0}" -f (@($p.ai.featureOff) -join ', ')) }
+    if ($p.ai.remove)              { _WHDProfSay ("   - AI remove      : {0}" -f (@($p.ai.remove) -join ', ')) }
+    if ($p.storeSuppression)       { _WHDProfSay '   - Store / silent-reinstall suppression' }
+    if ($p.general.removeRecommended) { _WHDProfSay '   - General: remove ALL recommended apps' }
+    if ($p.general.remove)         { _WHDProfSay ("   - General remove : {0}" -f (@($p.general.remove) -join ', ')) }
+    if ("$($p.general.oem)" -eq 'ask') { _WHDProfSay '   - General: list the installed non-Microsoft apps and ask which to remove' }
+    if ($p.privacyHardening)       { _WHDProfSay '   - Privacy / telemetry hardening' }
+    if ($p.disableDiagTrack)       { _WHDProfSay '   - Disable DiagTrack service' }
+    if ($p.privacy)                { _WHDProfSay ("   - More privacy settings : {0}" -f (@($p.privacy) -join ', ')) }
     if ($p.security) {
         $sx = $p.security
-        if ($sx.pua)               { Write-Host  '   - Security+: block unwanted apps (PUA)' }
-        if ($sx.networkProtection) { Write-Host ("   - Security+: network protection {0}" -f $sx.networkProtection) }
-        if ($sx.folderProtection)  { Write-Host ("   - Security+: folder protection {0}" -f $sx.folderProtection) }
-        if ($sx.asrGroups)         { Write-Host ("   - Security+: ASR {0} ({1})" -f (@($sx.asrGroups) -join ', '), $(if ($sx.asrMode) { $sx.asrMode } else { 'Audit' })) }
-        if ($sx.protocolsOff)      { Write-Host ("   - Security+: protocols off: {0}" -f (@($sx.protocolsOff) -join ', ')) }
-        if ($sx.servicesOff)       { Write-Host ("   - Security+: network services off: {0}" -f (@($sx.servicesOff) -join ', ')) }
-        if ($sx.uacAlwaysNotify)   { Write-Host  '   - Security+: UAC Always notify' }
-        if ($sx.passwordPolicy)    { Write-Host  '   - Security+: password + lockout rules (14 chars, remember 5, never expire, 3 tries / 10 min)' }
-        if ($sx.updateGuard)       { Write-Host  '   - Security+: update guard (alert only, sign-in +10 min)' }
+        if ($sx.pua)               { _WHDProfSay '   - Security+: block unwanted apps (PUA)' }
+        if ($sx.networkProtection) { _WHDProfSay ("   - Security+: network protection {0}" -f $sx.networkProtection) }
+        if ($sx.folderProtection)  { _WHDProfSay ("   - Security+: folder protection {0}" -f $sx.folderProtection) }
+        if ($sx.asrGroups)         { _WHDProfSay ("   - Security+: ASR {0} ({1})" -f (@($sx.asrGroups) -join ', '), $(if ($sx.asrMode) { $sx.asrMode } else { 'Audit' })) }
+        if ($sx.protocolsOff)      { _WHDProfSay ("   - Security+: protocols off: {0}" -f (@($sx.protocolsOff) -join ', ')) }
+        if ($sx.servicesOff)       { _WHDProfSay ("   - Security+: network services off: {0}" -f (@($sx.servicesOff) -join ', ')) }
+        if ($sx.uacAlwaysNotify)   { _WHDProfSay '   - Security+: UAC Always notify' }
+        if ($sx.passwordPolicy)    { _WHDProfSay '   - Security+: password + lockout rules (14 chars, remember 5, never expire, 3 tries / 10 min)' }
+        if ($sx.updateGuard)       { _WHDProfSay '   - Security+: update guard (alert only, sign-in +10 min)' }
     }
     if ($p.devices) {
-        if ($p.devices.btNetworkOff)    { Write-Host  '   - Devices: Bluetooth network part off (DHCP + autoconfig off, adapter off)' }
-        if ($p.devices.wifiDirectOff)   { Write-Host  '   - Devices: Wi-Fi Direct adapters off + install block' }
-        if ($p.devices.wanMiniportsOff) { Write-Host  '   - Devices: WAN Miniports install block + remove' }
+        if ($p.devices.btNetworkOff)    { _WHDProfSay '   - Devices: Bluetooth network part off (DHCP + autoconfig off, adapter off)' }
+        if ($p.devices.wifiDirectOff)   { _WHDProfSay '   - Devices: Wi-Fi Direct adapters off + install block' }
+        if ($p.devices.wanMiniportsOff) { _WHDProfSay '   - Devices: WAN Miniports install block + remove' }
     }
-    if ($p.permissions)            { Write-Host ("   - App-permission profile : {0}" -f $p.permissions) }
-    if ($p.win32.uninstall)        { Write-Host ("   - Win32 uninstall : {0}" -f (@($p.win32.uninstall) -join ', ')) }
-    if ($p.win32.removeEverywhere) { Write-Host ("   - Win32 remove-everywhere : {0}" -f (@($p.win32.removeEverywhere) -join ', ')) }
-    if ($p.win32.blockExe)         { Write-Host ("   - Win32 block exe : {0}" -f (@($p.win32.blockExe) -join ', ')) }
+    if ($p.permissions)            { _WHDProfSay ("   - App-permission profile : {0}" -f $p.permissions) }
+    if ($p.win32.uninstall)        { _WHDProfSay ("   - Win32 uninstall : {0}" -f (@($p.win32.uninstall) -join ', ')) }
+    if ($p.win32.removeEverywhere) { _WHDProfSay ("   - Win32 remove-everywhere : {0}" -f (@($p.win32.removeEverywhere) -join ', ')) }
+    if ($p.win32.blockExe)         { _WHDProfSay ("   - Win32 block exe : {0}" -f (@($p.win32.blockExe) -join ', ')) }
     if ($p.network) {
         $nx = $p.network
-        if ($nx.firewallWipeFirst) { Write-Host  '   - Network: WIPE ALL firewall rules first (Windows defaults included; .wfw backup taken)' }
-        if ($nx.timeSync)          { Write-Host ("   - Network: time sync {0}{1}" -f $nx.timeSync, $(if ($nx.timeSync -eq 'Cloudflare') { ' (UDP 123 pinned, 1 h jump limit)' } else { '' })) }
-        if ($nx.firewallProfile)   { Write-Host ("   - Network: firewall profile {0}" -f $nx.firewallProfile) }
-        if ($nx.dns)               { Write-Host ("   - Network: DNS {0}" -f $(if ($nx.dns -eq 'Cloudflare') { 'Cloudflare 1.1.1.2 + encrypted DoH' } else { $nx.dns })) }
-        if ($nx.connectionLogging) { Write-Host  '   - Network: Windows Firewall log ON (default file, dropped + allowed, 32,767 KB)' }
+        if ($nx.firewallWipeFirst) { _WHDProfSay '   - Network: WIPE ALL firewall rules first (Windows defaults included; .wfw backup taken)' }
+        if ($nx.timeSync)          { _WHDProfSay ("   - Network: time sync {0}{1}" -f $nx.timeSync, $(if ($nx.timeSync -eq 'Cloudflare') { ' (UDP 123 pinned, 1 h jump limit)' } else { '' })) }
+        if ($nx.firewallProfile)   { _WHDProfSay ("   - Network: firewall profile {0}" -f $nx.firewallProfile) }
+        if ($nx.dns)               { _WHDProfSay ("   - Network: DNS {0}" -f $(if ($nx.dns -eq 'Cloudflare') { 'Cloudflare 1.1.1.2 + encrypted DoH' } else { $nx.dns })) }
+        if ($nx.connectionLogging) { _WHDProfSay '   - Network: Windows Firewall log ON (default file, dropped + allowed, 32,767 KB)' }
     }
     if ($p.updates) {
         $ux = $p.updates
         $pl = @(); if ($ux.windowsUpdatePolicy) { $pl += 'Windows Update' }; if ($ux.drivers) { $pl += 'drivers (Device Installation = No)' }
         if ($ux.driverPolicy) { $pl += 'driver policy' }; if ($ux.storePolicy) { $pl += 'Store auto-update' }
-        if ($pl.Count)             { Write-Host ("   - Updates: policies -> {0}" -f ($pl -join ', ')) }
-        if ($ux.edgeUpdaterOff)    { Write-Host  '   - Updates: Edge Update off' }
-        if ($ux.updatersOff)       { Write-Host ("   - Updates: app updaters off matching: {0}" -f (@($ux.updatersOff) -join ', ')) }
+        if ($pl.Count)             { _WHDProfSay ("   - Updates: policies -> {0}" -f ($pl -join ', ')) }
+        if ($ux.edgeUpdaterOff)    { _WHDProfSay '   - Updates: Edge Update off' }
+        if ($ux.updatersOff)       { _WHDProfSay ("   - Updates: app updaters off matching: {0}" -f (@($ux.updatersOff) -join ', ')) }
     }
-    if ($p.componentCleanup.run)   { Write-Host ("   - Component store cleanup{0}" -f $(if($p.componentCleanup.resetBase){' + ResetBase'}else{''})) }
-    if ($p.security -and $p.security.updateGuard) { Write-Host  '   - then: install the update guard' }
-    if ($p.updates -and "$($p.updates.gate)" -eq 'closed') { Write-Host  '   - LAST: CLOSE the update gate (only Defender + DNS-over-HTTPS may use the web)' }
+    if ($p.componentCleanup.run)   { _WHDProfSay ("   - Component store cleanup{0}" -f $(if($p.componentCleanup.resetBase){' + ResetBase'}else{''})) }
+    if ($p.security -and $p.security.updateGuard) { _WHDProfSay '   - then: install the update guard' }
+    if ($p.updates -and "$($p.updates.gate)" -eq 'closed') { _WHDProfSay '   - LAST: CLOSE the update gate (only Defender + DNS-over-HTTPS may use the web)' }
     Write-Host ''
 
     # ---- one upfront gate in EXECUTE mode (unless -Yes) -------------------
     if ($script:WHDExecute -and -not $script:WHDYes) {
         # Same confirm strategy as every other action: y/N in the terminal, a Yes/No dialog in the GUI
         # (a Read-Host here would wait on the hidden console behind the GUI window).
-        Write-Host '  *** EXECUTE MODE - this will change the system. ***' -ForegroundColor Red
+        _WHDProfSay '  *** EXECUTE MODE - this will change the system. ***' 'Red'
         if (-not (Confirm-WHDProceed ("EXECUTE MODE: apply profile '{0}' now (every step above)" -f $pname))) { Write-WHDLog 'Profile apply cancelled at gate.' 'WARN'; return }
     }
 
@@ -133,6 +137,7 @@ function Invoke-WHDApplyProfile {
     # or dry-run) is the decision. Save/restore the injected strategy.
     $prevConfirm = $script:WHDConfirm
     $script:WHDConfirm = { param($Msg) $true }
+    $applyAborted = $false
     try {
         # Action functions return result objects (recorded in WHDResults). Run
         # them inside a scriptblock piped to Out-Null so those objects don't leak
@@ -221,14 +226,16 @@ function Invoke-WHDApplyProfile {
             if ($p.updates -and "$($p.updates.gate)" -eq 'closed' -and (Get-Command Close-WHDUpdateGate -EA SilentlyContinue)) { Close-WHDUpdateGate }
         } | Out-Null
     }
-    catch   { Write-WHDLog ("apply error: {0}" -f $_.Exception.Message) 'ERR' }
+    catch   { $applyAborted = $true; Write-WHDLog ("apply error: {0}" -f $_.Exception.Message) 'ERR' }
     finally { $script:WHDConfirm = $prevConfirm }
 
     # ---- results summary: read the engine's running counters (no iteration) --
     try {
         $c = Get-WHDCounts
         Write-Host ''
-        Write-WHDLog ("PROFILE '" + $pname + "' complete - " + [int]$c.done + " done, " + [int]$c.planned + " planned (dry-run), " + [int]$c.failed + " failed") 'ACT'
+        $sumTxt = "" + [int]$c.done + " done, " + [int]$c.planned + " planned (dry-run), " + [int]$c.failed + " failed, " + [int]$c.skipped + " skipped"
+        if ($applyAborted) { Write-WHDLog ("PROFILE '" + $pname + "' ABORTED after an error - the remaining steps were NOT applied - " + $sumTxt) 'ERR' }
+        else               { Write-WHDLog ("PROFILE '" + $pname + "' complete - " + $sumTxt) 'ACT' }
         if ([int]$c.failed -gt 0) {
             foreach ($r in @(Get-WHDResults)) {
                 if ("$($r.Status)" -eq 'failed') { Write-WHDLog ("  FAILED: " + $r.Action + " :: " + $r.Detail) 'ERR' }
@@ -247,10 +254,11 @@ function Invoke-WHDApplyProfile {
 # Write a starter profile (the curated lean setup) the user can edit.
 function Export-WHDProfile {
     param([Parameter(Mandatory)][string]$Path)
+    $Path = $Path.Trim().Trim('"')
     if (-not [System.IO.Path]::IsPathRooted($Path)) { $Path = Join-Path $script:WHDRoot $Path }
     $lean = [ordered]@{
         name             = 'lean'
-        description      = 'Curated lean debloat for a fresh Win11 Home box (edit to taste).'
+        description      = 'Curated lean debloat for a fresh Windows 11 Home install (edit to taste).'
         ai               = [ordered]@{ featureOff = @('copilot','bing','recall'); remove = @('copilot','powerautomate','phonelink','webexp') }
         storeSuppression = $true
         general          = [ordered]@{ removeRecommended = $true; remove = @('xboxapp','todos','sticky'); oem = 'ask' }

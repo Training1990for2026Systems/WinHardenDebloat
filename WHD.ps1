@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  WHD.ps1   (Phase 1 launcher)
+ WinHardenDebloat  -  WHD.ps1   (console launcher)
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -14,16 +14,27 @@
 [CmdletBinding()]
 param(
     [switch]$Execute,     # start in EXECUTE mode (default is dry-run)
-    [switch]$Plan,        # non-interactive: print the FULL dry-run plan and exit
+    [switch]$Plan,        # non-interactive: print the dry-run plan (AI, apps, privacy, permissions, component store) and exit
     [string]$Apply,       # non-interactive: apply a JSON profile, then exit
     [string]$Export,      # write a starter profile to this path, then exit
     [switch]$Yes,         # skip the one upfront gate when applying (scripted runs)
     [switch]$NoElevate,
-    [switch]$Guard,       # Phase 9: run the update-guard check (read-only) and exit (used by the scheduled task)
-    [string]$DataRoot     # Phase 9: project folder for reports/journals when running from the protected copy
+    [switch]$Guard,       # run the update-guard check (read-only) and exit (used by the scheduled task)
+    [string]$DataRoot     # project folder for reports/journals when running from the protected copy
 )
 
 $ErrorActionPreference = 'Stop'
+
+# ---- Windows PowerShell 5.1 only (checked before anything else runs) --------
+# The update guard task and the self-elevation below both start/reuse powershell.exe 5.1,
+# so they always pass this check.
+if ($PSVersionTable.PSVersion.Major -ne 5) {
+    Write-Host ''
+    Write-Host (' WinHardenDebloat (Classic) needs Windows PowerShell 5.1 - this is PowerShell {0}.' -f $PSVersionTable.PSVersion) -ForegroundColor Yellow
+    Write-Host ' Start it with powershell.exe (not pwsh):' -ForegroundColor Yellow
+    Write-Host '   powershell -ExecutionPolicy Bypass -File .\WHD.ps1' -ForegroundColor Yellow
+    exit 1
+}
 
 # ---- self-elevation ---------------------------------------------------------
 function _isAdmin {
@@ -98,7 +109,8 @@ if ($Guard) {
 }
 Start-WHDTranscript
 Update-WHDGuardIfStale
-try { $Host.UI.RawUI.WindowTitle = 'WinHardenDebloat (Administrator) - type here' } catch {}
+Write-WHDAccountWarning   # never reached in guard mode (returned above)
+try { $Host.UI.RawUI.WindowTitle = 'WinHardenDebloat (Administrator) - type in this window' } catch {}
 $elevated = _isAdmin
 
 # ---- non-interactive: export a starter profile, then exit -------------------
@@ -115,10 +127,10 @@ if ($Apply) {
     return
 }
 
-# ---- non-interactive full plan (no Read-Host anywhere) ----------------------
+# ---- non-interactive plan (no Read-Host anywhere) ---------------------------
 function Invoke-WHDPlanAll {
     $script:WHDExecute = $false   # -Plan is always a preview
-    Write-WHDLog '================ FULL DRY-RUN PLAN (no changes) ================' 'DRY'
+    Write-WHDLog '================ DRY-RUN PLAN (AI, apps, privacy, permissions, component store) - no changes ================' 'DRY'
     foreach ($m in $script:WHDAiModules) {
         $p = Get-WHDModulePresence -Module $m
         Write-Host ''
@@ -172,6 +184,7 @@ function Show-WHDMode {
 function Show-WHDMain {
     Write-Host ''
     Write-Host '  ================= WinHardenDebloat =================' -ForegroundColor White
+    Write-Host '  Provided as is, with no warranty (MIT License) - use at your own risk. Dry run first.' -ForegroundColor DarkGray
     Write-Host ('  Root: {0}' -f $script:WHDRoot) -ForegroundColor DarkGray
     if (-not $elevated) { Write-Host '  (NOT elevated - inventory/removal will be limited)' -ForegroundColor Yellow }
     Write-Host '  Type a number/letter below and press Enter.' -ForegroundColor DarkGray
@@ -183,7 +196,7 @@ function Show-WHDMain {
     Write-Host '   4. App permissions   (Lockdown / Balanced / Open / Custom)'
     Write-Host '   5. Win32 programs     (uninstall + block re-appearance)'
     Write-Host '   6. Component store    (WinSxS analyze / cleanup via DISM)'
-    Write-Host '   9. Firewall           (IPv6 off / clean listing / allow-list / blacklist)'
+    Write-Host '   9. Firewall           (IPv6 off / clean listing / allow-list / block lists from your own files)'
     Write-Host '   S. Security+          (Defender, attack-surface rules, old protocols, UAC, report)'
     Write-Host '   W. Updates            (update gate, Windows Update / driver / Store policies, app updaters)'
     Write-Host '   N. Devices            (Bluetooth network, Wi-Fi Direct adapters, WAN Miniports)'
@@ -354,7 +367,7 @@ function Invoke-WHDUndoSubmenu {
         Write-Host '  ----------------------------------------------------------------'
         $hiddenN = @(Get-WHDUndoSessions -IncludeOtherPCs | Where-Object { $_.Owner -in @('other','legacy-other') }).Count
         Write-Host '   #. Open a session     B. Back'
-        Write-Host ('   H. History from other PCs / previous Windows installs: {0} hidden -> archive + tag this PC''s sessions' -f $hiddenN)
+        Write-Host ('   H. History from other PCs / previous Windows installs: {0} hidden -> archive + tag the current PC''s sessions' -f $hiddenN)
         $c = (Read-Host '  Select').Trim()
         if (Invoke-WHDGuardHotkey $c) { continue }
         if ($c -match '^[Bb]$' -or -not $c) { return }
@@ -366,7 +379,7 @@ function Invoke-WHDUndoSubmenu {
             Write-Host ''
             Write-Host ("  SESSION {0}" -f $sess.Stamp) -ForegroundColor White
             Write-Host '  [auto] = can be undone automatically   [manual] = see hint   [undone] = already undone' -ForegroundColor DarkGray
-            if ($entries.Count) { Show-WHDUndoEntries -Entries $entries } else { Write-Host '  (no journal - this session is from before Phase 5; use its backups below)' }
+            if ($entries.Count) { Show-WHDUndoEntries -Entries $entries } else { Write-Host '  (no journal - this session is from before the change journal existed; use its backups below)' }
             Write-Host ''
             Write-Host '   #   Undo one change (e.g. 3, or 3,5,7)'
             Write-Host '   A.  Undo ALL automatic changes in this session (newest first)'
@@ -401,6 +414,9 @@ try {
         Show-WHDMain
         $choice = (Read-Host '  Select').Trim()
         if (Invoke-WHDGuardHotkey $choice) { continue }
+        # An error in one menu action must not end the session: report it and show the menu again.
+        # ('break mainloop' still leaves the loop from inside this try; the switch keeps its indentation.)
+        try {
         switch -regex ($choice) {
             '^1$' {
                 $inv = Join-Path $script:WHDRoot 'Inventory.ps1'
@@ -422,13 +438,13 @@ try {
             }
             '^[Pp]$' {
                 $def = Join-Path $script:WHDRoot 'profiles\lean.json'
-                $pp = (Read-Host ("  Profile path [{0}]" -f $def)).Trim()
+                $pp = (Read-Host ("  Profile path [{0}]" -f $def)).Trim().Trim('"')
                 if (-not $pp) { $pp = $def }
                 Invoke-WHDApplyProfile -Path $pp
             }
             '^[Ee]$' {
                 $def = Join-Path $script:WHDRoot 'profiles\lean.json'
-                $pp = (Read-Host ("  Export starter profile to [{0}]" -f $def)).Trim()
+                $pp = (Read-Host ("  Export starter profile to [{0}]" -f $def)).Trim().Trim('"')
                 if (-not $pp) { $pp = $def }
                 Export-WHDProfile -Path $pp
             }
@@ -449,6 +465,7 @@ try {
             '^[Qq]$' { Write-WHDLog 'Quit selected.' 'INFO'; break mainloop }
             default  { Write-Host '  invalid.' -ForegroundColor Yellow }
         }
+        } catch { Write-WHDLog ("error: {0} - back at the main menu." -f $_.Exception.Message) 'ERR' }
     }
 }
 finally {

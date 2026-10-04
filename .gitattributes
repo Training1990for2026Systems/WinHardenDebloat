@@ -1,0 +1,3 @@
+# Keep every file byte-for-byte as committed (no line-ending conversion), so SHA256SUMS.txt
+# matches for people who clone the repository as well as for zip downloads.
+* -text
