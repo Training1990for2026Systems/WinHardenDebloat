@@ -165,9 +165,17 @@ function Invoke-WHDDefenderProtection {
     $note = switch ($Which) {
         'PUA'     { 'Blocks adware / bundleware / unwanted installers. Same as Windows Security > App & browser control > Reputation-based protection.' }
         'Network' { 'Blocks any app from reaching known-malicious sites (not only Edge). AUDIT = log only.' }
-        'Folders' { 'Only trusted apps may change protected folders (Documents, Pictures, Desktop...). AUDIT = log only; in Block mode allow an app in Windows Security > Ransomware protection.' }
+        'Folders' { 'Only trusted apps may change protected folders (Documents, Pictures, Videos, Music, Favorites; on some PCs also Desktop). AUDIT = log only; in Block mode allow an app in Windows Security > Ransomware protection.' }
     }
     Write-WHDRisk $(if ($Mode -eq 'On' -and $Which -eq 'Folders') { 'caution' } else { 'reversible' }) $note
+    if ($Mode -eq 'On' -and $Which -eq 'Folders') {
+        $cfaDir = ''
+        try { $cfaDir = Get-WHDProtectedFolderOfRoot } catch {}
+        if ($cfaDir) {
+            Write-WHDLog ("WHD runs from '{0}', inside the protected folder '{1}'. In BLOCK mode Windows does not treat PowerShell as a trusted app there: WHD's log may stop and later changes may not be recorded for undo." -f $script:WHDRoot, $cfaDir) 'WARN'
+            Write-WHDLog 'Better: do not switch it on now. Move the WHD folder outside the protected folders (for example C:\WHD), start WHD from there, then switch this on.' 'WARN'
+        }
+    }
     if (-not (Confirm-WHDProceed ("{0} -> {1}" -f $label, $Mode))) { Write-WHDLog 'skipped.' 'WARN'; return }
     Set-WHDMpPreference -Setting $setting -Value $val
 }

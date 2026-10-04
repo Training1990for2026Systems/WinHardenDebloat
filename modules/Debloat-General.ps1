@@ -181,7 +181,7 @@ function Invoke-WHDDisableDiagTrack {
     Invoke-WHDChange -Description 'stop + disable service DiagTrack' -Force -Journal $jr -Action {
         Stop-Service DiagTrack -Force -EA SilentlyContinue
         Set-Service  DiagTrack -StartupType Disabled -EA Stop
-    }
+    } | Out-Null
 }
 
 # ---- Classic 1.4: apps found on THIS PC (adaptability, user decisions 2026-09-30) ----
