@@ -1,0 +1,44 @@
+﻿{
+    "name":  "lean",
+    "description":  "Curated lean debloat for a fresh Win11 Home box (edit to taste).",
+    "ai":  {
+               "featureOff":  [
+                                  "copilot",
+                                  "bing",
+                                  "recall"
+                              ],
+               "remove":  [
+                              "copilot",
+                              "powerautomate",
+                              "phonelink",
+                              "webexp"
+                          ]
+           },
+    "storeSuppression":  true,
+    "general":  {
+                    "removeRecommended":  true,
+                    "remove":  [
+                                   "xboxapp",
+                                   "todos",
+                                   "sticky"
+                               ]
+                },
+    "privacyHardening":  true,
+    "disableDiagTrack":  true,
+    "permissions":  "Balanced",
+    "win32":  {
+                  "uninstall":  [
+
+                                ],
+                  "removeEverywhere":  [
+
+                                       ],
+                  "blockExe":  [
+
+                               ]
+              },
+    "componentCleanup":  {
+                             "run":  true,
+                             "resetBase":  false
+                         }
+}

@@ -1,0 +1,10 @@
+# WinHardenDebloat - never commit PC-specific data
+logs/
+inventory/
+restore/
+archive/
+publish/
+profiles/incoming/
+profiles/*.bak
+*.log
+REPORT.txt
