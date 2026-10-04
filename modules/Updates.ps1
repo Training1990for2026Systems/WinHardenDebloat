@@ -50,7 +50,7 @@ function Get-WHDGateState {
         Closed   = $closed
         Outbound = $out
         Since    = $(if ($s) { "$($s.Changed)" } else { '' })
-        Disabled = $(if ($s -and $s.DisabledRules) { @($s.DisabledRules) } else { @() })
+        Disabled = @(if ($s -and $s.DisabledRules) { $s.DisabledRules })
         PrevOutbound = $(if ($s) { "$($s.PrevOutbound)" } else { 'Allow' })
         Text     = $(if ($closed) { 'CLOSED' + $(if ($s) { " since $($s.Changed)" } else { '' }) } else { 'OPEN' + $(if ($s -and $s.Changed) { " since $($s.Changed)" } else { '' }) })
     }
@@ -94,10 +94,34 @@ function Get-WHDGateAllowSpecs {
 # ---- 1. the gate ---------------------------------------------------------------
 function Close-WHDUpdateGate {
     Write-WHDLog 'UPDATE GATE: CLOSE' 'ACT'
-    Write-WHDRisk 'hard' 'Outbound becomes default-deny. Only Microsoft Defender (engine, network inspection, updater, SmartScreen) and DNS-over-HTTPS may use HTTP/HTTPS. Windows Update, Microsoft Store, driver/manufacturer-app downloads, app updaters, browsers (Edge too) and the Claude desktop app are OFFLINE until you open the gate. DNS, DHCP and time (NTP) keep working. Every outbound allow rule the gate switches off is remembered and switched back on when you open it.'
+    Write-WHDRisk 'hard' 'Outbound becomes default-deny. Only Microsoft Defender (engine, network inspection, updater, SmartScreen) and DNS-over-HTTPS may use HTTP/HTTPS. Windows Update, Microsoft Store, driver/manufacturer-app downloads, app updaters, browsers (Edge too) and every other app are OFFLINE until you open the gate. DNS, DHCP and time (NTP) keep working. Every outbound allow rule the gate switches off is remembered and switched back on when you open it.'
     if (-not (Confirm-WHDProceed 'close the update gate (outbound default-deny, Defender + DoH only)')) { Write-WHDLog 'skipped.' 'WARN'; return }
+    # Read-only check before any change: with the gate closed, DNS is allowed only to the pinned servers, so an
+    # adapter that still uses other DNS servers (the router's, for example) would lose every name lookup.
+    $dnsBad = @()
+    try {
+        foreach ($na in @(Get-NetAdapter -EA Stop | Where-Object { $_.Status -eq 'Up' })) {
+            $dnsNow = @(Get-DnsClientServerAddress -InterfaceIndex $na.ifIndex -AddressFamily IPv4 -EA SilentlyContinue | ForEach-Object { $_.ServerAddresses } | Where-Object { $_ })
+            if (@($dnsNow | Where-Object { $script:WHDDnsServers -notcontains "$_" }).Count) { $dnsBad += ("{0} (DNS {1})" -f $na.Name, ($dnsNow -join ', ')) }
+        }
+    } catch { Write-WHDLog ("  could not check which DNS servers the network adapters use ({0}) - continuing without that check." -f $_.Exception.Message) 'WARN' }
+    if ($dnsBad.Count) {
+        $dnsWas = [bool](Get-WHDGateState).Closed
+        if ($script:WHDExecute) {
+            $dnsLead = if ($dnsWas) { 'Gate refresh refused - the gate stays closed as it was, nothing was changed.' } else { 'Gate NOT closed - nothing was changed.' }
+            Write-WHDLog ("{0} Adapter(s) not using the pinned DNS servers ({1}): {2}. With the gate closed their name lookups stop. Set DNS to the pinned servers first (Firewall menu D), then close the gate." -f $dnsLead, ($script:WHDDnsServers -join ', '), ($dnsBad -join '; ')) 'ERR'
+            New-WHDResult -Action 'close the update gate' -Status 'failed' -Detail 'adapter(s) not using the pinned DNS servers' | Out-Null
+            return
+        }
+        Write-WHDLog ("  would refuse to close the gate unless DNS is set to the pinned servers first ({0}; Firewall menu D, or network.dns = Cloudflare in a profile). Adapter(s) using other DNS now: {1}. Preview continues." -f ($script:WHDDnsServers -join ', '), ($dnsBad -join '; ')) 'WARN'
+    }
     # essentials first: DNS / DHCP / NTP allow-list (also holds the any-program HTTP/HTTPS rules we switch off)
-    if (-not @(Get-NetFirewallRule -Group $script:WHDFwGroupAllow -EA SilentlyContinue).Count) { Invoke-WHDFirewallAllowList }
+    if (Get-Command Test-WHDAllowListReady -EA SilentlyContinue) {
+        if (-not (Test-WHDAllowListReady)) {
+            $alCmd = Get-Command Invoke-WHDFirewallAllowList -EA SilentlyContinue
+            if ($alCmd -and $alCmd.Parameters -and $alCmd.Parameters.ContainsKey('NoConfirm')) { Invoke-WHDFirewallAllowList -NoConfirm } else { Invoke-WHDFirewallAllowList }
+        }
+    } elseif (-not @(Get-NetFirewallRule -Group $script:WHDFwGroupAllow -EA SilentlyContinue).Count) { Invoke-WHDFirewallAllowList }
     # Defender + DoH allows (rebuilt each close so a Defender platform update is picked up)
     Remove-WHDFwGroup -Group $script:WHDFwGroupGate
     foreach ($g in @(Get-WHDGateAllowSpecs)) {
@@ -119,20 +143,33 @@ function Close-WHDUpdateGate {
     $remember = @(@($old.Disabled) + $toOff + @($anyWeb) | Where-Object { $_ } | Select-Object -Unique)
     Write-WHDLog ("  switching off {0} other outbound allow rule(s) + {1} any-program web rule(s)" -f $toOff.Count, @($anyWeb).Count) 'INFO'
     $gOff = @($toOff) + @($anyWeb)
-    Invoke-WHDChange -Description ("gate: disable {0} outbound allow rule(s), outbound default-deny on all profiles" -f $gOff.Count) -Force -Action {
+    # Save the list of rules BEFORE the change, so it is not lost if the change is interrupted.
+    if ($script:WHDExecute) { _WHDSaveGateState -Closed $true -DisabledRules $remember -PrevOutbound $(if ($old.Closed) { $old.PrevOutbound } else { $prevOut }) }
+    $gRes = Invoke-WHDChange -Description ("gate: disable {0} outbound allow rule(s), outbound default-deny on all profiles" -f $gOff.Count) -Force -Action {
         Backup-WHDFirewallOnce
         foreach ($rn in $gOff) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
         Set-NetFirewallProfile -All -DefaultOutboundAction Block -Confirm:$false -EA Stop
-    } | Out-Null
+    } | Select-Object -Last 1
     if ($script:WHDExecute) {
+        if ("$($gRes.Status)" -ne 'done') {
+            # failed or skipped. A gate that was already closed stays closed (state saved above, outbound is still Block).
+            if ($old.Closed) { Write-WHDLog 'The update gate could not be closed again (see the line above). It stays closed as it was before.' 'ERR'; return }
+            # Otherwise: switch the rules from this attempt back on and record the gate as not closed.
+            foreach ($rn in $gOff) { Set-NetFirewallRule -Name $rn -Enabled True -EA SilentlyContinue }
+            _WHDSaveGateState -Closed $false -DisabledRules @($old.Disabled) -PrevOutbound $prevOut
+            Write-WHDLog 'The update gate could NOT be closed (see the line above). The rules it had switched off are switched back on; the gate is recorded as open.' 'ERR'
+            return
+        }
         Remove-WHDRollbackTask
-        _WHDSaveGateState -Closed $true -DisabledRules $remember -PrevOutbound $(if ($old.Closed) { $old.PrevOutbound } else { $prevOut })
         Write-WHDLog 'Update gate CLOSED. Open it (Updates menu O) when you want updates.' 'OK'
     }
 }
 function Open-WHDUpdateGate {
     Write-WHDLog 'UPDATE GATE: OPEN' 'ACT'
     $st = Get-WHDGateState
+    # Nothing to open unless the gate is closed (or its saved state still lists rules it switched off): outbound
+    # default-deny that was turned on separately (Firewall menu 6) is left alone.
+    if (-not $st.Closed -and -not @($st.Disabled | Where-Object { $_ }).Count) { Write-WHDLog 'The update gate is not closed - nothing to open.' 'INFO'; return }
     Write-WHDRisk 'caution' ("Puts back the {0} outbound allow rule(s) the gate switched off and outbound '{1}' (as before the gate closed). Windows Update, Store, drivers and app updaters can then download - the Windows Update / driver / Store policies still apply. Stays open until you close it." -f @($st.Disabled).Count, $st.PrevOutbound)
     if (-not (Confirm-WHDProceed 'open the update gate')) { Write-WHDLog 'skipped.' 'WARN'; return }
     $gOn = @($st.Disabled); $gOut = if ($st.PrevOutbound) { $st.PrevOutbound } else { 'Allow' }
@@ -155,7 +192,7 @@ $script:WHDUpdatePolicies = @(
         Ops=@(@{ P='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\DriverSearching'; N='SearchOrderConfig'; V=0; T='DWord' }
               @{ P='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Device Metadata'; N='PreventDeviceMetadataFromNetwork'; V=1; T='DWord' }
               @{ P='HKLM:\SOFTWARE\Policies\Microsoft\Windows\Device Metadata'; N='PreventDeviceMetadataFromNetwork'; V=1; T='DWord' })
-        Note='The Control Panel "Device installation settings" = No: Windows does not fetch drivers or manufacturer companion apps (Intel/Elevoc-type) when hardware appears. A feature update can reset SearchOrderConfig - Verify / the update guard will flag it.' }
+        Note='The Control Panel "Device installation settings" = No: Windows does not fetch drivers or manufacturer companion apps when hardware appears. A feature update can reset SearchOrderConfig - Verify / the update guard will flag it.' }
     [ordered]@{ Key='driverpolicy'; Name='Drivers: "Do not include drivers with Windows Updates" policy'
         Ops=@(@{ P='HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'; N='ExcludeWUDriversInQualityUpdate'; V=1; T='DWord' })
         Note='Microsoft documents it for Pro/Enterprise/Education and it is reported not to work on Home - set as a second lock; harmless if ignored.' }
@@ -231,7 +268,7 @@ function Disable-WHDAppUpdater {
 }
 function Invoke-WHDAppUpdatersOff {
     param([object[]]$Items, [switch]$EdgeOnly)
-    $list = if ($Items) { @($Items) } else { @(Find-WHDAppUpdaters) }
+    $list = @(if ($Items) { $Items } else { Find-WHDAppUpdaters })
     if ($EdgeOnly) { $list = @($list | Where-Object { $_.Edge }) }
     Write-WHDLog ("APP UPDATERS OFF: {0} item(s)" -f $list.Count) 'ACT'
     if (-not $list.Count) { Write-WHDLog 'Nothing found.' 'INFO'; return }
@@ -320,7 +357,7 @@ function Invoke-WHDUpdatesSubmenu {
                 $n = 0; foreach ($u in $all) { $n++; Write-Host ('  {0,3}. {1}' -f $n, $u.Label) }
                 $pick = (Read-Host '  Numbers to turn off (e.g. 1,3,4), A = all, Enter = none').Trim()
                 if (-not $pick) { continue }
-                $sel = if ($pick -match '^[Aa]$') { $all } else { @($pick -split '[,\s]+' | Where-Object { $_ -match '^\d+$' } | ForEach-Object { $all[[int]$_ - 1] } | Where-Object { $_ }) }
+                $sel = @(if ($pick -match '^[Aa]$') { $all } else { $pick -split '[,\s]+' | Where-Object { $_ -match '^\d{1,9}$' -and [int]$_ -ge 1 -and [int]$_ -le $all.Count } | ForEach-Object { $all[[int]$_ - 1] } | Where-Object { $_ } })
                 if ($sel.Count) { Invoke-WHDAppUpdatersOff -Items $sel }
             }
             '^[Dd]$'    { Invoke-WHDDefenderUpdateTest }

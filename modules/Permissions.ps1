@@ -36,7 +36,7 @@ $script:WHDCapabilities = @(
     [ordered]@{ Cap='cellularData';           Name='Cellular data';        Sensitive=$false }
     [ordered]@{ Cap='userDataTasks';          Name='Tasks';                Sensitive=$true }
     [ordered]@{ Cap='userNotificationListener';Name='Notifications access';Sensitive=$true }
-    [ordered]@{ Cap='activity';               Name='Activity/timeline';    Sensitive=$true }
+    [ordered]@{ Cap='activity';               Name='Motion / fitness';   Sensitive=$true }
     [ordered]@{ Cap='documentsLibrary';       Name='Documents library';    Sensitive=$false; Library=$true }
     [ordered]@{ Cap='picturesLibrary';        Name='Pictures library';     Sensitive=$false; Library=$true }
     [ordered]@{ Cap='videosLibrary';          Name='Videos library';       Sensitive=$false; Library=$true }
@@ -78,8 +78,16 @@ function Invoke-WHDPermissionProfile {
     Write-WHDLog ("PERMISSION PROFILE: {0}" -f $Profile) 'ACT'
     $tier = if ($Profile -eq 'Open') { 'caution' } else { 'reversible' }
     Write-WHDRisk $tier ("Sets the global 'Let apps access ...' switches (HKCU + HKLM). {0}" -f `
-        $(switch($Profile){'Lockdown'{'Denies every listed capability.'}'Balanced'{'Denies sensitive capabilities; libraries set to Prompt.'}'Open'{'Resets everything to Allow.'}}))
+        $(switch($Profile){'Lockdown'{'Denies every listed capability.'}'Balanced'{'Denies sensitive capabilities; libraries set to Prompt. Removes the Lock policy values, if any.'}'Open'{'Resets everything to Allow and removes the Lock policy values, if any.'}}))
     if (-not (Confirm-WHDProceed ("apply {0} permission profile" -f $Profile))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    if ($Profile -eq 'Open' -or $Profile -eq 'Balanced') {
+        # Lock's App Privacy policy values (Force Deny) keep a switch OFF and greyed out whatever the consent store says.
+        $lockSet = @($script:WHDAppPrivacyPolicy.Values | Where-Object { (Get-WHDRegValueState -Path $script:WHDAppPrivacyKey -Name $_).Exists })
+        if ($lockSet.Count) {
+            Write-WHDLog (("Lock policy: {0} App Privacy value(s) found - " + $(if ($script:WHDExecute) { 'they are removed' } else { 'they would be removed' }) + " so the switches can be changed again.") -f $lockSet.Count) 'INFO'
+            foreach ($pn in $lockSet) { Remove-WHDRegistryValue -Path $script:WHDAppPrivacyKey -Name $pn | Out-Null }
+        }
+    }
     foreach ($c in $script:WHDCapabilities) {
         $v = Get-WHDProfileValue -CapEntry $c -Profile $Profile
         Set-WHDCapability -Cap $c.Cap -Value $v -MachineToo
@@ -136,7 +144,7 @@ function Get-WHDPrivacyLockState {
 }
 function Invoke-WHDPrivacyLock {
     Write-WHDLog 'PERMISSION PROFILE: Lock (App Privacy policy = Force Deny; camera + microphone + radios + location off, not locked)' 'ACT'
-    Write-WHDRisk 'reversible' ('Every listed switch -> Deny (this user + PC-wide + desktop apps). Policy Force Deny for {0} categories, so Settings shows them OFF and greyed out. Camera, microphone, radios (Bluetooth/Wi-Fi control) and location: OFF but NOT locked - you can switch them on in Settings, and Verify leaves your choice alone. An older Lock on radios or location is removed. Documents/Pictures/Videos/Cellular/File system: no Windows policy exists - Deny only. Microsoft lists the policy for Pro and up; on Home it is tried - check Settings after a restart. Journaled (Undo center).' -f @($script:WHDAppPrivacyPolicy.Keys | Where-Object { $script:WHDPrivacyLockKeep -notcontains $_ }).Count)
+    Write-WHDRisk 'reversible' ('Every listed switch -> Deny (this user + PC-wide + desktop apps). Policy Force Deny for {0} categories, so Settings shows them OFF and greyed out. Camera, microphone, radios (Bluetooth/Wi-Fi control) and location: OFF but NOT locked - you can switch them on in Settings, and Verify leaves your choice alone (running Lock again switches them off again). An older Lock on radios or location is removed. Documents/Pictures/Videos/Cellular/File system: no Windows policy exists - Deny only. Microsoft lists the policy for Pro and up; on Home it is tried - check Settings after a restart. Journaled (Undo center).' -f @($script:WHDAppPrivacyPolicy.Keys | Where-Object { $script:WHDPrivacyLockKeep -notcontains $_ }).Count)
     $ops = @(Get-WHDPrivacyLockOps)
     $stale = @(Get-WHDPrivacyLockStale)
     if ((Get-WHDRegOpsState -Ops $ops) -eq 'set' -and -not $stale.Count) { Write-WHDLog 'Already locked - nothing to change.' 'OK'; return }
@@ -149,8 +157,9 @@ function Invoke-WHDPrivacyLock {
         Set-WHDRegistryValue -Path $op.P -Name $op.N -Value $op.V -Type $op.T | Out-Null
         $n++
     }
-    Write-WHDLog ("Lock: {0} value(s) written, {1} already right." -f $n, ($ops.Count - $n)) 'OK'
-    Write-WHDLog 'Restart the PC, then open Settings > Privacy & security: locked switches show OFF and greyed. If any still show ON, send me a screenshot of that page.' 'INFO'
+    $sumFmt = if ($script:WHDExecute) { 'Lock: {0} value(s) written, {1} already right.' } else { 'Lock: would write {0} value(s), {1} already right.' }
+    Write-WHDLog ($sumFmt -f $n, ($ops.Count - $n)) 'OK'
+    Write-WHDLog 'Restart the PC, then open Settings > Privacy & security: locked switches show OFF and greyed. If any still show ON, Windows Home is not applying that policy; run Verify (main menu V, or the GUI Inventory / Undo tab) to see which values stuck.' 'INFO'
 }
 
 function Invoke-WHDPermissionCustom {
@@ -290,7 +299,7 @@ function Show-WHDPermMenu {
         Write-Host $cur -ForegroundColor $col
     }
     Write-Host '  ----------------------------------------------------------------'
-    Write-Host ('   L. Lock      (deny all + Windows policy lock; camera/mic/radios off, not locked)   [{0}]' -f (Get-WHDPrivacyLockState))
+    Write-Host ('   L. Lock      (deny all + Windows policy lock; camera/mic/radios/location off, not locked)   [{0}]' -f (Get-WHDPrivacyLockState))
     Write-Host '   1. Lockdown  (deny everything)'
     Write-Host '   2. Balanced  (deny sensitive; libraries prompt)'
     Write-Host '   3. Open      (reset everything to Allow)'

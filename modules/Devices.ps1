@@ -145,7 +145,7 @@ function Invoke-WHDWifiDirectOff {
 # ---- 3. WAN Miniports ------------------------------------------------------------
 function Invoke-WHDWanMiniportsOff {
     Write-WHDLog 'DEVICES: WAN Miniports - block re-install, then remove' 'ACT'
-    Write-WHDRisk 'hard' 'Dial-up, the built-in Windows VPN and PPPoE will not work (your ISP router does the connecting, so this PC does not need them). The block is added FIRST, then each WAN Miniport is removed with pnputil. Undo: the block is auto-undo; the removed devices come back by removing the block and then Settings > Network & internet > Advanced network settings > Network reset.'
+    Write-WHDRisk 'hard' 'Dial-up, the built-in Windows VPN client and PPPoE connections made by the PC itself will not work. WAN Miniports are only needed for those; do not remove them if this PC uses any of them. The block is added FIRST, then each WAN Miniport is removed with pnputil. Undo: the block is auto-undo; the removed devices come back by removing the block and then Settings > Network & internet > Advanced network settings > Network reset.'
     $ras = Get-Service -Name RasMan -EA SilentlyContinue
     if ($ras -and "$($ras.StartType)" -ne 'Disabled') { Write-WHDLog 'Note: RasMan (dial-up/VPN) is not disabled - it re-creates WAN Miniports. Turn it off too: Security+ N3.' 'WARN' }
     $devs = @(Get-WHDWanDevices)
@@ -155,21 +155,26 @@ function Invoke-WHDWanMiniportsOff {
     $ids = @($script:WHDWanIds)
     foreach ($d in $devs) { $ids += @(Get-WHDDeviceHwIds -Device $d | Where-Object { $_ -match '^ms_' }) }
     Add-WHDDenyDeviceIds -Ids $ids
+    $script:WHDPnpRestartNeeded = $false
     foreach ($d in $devs) {
         $wmId = "$($d.InstanceId)"; $wmName = "$($d.FriendlyName)"
         $jr = @{ Kind = 'action'; InstanceId = $wmId; Name = $wmName
                  Hint = 'remove the WAN Miniport block (Undo center, the DenyDeviceIDs lines), turn RasMan back on, then Settings > Network & internet > Advanced network settings > Network reset' }
         Invoke-WHDChange -Description ("remove device {0}" -f $wmName) -Force -Journal $jr -Action {
             $r = Invoke-WHDNative -Exe 'pnputil.exe' -ArgList @('/remove-device', $wmId)
-            if ($r.Code -ne 0) { throw ("pnputil exit {0}: {1}" -f $r.Code, (($r.Out | Select-Object -Last 2) -join ' ')) }
+            # pnputil: 0 = removed; 3010 / 1641 = removed, restart needed to finish
+            if (@(0, 3010, 1641) -notcontains $r.Code) { throw ("pnputil exit {0}: {1}" -f $r.Code, (($r.Out | Select-Object -Last 2) -join ' ')) }
+            if ($r.Code -ne 0) { $script:WHDPnpRestartNeeded = $true }
         } | Out-Null
     }
+    if ($script:WHDPnpRestartNeeded) { Write-WHDLog 'A restart is needed to finish removing the devices.' 'INFO' }
     Write-WHDLog 'Restart, then Devices S: WAN Miniports should stay gone.' 'INFO'
 }
 
 # ---- status ----------------------------------------------------------------------
 function Show-WHDDevicesStatus {
     Write-WHDLog '================ DEVICES STATUS (read-only) ================' 'ACT'
+    if ("$((Get-UICulture).Name)" -notlike 'en*') { Write-WHDLog 'Devices are matched by their English names; on this display language they may not be found.' 'WARN' }
     $bt = @(Get-WHDBtPanAdapters)
     if (-not $bt.Count) { Write-WHDLog 'Bluetooth network adapter : none' 'OK' }
     foreach ($a in $bt) {
@@ -191,7 +196,7 @@ function Show-WHDDevicesStatus {
     $ids = @(Get-WHDDenyIds)
     Write-WHDLog ("Install block             : {0}, {1} ID(s) listed" -f $(if ($pol.Exists -and [int]$pol.Value -eq 1) { 'ON' } else { 'off' }), $ids.Count) 'INFO'
     if (($wan.Count -or @($wfd | Where-Object { -not (Test-WHDDeviceDisabled $_) }).Count) -and $ids.Count) {
-        Write-WHDLog 'Blocked devices are back or enabled - Windows Home may be ignoring the install block. Tell Claude / re-run the step.' 'WARN'
+        Write-WHDLog 'Blocked devices are back or enabled - Windows Home may be ignoring the install block. Run the step again; if they keep coming back, this edition of Windows is not applying the install-block policy.' 'WARN'
     }
     Write-WHDLog '================ END ================' 'ACT'
 }

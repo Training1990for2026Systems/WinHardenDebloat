@@ -1,6 +1,6 @@
 {
   "name": "baseline",
-  "description": "WinHardenDebloat firewall baseline. Offline, native, editable. Ships SAFE: default-deny outbound is OFF until you flip it. IPv6 suppressed per D2 (loopback ::1 preserved). DNS pinned to Cloudflare malware-filtering resolver 1.1.1.2/1.0.0.2 over encrypted DoH (menu D); HTTP/HTTPS open to Any = 'practical strict'. IP blocklist = curated Spamhaus+DShield. Apply via WHD.ps1 firewall menu (A) or Invoke-WHDApplyFirewallProfile.",
+  "description": "WinHardenDebloat firewall baseline. Offline, native, editable. Ships SAFE: default-deny outbound is OFF until you flip it. IPv6 suppressed (loopback ::1 preserved). DNS pinned to Cloudflare malware-filtering resolver 1.1.1.2/1.0.0.2 over encrypted DoH (menu D); HTTP/HTTPS open to Any = 'practical strict'. Block lists are NOT included: an IP list is applied only if you put your own profiles\\blacklist-ip.txt there (see Firewall F / profiles\\incoming). Apply via WHD.ps1 firewall menu (A) or Invoke-WHDApplyFirewallProfile.",
   "profileDefaults": {
     "inbound": "Block",
     "outbound": "Allow"
@@ -27,8 +27,8 @@
   "_notes": [
     "Practical strict: set defaultDenyOutbound to true to block all outbound except this allow-list. HTTP/HTTPS stay open to Any so browsing + Windows Update keep working; DNS is pinned to Cloudflare 1.1.1.2/1.0.0.2 (malware filter).",
     "To change resolver: edit the two DNS remoteAddress arrays here AND $script:WHDDnsServers + $script:WHDDohTemplate in modules\\Firewall.ps1 (templates for 1.1.1.1 / 1.1.1.2 / 1.1.1.3 are listed there).",
-    "blacklist-ip.txt is a small curated 'known really bad' set (Spamhaus DROP/EDROP + DShield), applied inbound+outbound. The engine safety-guards every entry and skips any broadcast/multicast/private/reserved range, so a bad list can't break DHCP/LAN again.",
-    "DOMAIN blocking (plan C) is done at the resolver, not a host sinkhole: menu D sets Cloudflare 1.1.1.2 (malware) + encrypted DoH. Change to 1.1.1.3 for malware+adult. The 76k hosts sinkhole (menu H) still exists for manual/offline use but is NOT applied by this baseline.",
+    "Block lists are NOT included. The baseline applies an IP list (inbound+outbound block rules) only if you put your own profiles\\blacklist-ip.txt there (see Firewall F / profiles\\incoming); without that file it logs a warning and blocks nothing. The engine safety-guards every entry and skips any broadcast/multicast/private/reserved range, so a bad list can't break DHCP/LAN.",
+    "DOMAIN blocking is done at the resolver, not a host sinkhole: menu D sets Cloudflare 1.1.1.2 (malware) + encrypted DoH. Change to 1.1.1.3 for malware+adult. The hosts sinkhole (menu H) needs your own profiles\\blacklist-hosts.txt and is NOT applied by this baseline.",
     "When defaultDenyOutbound is true, an auto-rollback task reverts outbound to Allow after rollbackMinutes unless you run Confirm-WHDDefaultDenyKeep.",
     "For MAX strict (allow-listed destinations only), remove the HTTP/HTTPS entries and add explicit destination allow rules with remoteAddress."
   ]

@@ -22,15 +22,15 @@
 $script:WHDGeneralApps = @(
     [ordered]@{ Key='clipchamp';   Name='Clipchamp (video editor)';        Package='Clipchamp.Clipchamp';                 Risk='reversible'; Rec=$true;  Note='Store video editor.' }
     [ordered]@{ Key='solitaire';   Name='Solitaire Collection';            Package='Microsoft.MicrosoftSolitaireCollection'; Risk='reversible'; Rec=$true;  Note='Ad-supported game.' }
-    [ordered]@{ Key='todos';       Name='Microsoft To Do';                 Package='Microsoft.Todos';                     Risk='reversible'; Rec=$false; Note='Task app.' }
-    [ordered]@{ Key='sticky';      Name='Sticky Notes';                    Package='Microsoft.MicrosoftStickyNotes';      Risk='reversible'; Rec=$false; Note='Notes app.' }
+    [ordered]@{ Key='todos';       Name='Microsoft To Do';                 Package='Microsoft.Todos';                     Risk='caution';    Rec=$false; Note='Task app. Removing it deletes local tasks that were not synced.' }
+    [ordered]@{ Key='sticky';      Name='Sticky Notes';                    Package='Microsoft.MicrosoftStickyNotes';      Risk='caution';    Rec=$false; Note='Notes app. Removing it deletes notes that were not synced to a Microsoft account.' }
     [ordered]@{ Key='feedback';    Name='Feedback Hub';                    Package='Microsoft.WindowsFeedbackHub';        Risk='reversible'; Rec=$true;  Note='Sends feedback to Microsoft.' }
     [ordered]@{ Key='gethelp';     Name='Get Help';                        Package='Microsoft.GetHelp';                   Risk='reversible'; Rec=$true;  Note='Support app.' }
     [ordered]@{ Key='quickassist'; Name='Quick Assist';                    Package='MicrosoftCorporationII.QuickAssist';  Risk='reversible'; Rec=$false; Note='Remote assistance - remove if unused (also an abuse vector).' }
     [ordered]@{ Key='devhome';     Name='Dev Home';                        Package='Microsoft.Windows.DevHome';           Risk='reversible'; Rec=$true;  Note='Developer dashboard.' }
     [ordered]@{ Key='family';      Name='Microsoft Family';                Package='MicrosoftCorporationII.MicrosoftFamily'; Risk='reversible'; Rec=$false; Note='Family safety.' }
     [ordered]@{ Key='outlooknew';  Name='Outlook for Windows (new)';       Package='Microsoft.OutlookForWindows';         Risk='reversible'; Rec=$false; Note='New Outlook web app.' }
-    [ordered]@{ Key='teams';       Name='Microsoft Teams (personal)';      Package='MSTeams';                             Risk='reversible'; Rec=$true;  Note='Consumer Teams/chat.' }
+    [ordered]@{ Key='teams';       Name='Microsoft Teams';                 Package='MSTeams';                             Risk='reversible'; Rec=$true;  Note='Teams app (the same app is used for personal and work/school accounts).' }
     [ordered]@{ Key='crossdevice'; Name='Cross Device (Link to Windows)';  Package='MicrosoftWindows.CrossDevice';        Risk='caution';    Rec=$false; Note='Phone/cross-device integration; removal may affect Phone Link.' }
     [ordered]@{ Key='alarms';      Name='Clock / Alarms';                  Package='Microsoft.WindowsAlarms';             Risk='reversible'; Rec=$false; Note='Clock, timers, alarms.' }
     [ordered]@{ Key='soundrec';    Name='Sound Recorder';                  Package='Microsoft.WindowsSoundRecorder';      Risk='reversible'; Rec=$false; Note='Voice recorder.' }
@@ -144,7 +144,7 @@ function Test-WHDAppPresent {
 function Invoke-WHDGeneralRemove {
     param($Entry)
     Write-WHDLog ("REMOVE: {0}  ({1})" -f $Entry.Name, $Entry.Package) 'ACT'
-    Write-WHDRisk $Entry.Risk $Entry.Note
+    Write-WHDRisk $Entry.Risk ("{0} Store apps are removed for ALL users of the PC and the app's local data is deleted; undo = reinstall from the Store." -f $Entry.Note)
     if (-not (Confirm-WHDProceed ("remove {0}" -f $Entry.Name))) { Write-WHDLog 'skipped.' 'WARN'; return }
     Remove-WHDAppxAllUsers -NameLike $Entry.Package
     Remove-WHDProvisioned  -NameLike $Entry.Package
@@ -192,8 +192,10 @@ function Test-WHDMicrosoftPublisher { param([string]$Publisher) $Publisher -matc
 function Get-WHDFoundApps {
     $prov = @(Get-AppxProvisionedPackage -Online -EA SilentlyContinue | ForEach-Object { "$($_.DisplayName)" })
     $seen = @{}
+    $fixed = @($script:WHDGeneralApps | ForEach-Object { "$($_.Package)" })   # already in the fixed list above (e.g. Clipchamp)
     $list = @(Get-AppxPackage -AllUsers -EA SilentlyContinue | Where-Object {
-        -not $_.IsFramework -and -not $_.IsResourcePackage -and -not $_.NonRemovable -and -not (Test-WHDMicrosoftPublisher "$($_.Publisher)")
+        -not $_.IsFramework -and -not $_.IsResourcePackage -and -not $_.NonRemovable -and -not (Test-WHDMicrosoftPublisher "$($_.Publisher)") -and
+        ($fixed -notcontains "$($_.Name)")
     } | ForEach-Object {
         if ($seen.ContainsKey("$($_.Name)")) { return }
         $seen["$($_.Name)"] = $true

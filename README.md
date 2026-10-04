@@ -1,12 +1,40 @@
 > **WinHardenDebloat (WHD)** - by **Training1990for2026Systems** - contact: t90018273@gmail.com
 > License: [MIT](LICENSE) - Security reports: see [SECURITY.md](SECURITY.md) - Built with Claude by Anthropic.
 
+**Version: Classic 1.4.1** (2026-10-03) - runs on Windows PowerShell 5.1, which is built into Windows.
+
 # WinHardenDebloat
 
-Native, offline toolkit to debloat and harden a fresh **non-domain Windows 11 24H2/25H2** install.
-No third-party APIs. Everything runs on PowerShell, DISM, the registry, and AppLocker.
+Native, offline toolkit to debloat and harden a fresh **non-domain Windows 11** install.
+No third-party APIs. Everything runs on Windows PowerShell 5.1, DISM and the registry (the inventory also reads the AppLocker policy).
 
-Full design: see `docs\architecture-spec.md` (or the interactive spec in Claude).
+## Read this before you run it
+
+WHD changes Windows security, network, update and privacy settings and removes apps. It is released under the
+[MIT License](LICENSE): **as is, with no warranty**. You run it at your own risk.
+
+- **Tested on one PC only:** a Windows 11 Home laptop (versions 25H2 and 26H2). Other editions, versions, languages and
+  hardware are untested.
+- **Try it on a spare PC or a fresh install first**, and back up anything you cannot lose.
+- **Start with a dry run.** WHD opens in DRY-RUN mode and only shows what it would do. Nothing changes until you switch to EXECUTE.
+- **Read what a profile does before you apply it.** `profiles\standard.json` and `profiles\validated.json` are the strict setup of
+  the one test PC, not a general default. Among other things they delete every Windows Firewall rule, turn off file sharing (SMB),
+  the built-in VPN and dial-up, remove the WAN Miniport devices, turn off IPv6, set DNS to Cloudflare, switch ransomware folder
+  protection and the attack-surface rules to BLOCK, set password and lockout rules, remove Paint and Photos, uninstall OneDrive, and
+  stop automatic Windows, driver, Store and Edge updates. `profiles\lean.json` is the small starter profile.
+- **If you turn off automatic updates, installing security updates is up to you.**
+- **Not everything can be undone.** WHD tries to make a System Restore point before the first change and records every change, but:
+  - removing a Store app removes it for all users and deletes that app's local data (for example notes that were never synced);
+    undo means reinstalling the app;
+  - uninstalled desktop programs, deleted scheduled tasks and autostart entries (Win32 menu **R**), DISM ResetBase and removed
+    WAN Miniports do not come back through the Undo center;
+  - most firewall changes are undone by restoring that session's firewall backup (Undo center **F**), not one by one;
+    DNS and IPv6 are put back with Firewall **U** (DNS back to automatic) and Firewall **3** (re-enable IPv6);
+  - if Windows cannot create the restore point, WHD warns and continues.
+- **If you lose the network:** Firewall **8** (revert default-deny), Updates **O** (open the update gate), Undo center **F**
+  (restore the firewall saved before that session), or in an administrator window `netsh advfirewall reset`.
+
+Guides in `docs\`: `firewall-module.md`, `standard-reimage.md`, `radio-group-test.md`, `update-review-2026-09-29.md`.
 
 ---
 
@@ -28,7 +56,7 @@ Full design: see `docs\architecture-spec.md` (or the interactive spec in Claude)
 Open **Windows PowerShell** (the script self-elevates via a UAC prompt if not already admin):
 
 ```powershell
-cd "$env:USERPROFILE\Documents\WinHardenDebloat"
+cd "C:\path\to\WinHardenDebloat"   # the folder you unpacked or cloned
 powershell -ExecutionPolicy Bypass -File .\Inventory.ps1
 ```
 
@@ -54,7 +82,7 @@ script still runs and clearly marks those two sections as skipped.
 
 **See the full plan without picking anything (recommended first):**
 ```powershell
-cd "$env:USERPROFILE\Documents\WinHardenDebloat"
+cd "C:\path\to\WinHardenDebloat"   # the folder you unpacked or cloned
 powershell -ExecutionPolicy Bypass -File .\WHD.ps1 -Plan
 ```
 `-Plan` is non-interactive: it prints every feature-off / remove / suppression
@@ -66,7 +94,7 @@ first**, so the menu runs in that same window and your keystrokes reach it:
 1. Start menu → type `PowerShell` → right-click → **Run as administrator**.
 2. Then:
 ```powershell
-cd "$env:USERPROFILE\Documents\WinHardenDebloat"
+cd "C:\path\to\WinHardenDebloat"   # the folder you unpacked or cloned
 powershell -ExecutionPolicy Bypass -File .\WHD.ps1
 ```
 Opens the menu in **DRY-RUN** mode (nothing changes). If you run it from a
@@ -78,13 +106,12 @@ AI debloat (feature-off / remove per surface), toggle to EXECUTE mode. In
 EXECUTE mode every action still asks y/N and a System Restore point is made
 before the first change. `-Execute` starts in execute mode.
 
-Environment note: this machine is **Windows 11 Home** — reinstall-blocking uses
-registry keys + deprovision + Store suppression (no AppLocker on Home). WDAC is
-a deferred optional add-on.
+Environment note: Windows 11 Home has no AppLocker, so reinstall-blocking uses
+registry keys + deprovision + Store suppression. WDAC is a deferred optional add-on.
 
 ## Status
 - [x] Spec approved
-- [x] Inventory module — verified against this machine
+- [x] Inventory module — verified on the test PC
 - [x] Safety engine (`modules\Common.ps1`) — dry-run gate, restore point, backups, logging
 - [x] AI debloat module (`modules\Debloat-AI.ps1`) — feature-off + app-remove per surface
 - [x] Launcher (`WHD.ps1`) — menu-driven, self-elevating, `-Plan` non-interactive mode
@@ -92,7 +119,7 @@ a deferred optional add-on.
 - [x] Permission profiles (`modules\Permissions.ps1`) — Lockdown / Balanced / Open / Custom via CapabilityAccessManager
 - [x] Component store maintenance (`modules\Maintenance.ps1`) — DISM analyze / cleanup / ResetBase
 - [x] Win32 program removal (`modules\Debloat-Win32.ps1`) — uninstall + find + block re-appearance
-- [x] **Phase 2: engine/UI split + JSON profile runner** (`modules\Profiles.ps1`, `docs\engine-contract.md`)
+- [x] **Phase 2: engine/UI split + JSON profile runner** (`modules\Profiles.ps1`)
 - [x] **Phase 3: WPF GUI** (`WHD-GUI.ps1`) over the engine
 - [x] **Phase 5: groundwork** — change journal + Undo center (F20), verify-after-apply (F21),
       inventory comparison (A3), wider AI detection (A1)
@@ -111,13 +138,13 @@ powershell -ExecutionPolicy Bypass -File .\WHD-GUI.ps1
 ```
 Self-elevates. Opens in **DRY-RUN**; tick **EXECUTE (apply changes)** to make real
 changes (each destructive action then asks Yes/No, restore point first). Tabs:
-AI, General, Permissions, Win32, Component store, Profiles, Inventory. Live log
-pane at the bottom mirrors `logs\`.
+Firewall, Updates, Security+, AI, General, Permissions, Win32, Component store,
+Profiles, Inventory / Undo. Live log pane at the bottom mirrors `logs\`.
 
 ## Phase 2 — profiles (reproduce on a fresh image)
-The engine is now separated from the UI (`docs\engine-contract.md`): the confirm
+The engine is separated from the UI: the confirm
 strategy is injected by the caller and every action records a structured result,
-so the menu, the profile runner, and a future GUI all drive the same functions.
+so the menu, the profile runner and the GUI all drive the same functions.
 Profiles are JSON in `profiles\`; a starter `lean.json` ships — edit to taste.
 ```powershell
 # preview what a profile would do (no changes)
@@ -137,7 +164,7 @@ Every change made in EXECUTE mode is now recorded, one line per change, in
 
 - **Undo center** (menu **U**, GUI tab **Inventory / Undo**): pick a session, then undo
   one change, several (`3,5,7`), or the whole session. Undo runs newest-first and is
-  itself recorded, so an undo can be undone.
+  itself recorded; registry undos can be undone again.
   - `auto`: registry values (exact old value put back, or deleted if it did not exist),
     the DiagTrack service start type, and optional features (re-enable).
   - `manual`: removed apps (reinstall from the Store) and other actions. Use the
@@ -165,10 +192,15 @@ Every change made in EXECUTE mode is now recorded, one line per change, in
 - **M / O**: Windows Firewall log on/off (default file, dropped + allowed, 32,767 KB; v1.3).
 - **V**: view blocked connections and allow a program on that port (outbound only; Windows
   services and inbound are refused). **G** removes all program allows.
-- **T / N / S**: time sync to time.cloudflare.com (UDP 123 pinned **+ 1 h time-jump limit**, refused jumps alerted by the update guard) / Windows default (and default time settings) / status. See `docs\nts-option3-plan.md` for why NTS itself isn't possible on Windows yet.
+- **T / N / S**: time sync to time.cloudflare.com (UDP 123 pinned **+ 1 h time-jump limit**, refused jumps alerted by the update guard) / Windows default (and default time settings) / status. NTS (authenticated time) is not included: the Windows Time service does not support it.
 - **F**: refresh the IP blocklist from files in `profiles\incoming` (preview → merge or replace →
   optionally rebuild rules). GUI: Firewall tab, including a "Blocked connections" sub-tab.
-All of it is journaled, so the Undo center (menu **U**) can reverse it.
+- **Block lists are not included in this repository** (they are other people's data). Put your own list files in
+  `profiles\incoming` (WHD creates the folder) and use **F**. Until you do, **9** (Block IP list) and **H** (Hosts sinkhole)
+  report "not found" and change nothing.
+All of it is recorded in the journal. The firewall log setting, program allows, the time-sync registry values and the blocklist
+file undo automatically from the Undo center (menu **U**). Rules, default actions, DNS and IPv6 are listed there as manual:
+use that session's firewall backup (**F** in the Undo center) and the reset options in the Firewall menu.
 
 ## Phase 7 — AI switch-offs, privacy, permissions
 - **AI (menu 2 / GUI AI tab):** new policy switches — *Click to Do + Settings AI agent*,
@@ -210,8 +242,8 @@ Checks after Windows updates that nothing WHD set or removed has quietly come ba
 - **G. Install / refresh:** copies `WHD.ps1`, `Inventory.ps1` and `modules\*.ps1` to
   `C:\ProgramData\WinHardenDebloat\guard` (owner Administrators; Administrators + SYSTEM full,
   Users read-only) and adds scheduled task `\WinHardenDebloat\UpdateGuard`: **10 minutes after you
-  sign in**, runs as you with highest privileges, only while signed in. The protected copy stops a
-  user-level program from editing the scripts to get admin rights. **Press G again after updating
+  sign in**, runs as you with highest privileges, only while signed in. The copy is locked (standard users
+  can only read it) to make it harder for a user-level program to edit the scripts the task runs. **Press G again after updating
   the tool** to refresh the copy. Undo (U) or **GX** removes the task and the copy.
 - **Each check:**
   1. Skips if Windows is waiting for a restart; waits up to 30 min if updates are still installing.
@@ -228,7 +260,7 @@ Checks after Windows updates that nothing WHD set or removed has quietly come ba
 > **2026-09-29:** `validated.json` now has exactly the same settings as `profiles\standard.json` (user decision, after radio test
 > rounds 1-8 passed). The 2026-09-25 description below is kept for history; the current contents are in `docs\standard-reimage.md`
 > and `docs\radio-group-test.md`. Either profile gives the same result.
-Repeats everything live-tested on the original PC in **one run** (one yes/no, no menus):
+Repeats everything live-tested on the test PC in **one run** (one yes/no, no menus):
 AI feature-off (9) + AI remove (Copilot, Power Automate, Bing, Widgets, Phone Link - **Notepad, Paint, Photos kept**, their AI off),
 Store suppression, 21 Store apps, privacy hardening + DiagTrack + 6 extra privacy settings, Security+ (PUA, network + folder
 protection BLOCK, 14 ASR in Audit, LLMNR/NetBIOS/WPAD/Remote Assistance off, UAC Always notify, password rules), permissions
@@ -237,7 +269,7 @@ component cleanup, and the **update guard last**.
 **Not included:** default-deny outbound (turn on by hand after: Firewall 6, then 7), per-app microphone denials.
 **Fresh install order:** Windows Update until done → copy the tool → Inventory (1) → `WHD.ps1 -Apply profiles\validated.json`
 (dry run) → same with `-Execute` → restart (IPv6 change) → V (verify) → Inventory (1) again → Firewall 6 + 7 if wanted.
-**On the original PC use the dry run only** (its firewall step would set outbound back to Allow).
+**On a PC that is already set up, start with the dry run** and read the list before adding `-Execute`.
 New profile section `"network": { "timeSync", "firewallProfile", "dns", "connectionLogging" }`.
 
 ## v1.1 - per-PC history (2026-09-27)
@@ -259,7 +291,7 @@ Windows Update still waited for you. The old allow-list keeps HTTPS open to **ev
     MpCmdRun in the current platform folder, MpCmdRun in Program Files, SmartScreen) and **DNS-over-HTTPS** (Dnscache ->
     1.1.1.2 / 1.0.0.2). The any-program HTTP/HTTPS rules **and every other enabled outbound allow rule** (Windows' built-in app
     rules too) are switched off and remembered. DNS, DHCP and NTP keep working.
-  - **Offline while closed:** Windows Update, the Store, drivers, app updaters, browsers (Edge too) and the Claude desktop app.
+  - **Offline while closed:** Windows Update, the Store, drivers, app updaters, browsers (Edge too) and every other app that needs the internet.
   - **Open:** everything the gate switched off comes back, and outbound goes back to what it was. It stays open until you close it.
   - **After Defender updates itself** (new platform folder), close the gate again; Status warns you.
 - **Policies (1-4, A = all).** Microsoft documents these for Pro/Enterprise/Education. On Home they are *tried*, and Status shows
@@ -277,10 +309,11 @@ Windows Update still waited for you. The old allow-list keeps HTTPS open to **ev
   - rebuilding the allow-list keeps HTTP/HTTPS off while the gate is closed
   - "revert default-deny" refuses while the gate is closed (use O)
 - The update guard report shows the gate state (information only, not an alert).
-- `validated.json` now has `"updates"` (all four policies, Edge + OneDrive updaters off, `"gate": "closed"` as the LAST step).
-  **Run it before first connecting to the internet.** Open the gate when you want updates.
+- `validated.json` has `"updates"` (all four policies, Edge updater off). Both shipped profiles now leave the
+  **update gate open** (`"gate": ""`); set `"gate": "closed"` in your own profile to close it as the last step.
+  The profiles are meant to be run before the PC first goes online.
 
-## v1.2 - network services off + permission Lock (2026-09-27, not yet live-tested)
+## v1.2 - network services off + permission Lock (2026-09-27; live-tested 2026-09-28/29, see `docs\radio-group-test.md`)
 
 **Security+ N1-N6 / NA** (GUI: Security+ tab, "Network services"). Each group sets the services' registry
 `Start` value to 4 (Disabled), stops them if running, and is journaled (Undo center + Verify). Restart afterwards.
@@ -291,10 +324,14 @@ Windows Update still waited for you. The old allow-list keeps HTTPS open to **ev
 | `smb` | SMB1=0 + SMB2=0 (server), client drivers mrxsmb20/mrxsmb10, SMB1 optional feature if on |
 | `dialvpn` | RasMan, RasAuto, SstpSvc, RemoteAccess, TapiSrv: Settings VPN / Dial-up stop working |
 | `ipsec` | IKEEXT, PolicyAgent (built-in IPsec/IKEv2/L2TP VPN) |
-| `proxy` | WinHttpAutoProxySvc + Settings > Proxy "Automatically detect settings" OFF (this user) |
+| `proxy` | Settings > Proxy "Automatically detect settings" OFF (this user). The WinHTTP proxy service is **not** touched |
 | `faxphone` | Fax (if present), PhoneSvc |
 
 If networking misbehaves after a restart, undo `proxy` first, then `dialvpn`.
+
+**Do not use N7** (WinHTTP proxy *service* off). It is a test-only item: on the test PC it stopped Windows Connection Manager and
+WLAN AutoConfig from starting, so Wi-Fi showed "Dormant" with no internet (details in `docs\radio-group-test.md`). It is never
+part of NA or a profile. If you did use it: Undo center, that session, then restart.
 
 **Permissions L = Lock** (GUI: Permissions tab, "Lock"). Why: a plain registry Deny is not always what Settings
 shows; Windows can write per-user values back to Allow. Lock sets every switch to Deny (user, PC-wide, and
@@ -306,7 +343,7 @@ policy, so Deny only. Microsoft lists these policies for Pro and up; on Home the
 
 `profiles\validated.json` now uses `"permissions": "Lock"` and `security.servicesOff` (all six).
 
-## v1.2 - Devices menu N / Security+ tab "Devices" (2026-09-27, not yet live-tested)
+## v1.2 - Devices menu N / Security+ tab "Devices" (2026-09-27; live-tested 2026-09-28/29, see `docs\radio-group-test.md`)
 
 | # | What | Why it's safe to lose |
 |---|---|---|
@@ -331,7 +368,7 @@ New journal kind `pnpdev` (device enable/disable; auto undo + Verify).
   Security-log / 5157 method; the Blocked-connections view reads the firewall log (program shown when the process is still running).
 - **Removed apps stay removed:** a Deprovisioned mark is written for every removed app (journal kind `deprov`); **V** offers to re-remove
   apps that came back; GUI "Re-remove apps that came back".
-- **Update guard:** refreshed automatically at start when WHD's files changed; **GU** works in every menu; GUI top-bar button.
+- **Update guard:** its protected copy is refreshed automatically at start when WHD's files changed (in any mode, dry run included); **GU** works in every menu; GUI top-bar button.
 - **Profile option** `network.firewallWipeFirst` (delete all firewall rules before WHD adds its own).
 - **One-key re-apply:** when Verify (V) or the guard finds a setting that changed back (any menu, P1-P4 included), V offers to put it
   back; GUI Inventory/Undo > "Re-apply settings that changed back". Note: NetBIOS is only re-applied on adapters WHD already changed -
@@ -370,6 +407,34 @@ addresses and private IPs). A leak scan re-checks the output; `SHA256SUMS.txt` a
 written. The working folder is only read. Left out on purpose: logs, inventory, restore, archive, block lists (other people's
 data - check their licenses), planning docs.
 
+## v1.4.1 - pre-release review fixes (2026-10-03; made from a read-through of the code, **not yet live-tested**)
+
+- **Default-deny outbound (Firewall 6):** the auto-rollback is now a one-time SYSTEM task with no script file. It works when the
+  WHD folder path contains spaces, across midnight, and on battery. Default-deny is **not** switched on if the task cannot be armed
+  or the DNS / DHCP allow rules are missing. "Confirm keep" (7) reports the real state.
+- **Firewall menu:** every option that changes something asks y/N in EXECUTE mode (Wipe included). Wipe warns when outbound is
+  Block. If the firewall backup cannot be taken, the change is not made. Rule names containing `* ? [ ]` are refused. The first
+  hosts backup of a session is kept, and only plain host names are written to the hosts file.
+- **Update gate:** refuses to close while a network adapter does not use the pinned DNS servers (set DNS first: Firewall D).
+  Its state is saved before the change. Open does nothing unless the gate is closed.
+- **Win32 programs:** uninstallers start with correct quoting and their exit code is checked (a failed uninstall is reported
+  FAILED). See menu 5 below for R and X.
+- **Engine:** registry writes use literal paths; a key's `.reg` backup is taken once per session (the state before WHD's first
+  change); restoring a hosts backup no longer overwrites that backup; an error in a menu action returns to the main menu; a warning
+  is shown when WHD was elevated with a different account than the signed-in user; WHD refuses to start in PowerShell 7.
+- **Profiles:** the "This profile will ..." list is shown in the GUI log before the confirm; a run that stops on an error says
+  ABORTED; the shipped profiles' descriptions say what they do and that they are provided as is.
+- **Permissions:** Open and Balanced remove the Lock policy values, so the switches can be changed again. Running Lock again
+  switches camera, microphone, radios and location off again (still not locked).
+- **Updates / Devices / Component store:** "app updaters off" works with exactly one updater; pnputil's "restart needed" result
+  counts as success; a failed DISM run is reported FAILED.
+- **Update guard:** permissions already on a pre-existing `C:\ProgramData\WinHardenDebloat` folder are reset, a link (junction)
+  there is refused, and the guard alerts when it finds no WHD change history (for example after the WHD folder was moved).
+- **Wording:** texts that referred to the author's PC were made neutral. `.gitattributes` keeps files byte-for-byte, so
+  `SHA256SUMS.txt` also matches for a Git clone.
+- **Known limits (not changed):** devices and `net accounts` output are matched by their English names, so Devices (N) and the
+  password rules (Security+ W) only work on English Windows. DNS pinning (Firewall D) only touches adapters that are up at that moment.
+
 ## Menu
 ```
 1. Run inventory (read-only)
@@ -405,12 +470,12 @@ deletion breaks Windows Update/repair. This menu uses DISM, the supported path:
 For traditional desktop apps (not Store/Appx) — e.g. Logi Download Assistant, Zoom:
 - Pick a number to uninstall via the app's own (quiet) uninstaller.
 - **F** = find an app by name across uninstall entries, Run/RunOnce autostarts, scheduled tasks, and Program Files (finds helpers with no uninstall entry).
-- **R** = remove everything matching a name (uninstall + autostart + tasks).
-- **X** = block an .exe from launching via Image File Execution Options (reversible) — stops a helper/updater bringing an app back.
+- **R** = remove everything matching a name (uninstall + autostart + tasks). Task definitions are saved to `restore\<session>\task_*.xml` first; if an uninstall fails, autostarts and tasks are left in place. WHD's own tasks and the Edge update tasks are never removed.
+- **X** = block an .exe from launching via Image File Execution Options (reversible) — stops a helper/updater bringing an app back. Only a plain file name is accepted; critical Windows programs are refused.
 Note: Edge / WebView2 / Edge Update / servicing entries are protected and refused.
 
 ## Restore points
-One per session, created automatically before the first change. Menu **6** makes
+One per session, attempted automatically before the first change (if Windows cannot create it, WHD warns and continues). Menu **7** makes
 one on demand. Inventory (read-only) never triggers one.
 
 ## About the creator

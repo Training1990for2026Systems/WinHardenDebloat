@@ -1,21 +1,24 @@
 <#
 ================================================================================
- WinHardenDebloat  -  modules\Security.ps1   (Phase 8 - "Security+")
+ WinHardenDebloat  -  modules\Security.ps1   ("Security+")
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
- The ONE new module of the Phase 5-9 roadmap. Everything goes through the
+ The Security+ module. Everything goes through the
  Common.ps1 engine: dry-run by default, one confirm per action, restore point
  before the first change, journaled (Undo center) and verified (read-back).
 
- User decisions (2026-09-23):
-   B6 Defender : PUA blocking ON; Network protection + Controlled folder access
-                 start in AUDIT (log-only); ASR groups = Microsoft standard 3,
-                 script/download, Office/Adobe/email - all start in AUDIT.
-                 (Stronger cloud protection and "strict extras" NOT selected.)
+ What it offers:
+   B6 Defender : PUA blocking ON; Network protection + Controlled folder access:
+                 the menu options set AUDIT (log-only) or Block; ASR groups =
+                 Microsoft standard 3, script/download, Office/Adobe/email - the
+                 menu options start them in AUDIT (K switches audited rules to
+                 Block); a profile can set Audit or Block.
+                 (Stronger cloud protection and "strict extras" are not included.)
    B7 Protocols: LLMNR, NetBIOS over TCP/IP, WPAD, Remote Assistance - off.
-   B8 Report   : memory integrity, LSA protection, password/lockout = REPORT
-                 ONLY. UAC: report, and set "Always notify" if it isn't.
+   B8 Report   : memory integrity, LSA protection = REPORT ONLY. Password +
+                 lockout: report, and option W sets the WHD targets.
+                 UAC: report, and set "Always notify" if it isn't.
 
  Sources: Microsoft Learn - ASR rules reference (GUIDs; "available on any
  edition of Windows that includes Microsoft Defender Antivirus (for example,
@@ -199,7 +202,7 @@ function Invoke-WHDProtocolOff {
     if ((Get-WHDRegOpsState -Ops $ops) -eq 'set') { Write-WHDLog 'Already off - nothing to change.' 'OK'; return }
     if (-not (Confirm-WHDProceed ("turn off {0}" -f $Item.Name))) { Write-WHDLog 'skipped.' 'WARN'; return }
     foreach ($op in $ops) { Set-WHDRegistryValue -Path $op.P -Name $op.N -Value $op.V -Type $op.T }
-    if ($Item.Key -eq 'llmnr') { & ipconfig.exe /flushdns | Out-Null }
+    if ($Item.Key -eq 'llmnr' -and $script:WHDExecute) { & ipconfig.exe /flushdns | Out-Null }
 }
 
 # ---- Network services off (v1.2, user's choices 2026-09-27) ------------------
@@ -213,7 +216,7 @@ $script:WHDNetServiceGroups = @(
     [ordered]@{ Key='fileshare'; Name='Workstation + Server (file/printer sharing)'; Services=@('LanmanServer','LanmanWorkstation'); Risk='caution'
                 Note='No Windows file or printer sharing, no mapped drives, no \\PC\share paths, no "net use". A few older installers ask the Workstation service for the PC name and may complain. Undo in the Undo center, then restart.' }
     [ordered]@{ Key='smb';       Name='SMB 1/2/3 protocol (server + client)'; Services=@(); Risk='caution'
-                Note='Server side SMB1=0 + SMB2=0 (SMB2 also covers SMB3; Microsoft Learn: detect/enable/disable SMBv1, v2, v3). Client drivers mrxsmb20/mrxsmb10 Start=4. SMB1 optional feature removed if it is on. Restart needed.' }
+                Note='Server side SMB1=0 + SMB2=0 (SMB2 also covers SMB3; Microsoft Learn: detect/enable/disable SMBv1, v2, v3). Client drivers mrxsmb20/mrxsmb10 Start=4. Disabling the SMB client driver also stops the Workstation service from starting. SMB1 optional feature removed if it is on. Restart needed.' }
     [ordered]@{ Key='dialvpn';   Name='Dial-up + built-in VPN (RAS, SSTP, Telephony)'; Services=@('RasMan','RasAuto','SstpSvc','RemoteAccess','TapiSrv'); Risk='caution'
                 Note='Settings > Network > VPN and Dial-up stop working; Mobile hotspot may too. Third-party VPN apps with their own driver are not affected. If Wi-Fi or Ethernet misbehaves after a restart, undo this group first.' }
     [ordered]@{ Key='ipsec';     Name='IPsec VPN keying (IKEEXT, PolicyAgent)'; Services=@('IKEEXT','PolicyAgent'); Risk='reversible'
@@ -224,11 +227,11 @@ $script:WHDNetServiceGroups = @(
     # (WPAD itself is already off by P3 = WinHttp DisableWpad=1). The service switch-off is kept as N7 with a
     # red warning; it is never part of NA and profiles refuse it.
     [ordered]@{ Key='proxy';     Name='Proxy auto-detect: Settings switch only (service untouched)'; Services=@(); Risk='reversible'
-                Note='Settings > Network > Proxy "Automatically detect settings" OFF for this user (Microsoft Learn: turn WPAD off in the Settings UI too). The WinHTTP proxy service is NOT touched (disabling it broke Wi-Fi here - see N7). With P3 on, WinHTTP no longer does WPAD look-ups at all.' }
+                Note='Settings > Network > Proxy "Automatically detect settings" OFF for this user (Microsoft Learn: turn WPAD off in the Settings UI too). The WinHTTP proxy service is NOT touched (disabling it broke Wi-Fi in testing - see N7). With P3 on, WinHTTP no longer does WPAD look-ups at all.' }
     [ordered]@{ Key='faxphone';  Name='Fax + Phone service'; Services=@('Fax','PhoneSvc'); Risk='reversible'
-                Note='Fax (only if present) and Phone Service. Phone Link is already removed by WHD.' }
-    [ordered]@{ Key='proxysvc';  Name='WinHTTP proxy SERVICE off - BREAKS WI-FI HERE'; Services=@('WinHttpAutoProxySvc'); Risk='hard'; NotInAll=$true
-                Note='TESTED 2026-09-29 on this PC: with this service disabled, WLAN AutoConfig and IP Helper did not run after a restart, Wi-Fi went "Dormant" and there was no internet. Kept only for testing/Ethernet-only PCs. Never part of NA or a profile. Undo: Undo center, that session, then restart.' }
+                Note='Fax (only if present) and Phone Service.' }
+    [ordered]@{ Key='proxysvc';  Name='WinHTTP proxy SERVICE off - TEST ONLY (broke Wi-Fi in testing)'; Services=@('WinHttpAutoProxySvc'); Risk='hard'; NotInAll=$true
+                Note='In testing, with this service disabled Windows Connection Manager, WLAN AutoConfig and IP Helper did not start after a restart: Wi-Fi showed "Dormant" and there was no internet. Test-only; meant for Ethernet-only PCs. Never part of NA or a profile. Undo: Undo center, that session, then restart.' }
 )
 $script:WHDProxyConnKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections'
 # Byte 8 of DefaultConnectionSettings holds the flags; 0x08 = "Automatically detect settings".
@@ -286,6 +289,7 @@ function Invoke-WHDNetServiceOff {
     $smb1On = $false
     if ($Item.Key -eq 'smb') { try { $smb1On = ("$((Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -EA Stop).State)" -eq 'Enabled') } catch { } }
     $running = @($Item.Services | ForEach-Object { Get-Service -Name $_ -EA SilentlyContinue } | Where-Object { "$($_.Status)" -ne 'Stopped' })
+    if ($Item.Key -eq 'proxy' -and -not $ops.Count) { Write-WHDLog 'Proxy switch: this user has no saved proxy settings yet - open Settings > Network > Proxy once, then run this again.' 'WARN'; return }
     if (-not $ops.Count -and -not $smb1On) { Write-WHDLog 'Not present on this PC - nothing to do.' 'OK'; return }
     if ((Get-WHDRegOpsState -Ops $ops) -eq 'set' -and -not $smb1On -and -not $running.Count) { Write-WHDLog 'Already off - nothing to change.' 'OK'; return }
     if (-not (Confirm-WHDProceed ("turn off {0}" -f $Item.Name))) { Write-WHDLog 'skipped.' 'WARN'; return }
@@ -305,9 +309,6 @@ function Invoke-WHDNetServiceOff {
         Invoke-WHDChange -Description 'disable optional feature: SMB1Protocol' -Force -Journal $jr -Action {
             Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -EA Stop | Out-Null
         } | Out-Null
-    }
-    if ($Item.Key -eq 'proxy' -and -not @(_WHDProxyAutoDetectOps).Count) {
-        Write-WHDLog 'Proxy switch: this user has no saved proxy settings yet - open Settings > Network > Proxy once, then run this again.' 'WARN'
     }
     Write-WHDLog 'Restart the PC to finish.' 'INFO'
 }
@@ -359,7 +360,7 @@ function Set-WHDPasswordSetting {
         if ($r.Code -ne 0) { throw ("net accounts exit {0}: {1}" -f $r.Code, (($r.Out | Where-Object { $_ }) -join ' ')) }
         $now = Get-WHDPasswordPolicy
         if (-not $now -or [int]$now.$pwSet -ne $pwVal) { throw 'read-back mismatch: password setting did not stick' }
-    }
+    } | Out-Null
 }
 function Show-WHDPasswordPolicy {
     param($Policy = (Get-WHDPasswordPolicy))
