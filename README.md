@@ -302,7 +302,8 @@ Windows Update still waited for you. The old allow-list keeps HTTPS open to **ev
   4. Store `AutoDownload=2`
 - **E** Edge Update off (its tasks + services). **F** scans non-Windows scheduled tasks and services named update / updater /
   maintenance; you pick which to turn off. All journaled (Undo center, Verify, guard).
-- **D** updates Defender definitions now (source MMPC, works with the gate closed). **S** Status: gate, policies, Windows Update
+- **D** updates Defender definitions now (source MMPC; meant to work with the gate closed, but that failed in the 2026-10-03 test -
+  see "live test and known issues"). **S** Status: gate, policies, Windows Update
   installs (14 days), updaters.
 - Firewall fixes:
   - a firewall profile never lowers outbound from Block to Allow
@@ -407,7 +408,7 @@ addresses and private IPs). A leak scan re-checks the output; `SHA256SUMS.txt` a
 written. The working folder is only read. Left out on purpose: logs, inventory, restore, archive, block lists (other people's
 data - check their licenses), planning docs.
 
-## v1.4.1 - pre-release review fixes (2026-10-03; made from a read-through of the code, **not yet live-tested**)
+## v1.4.1 - pre-release review fixes (2026-10-03; live-tested 2026-10-03 on a fresh Windows 11 Home 26H2 image - see "live test and known issues" below)
 
 - **Default-deny outbound (Firewall 6):** the auto-rollback is now a one-time SYSTEM task with no script file. It works when the
   WHD folder path contains spaces, across midnight, and on battery. Default-deny is **not** switched on if the task cannot be armed
@@ -434,6 +435,29 @@ data - check their licenses), planning docs.
   `SHA256SUMS.txt` also matches for a Git clone.
 - **Known limits (not changed):** devices and `net accounts` output are matched by their English names, so Devices (N) and the
   password rules (Security+ W) only work on English Windows. DNS pinning (Firewall D) only touches adapters that are up at that moment.
+
+### v1.4.1 - live test and known issues (2026-10-03)
+
+Run through the console menus in EXECUTE mode on a fresh Windows 11 Home 26H2 image (build 26300.9457, Windows PowerShell 5.1).
+The run logs show these parts working: privacy and telemetry, AI features off, app removal, permissions, devices, Security+, the
+firewall menu (wipe, allow-list, default-deny with its auto-rollback task, IPv6, DNS, firewall log), time sync, time zone, the
+update gate and the update policies, inventory compare, Verify (202 of 202 items still in place) and the update guard.
+**Not part of that test:** the GUI window, the one-run profile apply (`-Apply`) and undoing changes (Undo center).
+
+Known issues found in that test (not fixed in this version):
+
+- **OneDrive uninstall is reported FAILED although it worked.** OneDrive's uninstaller ends with exit code -2147219813, and WHD
+  counts every exit code except 0, 3010 and 1641 as a failure. OneDrive is removed, but the step is not written to the change
+  history. Check the result with the inventory (menu 1) or Settings > Apps > Installed apps.
+- **Ransomware folder protection in BLOCK mode (Security+ 3B) when WHD runs from a protected folder** (Documents, Desktop,
+  Pictures ...). In the test WHD ran from Documents. Right after the protection was switched on, WHD could no longer write its
+  change history, the session log stopped, and two registry changes made after that point were not recorded (their `.reg` backup
+  was). The cause was not confirmed; Windows blocking PowerShell from writing into the protected folder is the likely one. Keep
+  the WHD folder outside the protected folders (for example `C:\WHD`).
+- **Defender definitions update (Updates D) failed with the gate closed** ("definitions update was completed with errors"), three
+  times out of three. It was not tried with the gate open, so the cause is not known. If it fails for you, try it with the gate
+  open (Updates O).
+- **Wipe all firewall rules (Firewall W) can take minutes:** about 7 minutes for 447 rules in the test. Let it finish.
 
 ## Menu
 ```
