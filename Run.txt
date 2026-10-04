@@ -1,0 +1,7 @@
+cd "$env:USERPROFILE\Documents\WinHardenDebloat"
+# preview (no changes) — recommended first
+powershell -ExecutionPolicy Bypass -File .\WHD.ps1 -Apply profiles\lean.json
+# apply it (one upfront y/N, restore point first)
+powershell -ExecutionPolicy Bypass -File .\WHD.ps1 -Apply profiles\lean.json -Execute
+# fully unattended
+powershell -ExecutionPolicy Bypass -File .\WHD.ps1 -Apply profiles\lean.json -Execute -Yes

@@ -1,0 +1,124 @@
+{
+  "name": "validated",
+  "description": "VALIDATED = same settings as profiles\\standard.json (brought in line by the user's decision 2026-09-29, after the radio test rounds 1-8 all passed on <PC-NAME>). Earlier differences removed: Paint + Photos now removed, Camera kept, remove-all-recommended on, ASR in Block, firewall rules wiped first, update gate left open, OneDrive uninstalled. Network services: fileshare, dialvpn, ipsec, proxy (Settings switch only - the WinHTTP service is never disabled, it breaks Wi-Fi), faxphone, smb. Devices: Wi-Fi Direct, WAN Miniports and the Bluetooth network part off. Permissions = Lock (camera, microphone, radios and location off but not locked). Dry run first: WHD.ps1 -Apply profiles\\validated.json, then add -Execute. See docs\\standard-reimage.md and docs\\radio-group-test.md.",
+  "ai": {
+    "featureOff": [
+      "copilot",
+      "bing",
+      "recall",
+      "clicktodo",
+      "recallsnap",
+      "paintai",
+      "notepadai",
+      "edgeai",
+      "edgelocalai"
+    ],
+    "remove": [
+      "copilot",
+      "powerautomate",
+      "bing",
+      "webexp",
+      "paint",
+      "photos",
+      "phonelink"
+    ]
+  },
+  "storeSuppression": true,
+  "general": {
+    "removeRecommended": true,
+    "remove": [
+      "clipchamp",
+      "solitaire",
+      "todos",
+      "sticky",
+      "feedback",
+      "gethelp",
+      "quickassist",
+      "devhome",
+      "family",
+      "outlooknew",
+      "teams",
+      "crossdevice",
+      "alarms",
+      "soundrec",
+      "zune",
+      "xboxapp",
+      "xboxoverlay",
+      "xboxstt",
+      "xboxtcui",
+      "xboxid"
+    ],
+    "oem": "ask"
+  },
+  "privacyHardening": true,
+  "disableDiagTrack": true,
+  "privacy": [
+    "activity",
+    "clipboard",
+    "suggestions",
+    "speech",
+    "edgebg",
+    "edgediag"
+  ],
+  "security": {
+    "pua": true,
+    "networkProtection": "On",
+    "folderProtection": "On",
+    "asrGroups": [
+      "standard",
+      "scripts",
+      "office"
+    ],
+    "asrMode": "Block",
+    "protocolsOff": [
+      "llmnr",
+      "netbios",
+      "wpad",
+      "remoteassist"
+    ],
+    "servicesOff": [
+      "fileshare",
+      "dialvpn",
+      "ipsec",
+      "proxy",
+      "faxphone",
+      "smb"
+    ],
+    "uacAlwaysNotify": true,
+    "passwordPolicy": true,
+    "updateGuard": true
+  },
+  "devices": {
+    "btNetworkOff": true,
+    "wifiDirectOff": true,
+    "wanMiniportsOff": true
+  },
+  "permissions": "Lock",
+  "win32": {
+    "uninstall": [
+      "Microsoft OneDrive"
+    ],
+    "removeEverywhere": [],
+    "blockExe": []
+  },
+  "network": {
+    "firewallWipeFirst": true,
+    "timeSync": "Cloudflare",
+    "firewallProfile": "profiles\\firewall-baseline.json",
+    "dns": "Cloudflare",
+    "connectionLogging": true
+  },
+  "updates": {
+    "windowsUpdatePolicy": true,
+    "drivers": true,
+    "driverPolicy": true,
+    "storePolicy": true,
+    "edgeUpdaterOff": true,
+    "updatersOff": [],
+    "gate": ""
+  },
+  "componentCleanup": {
+    "run": true,
+    "resetBase": false
+  }
+}
