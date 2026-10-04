@@ -4,15 +4,16 @@
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
- Answers "WHY did turning off the WinHTTP proxy service stop Wi-Fi?" from this
- PC's own configuration and event log. Changes NOTHING.
+ Lists what depends on a Windows service, so you can see what stops working
+ when that service is turned off - for example why Wi-Fi stops when the WinHTTP
+ proxy service (WinHttpAutoProxySvc, the default target) is disabled. Read from
+ the PC's own configuration and event log. Changes NOTHING.
 
    1. Which services depend on the target service (directly and further down).
    2. The full "needs these to run" chain of WLAN AutoConfig (WlanSvc) and
       IP Helper (iphlpsvc) - where the target appears in it.
    3. Service Control Manager errors from the last days (7000/7001/7003/7023/
       7024/7026) - e.g. "WLAN AutoConfig depends on X which failed to start".
-      The round-4 restart (2026-09-29 ~17:35) is still in the log.
    4. Start type, triggers and configured dependencies (sc.exe qc / qtriggerinfo).
 
    Run in an elevated PowerShell in the project folder:
@@ -43,7 +44,7 @@ function Get-SvcDependsOn {
     param([string]$Name)
     $k = Get-ItemProperty -LiteralPath (Join-Path $svcRoot $Name) -EA SilentlyContinue
     if (-not $k) { return @() }
-    @(@($k.DependOnService) + @($k.DependOnGroup | ForEach-Object { "group:$_" }) | Where-Object { $_ })
+    @(@($k.DependOnService) + @($k.DependOnGroup | Where-Object { $_ } | ForEach-Object { "group:$_" }) | Where-Object { $_ })
 }
 function Show-NeedsTree {
     param([string]$Name, [int]$Depth = 0, [System.Collections.Generic.HashSet[string]]$Seen)
@@ -97,4 +98,4 @@ foreach ($n in $Target, 'WlanSvc', 'iphlpsvc', 'Wcmsvc') {
 $lines | Set-Content -LiteralPath $report -Encoding UTF8
 Write-Host ''
 Write-Host (' Report saved: {0}' -f $report) -ForegroundColor Green
-Write-Host ' Nothing was changed. Send this file to Claude.' -ForegroundColor Green
+Write-Host ' Nothing was changed. The report contains this PC''s name and device IDs - check it before sharing.' -ForegroundColor Green

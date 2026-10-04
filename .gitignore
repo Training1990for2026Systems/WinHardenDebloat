@@ -8,3 +8,17 @@ profiles/incoming/
 profiles/*.bak
 *.log
 REPORT.txt
+
+# third-party block lists (other people's data - not ours to publish)
+profiles/blacklist-*.txt
+# private planning notes, review notes and this PC's publish rules
+docs/architecture-spec.md
+docs/engine-contract.md
+docs/next-project-brief.md
+docs/nts-option3-plan.md
+docs/release-plan.md
+docs/roadmap-plan-*.md
+docs/prerelease-review-*.md
+tools/publish-generalize.txt
+# staging folder for the main-branch guide
+repo/

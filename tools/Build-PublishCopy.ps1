@@ -11,7 +11,7 @@
    - a separate publish copy (the working folder stays untouched)
    - contents: code + profiles, README + general guides, the test write-ups.
      NOT included: logs, inventory scans, restore journals/backups, archive, planning docs
-     (roadmap, release plan, NTS plan, architecture notes), Claude's notes.
+     (roadmap, release plan, NTS plan, architecture notes), private working notes.
 
  What is removed / replaced (found live on THIS PC, so it works on any PC):
    computer name            -> <PC-NAME>
@@ -47,7 +47,7 @@ if (Test-Path -LiteralPath $Dest) { throw ("Destination already exists: {0} - pi
 
 # ---- 1. what goes in (paths relative to the project folder) -----------------
 $include = New-Object System.Collections.Generic.List[string]
-foreach ($f in @('WHD.ps1', 'WHD-GUI.ps1', 'Inventory.ps1', 'README.md', 'Run.txt', 'LICENSE', 'SECURITY.md', '.gitignore')) { $include.Add($f) }
+foreach ($f in @('WHD.ps1', 'WHD-GUI.ps1', 'Inventory.ps1', 'README.md', 'Run.txt', 'LICENSE', 'SECURITY.md', '.gitignore', '.gitattributes')) { $include.Add($f) }
 foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $root 'modules') -Filter *.ps1 -File)) { $include.Add("modules\$($f.Name)") }
 foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $root 'tools') -Filter *.ps1 -File)) { $include.Add("tools\$($f.Name)") }
 # profiles: WHD's own JSON profiles only (not the downloaded block lists - other people's data, check their licenses first)
@@ -58,7 +58,17 @@ foreach ($f in @('firewall-module.md', 'standard-reimage.md', 'radio-group-test.
 # ---- 2. this PC's identifiers (read live) ----------------------------------
 $terms = New-Object System.Collections.Generic.List[object]   # @{ Find; Repl; Label }
 function Add-Term { param([string]$Find, [string]$Repl, [string]$Label) if ($Find -and $Find.Length -ge 3) { $terms.Add([pscustomobject]@{ Find = $Find; Repl = $Repl; Label = $Label }) } }
-Add-Term $env:COMPUTERNAME '<PC-NAME>' 'computer name'
+# A short or placeholder computer name / serial would be replaced as a plain piece of text in every file
+# (code included) - those are skipped and listed in the report instead.
+$tooGeneric = New-Object System.Collections.Generic.List[string]
+function Add-IdTerm {
+    param([string]$Find, [string]$Repl, [string]$Label)
+    $v = "$Find".Trim()
+    if (-not $v) { return }
+    if ($v.Length -lt 5 -or $v -match '^(none|n/?a|default|unknown|system|to be filled.*|0+)$') { $tooGeneric.Add($Label); return }
+    Add-Term $v $Repl $Label
+}
+Add-IdTerm $env:COMPUTERNAME '<PC-NAME>' 'computer name'
 $prof = $env:USERPROFILE
 if ($prof) {
     Add-Term $prof 'C:\Users\<USER>' 'user folder'
@@ -87,7 +97,7 @@ foreach ($g in @($terms | Where-Object { $_.Repl -eq 'ADAPTER-GUID' } | ForEach-
 }
 try {
     $csp = Get-CimInstance Win32_ComputerSystemProduct -EA Stop
-    if ("$($csp.IdentifyingNumber)" -notmatch '^(To be filled|Default|System Serial|0+$)') { Add-Term "$($csp.IdentifyingNumber)".Trim() '<SERIAL>' 'serial number' }
+    if ("$($csp.IdentifyingNumber)" -notmatch '^(To be filled|Default|System Serial|0+$)') { Add-IdTerm "$($csp.IdentifyingNumber)" '<SERIAL>' 'serial number' }
     if ("$($csp.UUID)" -notmatch '^[0F-]+$') { Add-Term "$($csp.UUID)" '<PC-UUID>' 'PC UUID' }
 } catch {}
 foreach ($t in $ExtraTerms) { Add-Term $t '<REDACTED>' 'extra term' }
@@ -97,7 +107,9 @@ $terms = @($terms | Sort-Object { $_.Find.Length } -Descending)
 # Hardware generalization rules for documents (user decision 2026-09-30): tools\publish-generalize.txt
 $genRules = @()
 $genFile = Join-Path $PSScriptRoot 'publish-generalize.txt'
-if (Test-Path -LiteralPath $genFile) {
+$genFound = Test-Path -LiteralPath $genFile
+$genMissingNote = 'No tools\publish-generalize.txt - hardware names in the documents are NOT generalized (that file is private to each PC and is not part of the published copy).'
+if ($genFound) {
     foreach ($line in @(Get-Content -LiteralPath $genFile)) {
         if ($line -match '^\s*#' -or $line -notmatch ' => ') { continue }
         $parts = $line -split ' => ', 2
@@ -121,7 +133,9 @@ $report = New-Object System.Collections.Generic.List[string]
 $report.Add(("WinHardenDebloat - PUBLISH COPY   {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm')))
 $report.Add(("Source (read only): <project folder>    Output: {0}" -f (Split-Path $Dest -Leaf)))
 $report.Add(("Hardware generalization rules (docs): {0} from tools\publish-generalize.txt" -f $genRules.Count))
+if (-not $genFound) { $report.Add('NOTE: ' + $genMissingNote) }
 $report.Add(("Identifiers found on this PC: {0} ({1})" -f $terms.Count, ((@($terms | ForEach-Object { $_.Label } | Select-Object -Unique)) -join ', ')))
+foreach ($tg in $tooGeneric) { $report.Add(("  {0}: skipped - too generic (NOT replaced - check the output for it by hand)" -f $tg)) }
 $report.Add('')
 $copied = 0; $missing = @()
 foreach ($rel in $include) {
@@ -177,7 +191,7 @@ $sums = @(foreach ($f in @(Get-ChildItem -LiteralPath $Dest -Recurse -File | Sor
 
 $report.Add('')
 $report.Add(("Files copied: {0}   missing: {1}   leaks: {2}   SHA256SUMS.txt written" -f $copied, $missing.Count, $leaks))
-$report.Add('Not included on purpose: logs, inventory, restore, archive, publish, profiles\incoming, block lists, planning docs, Claude notes.')
+$report.Add('Not included on purpose: logs, inventory, restore, archive, publish, profiles\incoming, block lists, planning docs, private notes.')
 $repPath = Join-Path (Split-Path -Parent $Dest) ("PUBLISH-REPORT_{0}.txt" -f $stamp)
 [IO.File]::WriteAllLines($repPath, [string[]]$report, (New-Object System.Text.UTF8Encoding($false)))
 $report | ForEach-Object { Write-Host $_ }
@@ -185,3 +199,4 @@ Write-Host ''
 Write-Host (" Publish copy: {0}" -f $Dest) -ForegroundColor Green
 Write-Host (" Report      : {0}" -f $repPath) -ForegroundColor Green
 if ($leaks) { Write-Host ' LEAKS FOUND - check the report before publishing.' -ForegroundColor Red }
+if (-not $genFound) { Write-Host (' ' + $genMissingNote) -ForegroundColor Yellow }

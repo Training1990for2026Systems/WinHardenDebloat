@@ -1,4 +1,4 @@
-cd "$env:USERPROFILE\Documents\WinHardenDebloat"
+cd "C:\path\to\WinHardenDebloat"   # the folder you unpacked or cloned
 # preview (no changes) — recommended first
 powershell -ExecutionPolicy Bypass -File .\WHD.ps1 -Apply profiles\lean.json
 # apply it (one upfront y/N, restore point first)

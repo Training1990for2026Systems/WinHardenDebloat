@@ -7,11 +7,12 @@
  Windows Defender Firewall with Advanced Security - native, offline hardening.
  Dot-sourced by WHD.ps1 AFTER Common.ps1 (uses that engine for every change).
 
- Contract honored (see modules\Common.ps1 / docs\engine-contract.md):
+ Contract honored (see modules\Common.ps1):
    * Nothing changes unless $script:WHDExecute is $true. Otherwise DRY-RUN.
    * Every mutation flows through Invoke-WHDChange -> restore point + log + result.
    * Firewall policy is exported to restore\ before the first firewall change.
-   * No Read-Host in the engine functions; approval is the caller's job.
+   * No Read-Host in the engine functions; approval goes through Confirm-WHDProceed
+     (the caller supplies the strategy: terminal y/N, GUI dialog, profile run).
 
  Decisions locked with the user (2026-09-21):
    D1 terminal module now      D2 adapter+registry + firewall block rules (keep ::1)
@@ -47,7 +48,7 @@ $script:WHDDohTemplate = 'https://security.cloudflare-dns.com/dns-query'
 # Phase 6 time sync (Option 1): Windows Time -> Cloudflare over plain NTP (Windows
 # has no NTS client). The firewall NTP allow rule is narrowed to these addresses,
 # published at developers.cloudflare.com/time-services/ntp/usage/ (IPv6 omitted:
-# IPv6 is suppressed on this machine).
+# WHD suppresses IPv6).
 $script:WHDNtpServer   = 'time.cloudflare.com'
 $script:WHDNtpIPs      = @('162.159.200.1','162.159.200.123')
 $script:WHDW32TimeKey  = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parameters'
@@ -114,10 +115,18 @@ function Backup-WHDFirewallOnce {
     if (-not $script:WHDExecute) { Write-WHDLog 'would: export current firewall policy to restore\ (.wfw)' 'DRY'; return }
     Initialize-WHDPaths
     $out = Join-Path $script:WHDRestore 'firewall-before.wfw'
-    try {
-        & netsh advfirewall export "$out" 1>$null 2>$null
-        Write-WHDLog ("firewall policy backed up: {0}" -f $out) 'OK'
-    } catch { Write-WHDLog "firewall export failed: $($_.Exception.Message)" 'WARN' }
+    # netsh refuses to overwrite an existing file: keep the backup already taken.
+    if (Test-Path -LiteralPath $out) {
+        Write-WHDLog ("firewall policy backup already present, kept: {0}" -f $out) 'INFO'
+        $script:WHDFwBackupDone = $true
+        return
+    }
+    $ne = Invoke-WHDNative -Exe 'netsh.exe' -ArgList @('advfirewall', 'export', $out)
+    if ($ne.Code -ne 0 -or -not (Test-Path -LiteralPath $out)) {
+        Write-WHDLog ("firewall export failed (netsh exit {0}): {1}" -f $ne.Code, ((@($ne.Out) | Where-Object { $_ }) -join ' ')) 'ERR'
+        throw ("firewall policy backup failed (netsh advfirewall export, exit {0}) - the firewall change was not made" -f $ne.Code)
+    }
+    Write-WHDLog ("firewall policy backed up: {0}" -f $out) 'OK'
     $script:WHDFwBackupDone = $true
 }
 
@@ -141,6 +150,13 @@ function Remove-WHDFwGroup {
 function New-WHDFwRule {
     param([hashtable]$Params, [hashtable]$Journal)
     $name = $Params['Name']
+    # A rule name is also used to remove the same-named rule first, and -Name accepts
+    # wildcards: refuse an empty name or one containing * ? [ ] before anything is removed.
+    if (-not "$name".Trim() -or "$name" -match '[\*\?\[\]]') {
+        Write-WHDLog ("firewall rule refused: the rule name '{0}' is empty or contains a wildcard character (* ? [ ]). Nothing was changed for it." -f $name) 'ERR'
+        if ($script:WHDExecute) { New-WHDResult -Action ("firewall rule: {0}" -f $name) -Status 'failed' -Detail 'rule name empty or contains a wildcard character' | Out-Null }
+        return
+    }
     $desc = "firewall rule: {0} [{1}/{2}]" -f $Params['DisplayName'], $Params['Direction'], $Params['Action']
     Invoke-WHDChange -Description $desc -Journal $Journal -Action {
         Backup-WHDFirewallOnce
@@ -157,11 +173,13 @@ function New-WHDFwRule {
 #  1) IPv6 SUPPRESSION  (D2: adapter unbind + registry + firewall block rules)
 # =============================================================================
 function Invoke-WHDDisableIPv6 {
-    param([switch]$BlockLoopback)   # off by default; strict + risky
+    param([switch]$BlockLoopback,   # off by default; strict + risky
+          [switch]$NoConfirm)       # set by WHD's own callers that already asked
     Write-Host ''
     Write-WHDLog 'IPv6 suppression (adapter binding + registry + firewall block rules)' 'ACT'
     Write-WHDRisk 'caution' 'Disables IPv6 on network adapters and blocks routable IPv6. Reversible.'
     if ($BlockLoopback) { Write-WHDRisk 'hard' 'ALSO blocking ::1 loopback - may break local apps that use IPv6 to talk to themselves.' }
+    if (-not $NoConfirm -and -not (Confirm-WHDProceed 'suppress IPv6 (adapter binding + registry + firewall block rules)')) { Write-WHDLog 'skipped.' 'WARN'; return }
 
     # (a) unbind IPv6 from every adapter
     $bind = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 -EA SilentlyContinue | Where-Object { $_.Enabled })
@@ -198,6 +216,7 @@ function Invoke-WHDDisableIPv6 {
 
 function Invoke-WHDEnableIPv6 {
     Write-WHDLog 'Re-enabling IPv6 (undo suppression).' 'ACT'
+    if (-not (Confirm-WHDProceed 're-enable IPv6 (adapter binding + registry, remove the WHD IPv6 block rules)')) { Write-WHDLog 'skipped.' 'WARN'; return }
     $bind = @(Get-NetAdapterBinding -ComponentID ms_tcpip6 -EA SilentlyContinue | Where-Object { -not $_.Enabled })
     if ($bind.Count -gt 0) {
         Invoke-WHDChange -Description ("re-bind IPv6 to {0} adapter(s)" -f $bind.Count) -Action {
@@ -325,6 +344,7 @@ function Invoke-WHDFirewallReset {
     param([switch]$ApplyBaseline)
     Write-WHDLog 'Reset firewall to Windows defaults (clean slate).' 'ACT'
     Write-WHDRisk 'hard' 'netsh advfirewall reset - removes ALL custom rules; a .wfw backup is taken first.'
+    if (-not (Confirm-WHDProceed 'reset the firewall to Windows defaults (removes ALL custom rules)')) { Write-WHDLog 'skipped.' 'WARN'; return }
     Invoke-WHDChange -Description 'netsh advfirewall reset (restore default policy)' -Action {
         Backup-WHDFirewallOnce
         & netsh advfirewall reset 1>$null 2>$null
@@ -332,7 +352,7 @@ function Invoke-WHDFirewallReset {
     Invoke-WHDChange -Description 'enable firewall on all profiles; inbound Block / outbound Allow' -Action {
         Set-NetFirewallProfile -All -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Allow -Confirm:$false -EA Stop
     } | Out-Null
-    if ($ApplyBaseline) { Invoke-WHDFirewallAllowList; Invoke-WHDDisableIPv6 }
+    if ($ApplyBaseline) { Invoke-WHDFirewallAllowList -NoConfirm; Invoke-WHDDisableIPv6 -NoConfirm }
     Write-WHDLog 'Firewall reset complete.' 'OK'
 }
 
@@ -343,7 +363,12 @@ function Invoke-WHDFirewallWipe {
     param([switch]$ApplyBaseline)
     $all = @(Get-NetFirewallRule -EA SilentlyContinue)
     Write-WHDLog ('WIPE ALL firewall rules (empty slate) - {0} rule(s) present.' -f $all.Count) 'ACT'
-    Write-WHDRisk 'hard' 'Deletes EVERY inbound/outbound rule, Windows defaults included. Firewall stays ON (inbound Block / outbound Allow). A .wfw backup is taken first; protected rules are skipped.'
+    Write-WHDRisk 'hard' 'Deletes EVERY inbound/outbound rule, Windows defaults included. The firewall stays ON and the default inbound/outbound actions are not changed. A .wfw backup is taken first; protected rules are skipped.'
+    if (-not $ApplyBaseline -and (@(Get-WHDFwProfiles | ForEach-Object { "$($_.DefaultOutboundAction)" }) -contains 'Block')) {
+        Write-WHDLog 'Outbound is Block (default-deny) now: wiping also deletes the WHD allow rules, so there is NO network until the allow-list is applied again (Firewall 5) or default-deny is reverted (Firewall 8; Updates O if the update gate is closed).' 'WARN'
+    }
+    $what = if ($ApplyBaseline) { 'delete ALL firewall rules, then apply the WHD baseline' } else { 'delete ALL firewall rules (empty slate)' }
+    if (-not (Confirm-WHDProceed $what)) { Write-WHDLog 'skipped.' 'WARN'; return }
     Invoke-WHDChange -Description ("delete ALL {0} firewall rule(s) - empty slate" -f $all.Count) -Action {
         Backup-WHDFirewallOnce
         foreach ($r in @(Get-NetFirewallRule -EA SilentlyContinue)) {
@@ -352,10 +377,10 @@ function Invoke-WHDFirewallWipe {
     } | Out-Null
     if ($ApplyBaseline) {
         $p = Join-Path $script:WHDRoot 'profiles\firewall-baseline.json'
-        if (Test-Path $p) { Invoke-WHDApplyFirewallProfile -Path $p }
+        if (Test-Path $p) { Invoke-WHDApplyFirewallProfile -Path $p -NoConfirm }
         else { Write-WHDLog 'firewall-baseline.json not found; wipe only.' 'WARN' }
     }
-    Write-WHDLog 'Wipe complete. Only rules you add from here exist.' 'OK'
+    Write-WHDLog 'Wipe complete. Only rules added after this exist.' 'OK'
 }
 
 # =============================================================================
@@ -399,6 +424,8 @@ function Import-WHDFirewallPolicy {
         [ValidateSet('Json','Wfw')]$Mode = 'Json'
     )
     if (-not (Test-Path $Path)) { Write-WHDLog ("import file not found: {0}" -f $Path) 'ERR'; return }
+    $what = if ($Mode -eq 'Wfw') { "replace the ENTIRE firewall policy with {0}" -f $Path } else { "create or replace the firewall rules listed in {0}" -f $Path }
+    if (-not (Confirm-WHDProceed $what)) { Write-WHDLog 'skipped.' 'WARN'; return }
     if ($Mode -eq 'Wfw') {
         Invoke-WHDChange -Description ("import firewall policy blob: {0}" -f $Path) -Action {
             Backup-WHDFirewallOnce
@@ -426,7 +453,9 @@ function Import-WHDFirewallPolicy {
 # The allow-list is harmless while outbound default is Allow; it PRE-STAGES the
 # rules so flipping to default-deny later does not lock the box out.
 function Invoke-WHDFirewallAllowList {
+    param([switch]$NoConfirm)   # set by WHD's own callers that already asked
     Write-WHDLog ('Applying essential ALLOW-list (DNS pinned to {0}).' -f ($script:WHDDnsServers -join ', ')) 'ACT'
+    if (-not $NoConfirm -and -not (Confirm-WHDProceed 'rebuild the WHD outbound allow-list (DNS, DHCP, NTP, HTTP/HTTPS)')) { Write-WHDLog 'skipped.' 'WARN'; return }
     # Rebuild cleanly so re-applying is idempotent (re-adds are authoritative).
     Remove-WHDFwGroup -Group $script:WHDFwGroupAllow
     # DNS pinned to the chosen resolver; HTTP/HTTPS open to Any so browsing + WU work.
@@ -472,6 +501,8 @@ function Invoke-WHDSetDns {
     $adapters = @(Get-NetAdapter -EA SilentlyContinue | Where-Object { $_.Status -eq 'Up' })
     if (-not $adapters.Count) { Write-WHDLog 'no up network adapters found.' 'WARN'; return }
     $hasDoH = [bool](Get-Command Add-DnsClientDohServerAddress -EA SilentlyContinue)
+    $what = if ($Mode -eq 'Cloudflare') { "set system DNS to {0} on {1} up adapter(s)" -f ($script:WHDDnsServers -join ', '), $adapters.Count } else { "reset system DNS to automatic (DHCP) on {0} up adapter(s)" -f $adapters.Count }
+    if (-not (Confirm-WHDProceed $what)) { Write-WHDLog 'skipped.' 'WARN'; return }
 
     if ($Mode -eq 'Cloudflare') {
         if (-not $NoDoH -and $hasDoH) {
@@ -527,32 +558,56 @@ function Remove-WHDRollbackTask {
     if (Test-WHDRollbackTask) { [void](Invoke-WHDSchtasks @('/delete','/tn',$script:WHDFwRollbackTask,'/f')) }
 }
 
+# $true when the essential allow rules (DNS + DHCP request) exist and are enabled.
+# An allow-list group that only holds e.g. WHD-Allow-NTP is NOT ready.
+function Test-WHDAllowListReady {
+    foreach ($rn in @('WHD-Allow-DNS-UDP', 'WHD-Allow-DNS-TCP', 'WHD-Allow-DHCP-Out')) {
+        if (-not @(Get-NetFirewallRule -Name $rn -EA SilentlyContinue | Where-Object { "$($_.Enabled)" -eq 'True' }).Count) { return $false }
+    }
+    return $true
+}
+
 function Enable-WHDDefaultDenyOutbound {
-    param([int]$RollbackMinutes = 10)
+    param([int]$RollbackMinutes = 10, [switch]$NoConfirm)
     Write-Host ''
     Write-WHDLog 'Enable DEFAULT-DENY OUTBOUND (strict).' 'ACT'
+    if ($RollbackMinutes -lt 1 -or $RollbackMinutes -gt 720) {
+        Write-WHDLog ("auto-rollback minutes must be 1 to 720 (got {0}) - using 10." -f $RollbackMinutes) 'WARN'
+        $RollbackMinutes = 10
+    }
     Write-WHDRisk 'hard' ("Sets DefaultOutboundAction=Block. Anything not in the allow-list is cut. Auto-rollback in {0} min unless you confirm keep." -f $RollbackMinutes)
-    # make sure the allow-list exists first
-    if (-not @(Get-NetFirewallRule -Group $script:WHDFwGroupAllow -EA SilentlyContinue)) { Invoke-WHDFirewallAllowList }
-
-    # arm the timed rollback BEFORE flipping, so a mistake self-heals
-    if ($script:WHDExecute) {
-        Initialize-WHDPaths
-        $revert = Join-Path $script:WHDRestore 'defdeny-rollback.ps1'
-        "Set-NetFirewallProfile -All -DefaultOutboundAction Allow -Confirm:`$false" | Set-Content -Path $revert -Encoding ASCII
-        $when = (Get-Date).AddMinutes($RollbackMinutes).ToString('HH:mm')
-        # Direct form (proven to create + fire on this box). Non-terminating via
-        # local EAP + 2>&1 so a stderr write can't crash the app; capture exit code.
-        $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-        & schtasks /create /tn $script:WHDFwRollbackTask /tr "powershell -NoProfile -ExecutionPolicy Bypass -File `"$revert`"" `
-            /sc once /st $when /rl highest /ru SYSTEM /f 2>&1 | Out-Null
-        $code = $LASTEXITCODE
-        $ErrorActionPreference = $prev
-        if ($code -eq 0) {
-            Write-WHDLog ("armed auto-rollback task '{0}' for {1}" -f $script:WHDFwRollbackTask, $when) 'OK'
-        } else {
-            Write-WHDLog ("could NOT arm auto-rollback (schtasks exit {0}). Default-deny will NOT self-revert - keep this window and use option 8 to revert if the box loses connectivity." -f $code) 'WARN'
+    if (-not $NoConfirm -and -not (Confirm-WHDProceed ("enable default-deny outbound (auto-rollback in {0} min)" -f $RollbackMinutes))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    # make sure the essential allow rules (DNS + DHCP) exist and are enabled first
+    # (an EMPTY allow group is built here, as before; a group that already holds rules is never rebuilt silently)
+    if (-not (Test-WHDAllowListReady) -and -not @(Get-NetFirewallRule -Group $script:WHDFwGroupAllow -EA SilentlyContinue).Count) { Invoke-WHDFirewallAllowList -NoConfirm }
+    if (-not (Test-WHDAllowListReady)) {
+        $alMsg = 'the essential allow rules (WHD-Allow-DNS-UDP, WHD-Allow-DNS-TCP, WHD-Allow-DHCP-Out) are missing or switched off. Apply the allow-list (Firewall 5), then try again.'
+        if ($script:WHDExecute) {
+            Write-WHDLog ('Default-deny was NOT enabled: ' + $alMsg) 'ERR'
+            New-WHDResult -Action 'enable default-deny outbound' -Status 'failed' -Detail 'essential allow rules missing' | Out-Null
+            return
         }
+        if (@(Get-NetFirewallRule -Group $script:WHDFwGroupAllow -EA SilentlyContinue).Count) { Write-WHDLog ('  would refuse to enable default-deny: ' + $alMsg) 'WARN' }
+    }
+
+    # arm the timed rollback BEFORE flipping, so a mistake self-heals. One-time
+    # SYSTEM task with no script file: its action is the single revert command.
+    # If it cannot be armed, outbound is NOT blocked.
+    if ($script:WHDExecute) {
+        $when = (Get-Date).AddMinutes($RollbackMinutes)
+        try {
+            $psExe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+            $act  = New-ScheduledTaskAction -Execute $psExe -Argument '-NoProfile -ExecutionPolicy Bypass -Command "Set-NetFirewallProfile -All -DefaultOutboundAction Allow -Confirm:$false"' -EA Stop
+            $trig = New-ScheduledTaskTrigger -Once -At $when -EA Stop
+            $prin = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest -EA Stop
+            $set  = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable -EA Stop
+            Register-ScheduledTask -TaskPath '\' -TaskName $script:WHDFwRollbackTask -Action $act -Trigger $trig -Principal $prin -Settings $set -Force -EA Stop | Out-Null
+        } catch {
+            Write-WHDLog ("Default-deny was NOT enabled: the auto-rollback task '{0}' could not be armed ({1}). Outbound was left as it is." -f $script:WHDFwRollbackTask, $_.Exception.Message) 'ERR'
+            New-WHDResult -Action 'enable default-deny outbound' -Status 'failed' -Detail 'auto-rollback task could not be armed' | Out-Null
+            return
+        }
+        Write-WHDLog ("armed auto-rollback task '{0}' for {1}" -f $script:WHDFwRollbackTask, $when.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)) 'OK'
     } else {
         Write-WHDLog ("would: arm auto-rollback scheduled task '{0}' (+{1} min)" -f $script:WHDFwRollbackTask, $RollbackMinutes) 'DRY'
     }
@@ -565,6 +620,13 @@ function Enable-WHDDefaultDenyOutbound {
 
 function Confirm-WHDDefaultDenyKeep {
     if (-not $script:WHDExecute) { Write-WHDLog 'would: cancel the auto-rollback task (keep default-deny)' 'DRY'; return }
+    # Read the real state first: a one-time task still exists after it has fired.
+    $outNow = @(Get-WHDFwProfiles | ForEach-Object { "$($_.DefaultOutboundAction)" })
+    if ($outNow.Count -and ($outNow -notcontains 'Block')) {
+        Write-WHDLog 'Outbound is already Allow - the auto-rollback already ran, or default-deny is not on. Nothing to keep; any leftover rollback task is removed.' 'INFO'
+        Remove-WHDRollbackTask
+        return
+    }
     if (Test-WHDRollbackTask) {
         Remove-WHDRollbackTask
         Write-WHDLog 'Auto-rollback cancelled - default-deny outbound is now permanent until you revert it.' 'OK'
@@ -578,7 +640,8 @@ function Disable-WHDDefaultDenyOutbound {
         Write-WHDLog 'The update gate is CLOSED - use Updates menu (W) -> O to open it; that also puts back the rules it switched off.' 'WARN'
         return
     }
-    Remove-WHDRollbackTask
+    if (-not (Confirm-WHDProceed 'revert default-deny (set outbound back to Allow on all profiles)')) { Write-WHDLog 'skipped.' 'WARN'; return }
+    if ($script:WHDExecute) { Remove-WHDRollbackTask }
     Invoke-WHDChange -Description 'set DefaultOutboundAction = Allow (revert to permissive)' -Action {
         Set-NetFirewallProfile -All -DefaultOutboundAction Allow -Confirm:$false -EA Stop
     } | Out-Null
@@ -591,7 +654,7 @@ function Disable-WHDDefaultDenyOutbound {
 # NOTE: Windows Firewall rules match IPs, never domain names. Domains go to the
 # hosts sinkhole; IPs/CIDRs go to firewall block rules.
 function Block-WHDIPList {
-    param([Parameter(Mandatory)][string]$Path, [int]$ChunkSize = 1000)
+    param([Parameter(Mandatory)][string]$Path, [int]$ChunkSize = 1000, [switch]$NoConfirm)
     if (-not (Test-Path $Path)) { Write-WHDLog ("IP list not found: {0}" -f $Path) 'ERR'; return }
     $raw = @(Get-Content $Path | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^\s*#' })
     if (-not $raw.Count) { Write-WHDLog 'IP list is empty.' 'WARN'; return }
@@ -604,6 +667,7 @@ function Block-WHDIPList {
     }
     if (-not $ips.Count) { Write-WHDLog 'IP list has no safe, routable entries after filtering.' 'WARN'; return }
     Write-WHDLog ("Blacklisting {0} safe IP/CIDR entr(y/ies) as firewall block rules." -f $ips.Count) 'ACT'
+    if (-not $NoConfirm -and -not (Confirm-WHDProceed ("add inbound + outbound block rules for {0} IP/CIDR entr(y/ies)" -f $ips.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
     $i = 0; $chunk = 0
     while ($i -lt $ips.Count) {
         $slice = @($ips[$i..([Math]::Min($i+$ChunkSize-1, $ips.Count-1))])
@@ -619,18 +683,41 @@ function Block-WHDIPList {
 }
 
 function Block-WHDHostsList {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [switch]$NoConfirm)
     if (-not (Test-Path $Path)) { Write-WHDLog ("hosts blacklist not found: {0}" -f $Path) 'ERR'; return }
-    $domains = @(Get-Content $Path | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^\s*#' })
-    if (-not $domains.Count) { Write-WHDLog 'hosts blacklist is empty.' 'WARN'; return }
+    $raw = @(Get-Content $Path | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch '^\s*#' })
+    if (-not $raw.Count) { Write-WHDLog 'hosts blacklist is empty.' 'WARN'; return }
+    # Only plain host names are written. A leading address column (0.0.0.0 / 127.0.0.1 /
+    # ::1 ...) is dropped, the first token is taken, and anything that is not a host
+    # name - or is a localhost-type name - is skipped.
+    $hostPat = '^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)+$'
+    $list = New-Object System.Collections.Generic.List[string]; $badLines = 0
+    foreach ($e in $raw) {
+        $t   = $e -replace '^(\d{1,3}(\.\d{1,3}){3}|[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*(%\S+)?)\s+', ''
+        $tok = [string](@($t -split '\s+' | Where-Object { $_ })[0])
+        if ($tok -notmatch $hostPat -or $tok -match '\.\d+$' -or $tok -match '^(localhost|localhost\.localdomain|broadcasthost|local|ip6-.*)$') { $badLines++; continue }
+        $list.Add($tok)
+    }
+    $domains = @($list.ToArray())
+    if ($badLines) { Write-WHDLog ("skipped {0} line(s) that are not a plain host name (or are a localhost-type name)." -f $badLines) 'WARN' }
+    if (-not $domains.Count) { Write-WHDLog 'hosts blacklist has no usable host names.' 'WARN'; return }
     $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
     Write-WHDLog ("Sinkholing {0} domain(s) via hosts file." -f $domains.Count) 'ACT'
+    if (-not $NoConfirm -and -not (Confirm-WHDProceed ("add {0} domain(s) to the hosts file" -f $domains.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
     Invoke-WHDChange -Description ("sinkhole {0} domain(s) in hosts (idempotent)" -f $domains.Count) -Action {
         Initialize-WHDPaths
-        Copy-Item $hosts (Join-Path $script:WHDRestore 'hosts.bak') -Force -EA SilentlyContinue
+        # Keep the FIRST backup of the session; a second run must not overwrite it.
+        $bak = Join-Path $script:WHDRestore 'hosts.bak'
+        $cur = @()
+        if (Test-Path -LiteralPath $hosts) {
+            if (-not (Test-Path -LiteralPath $bak)) { Copy-Item -LiteralPath $hosts -Destination $bak -Force -EA Stop }
+            # If hosts cannot be read it is NOT rewritten (that would drop its entries).
+            try { $cur = @(Get-Content -LiteralPath $hosts -EA Stop) }
+            catch { throw ("the hosts file could not be read, so it was not changed: {0}" -f $_.Exception.Message) }
+        }
         # Strip any PRIOR WHD block first so re-applying never stacks duplicates.
         $keep = @(); $skip = $false
-        foreach ($l in @(Get-Content $hosts -EA SilentlyContinue)) {
+        foreach ($l in $cur) {
             if ($l -match '^\s*# WHD-BLACKLIST START') { $skip = $true; continue }
             if ($l -match '^\s*# WHD-BLACKLIST END')   { $skip = $false; continue }
             if (-not $skip) { $keep += $l }
@@ -642,9 +729,13 @@ function Block-WHDHostsList {
 }
 
 function Remove-WHDBlacklist {
+    if (-not (Confirm-WHDProceed 'remove the WHD IP block rules and the WHD block in the hosts file')) { Write-WHDLog 'skipped.' 'WARN'; return }
     Remove-WHDFwGroup -Group $script:WHDFwGroupBlock
     $hosts = "$env:SystemRoot\System32\drivers\etc\hosts"
     Invoke-WHDChange -Description 'remove WHD-BLACKLIST block from hosts' -Action {
+        Initialize-WHDPaths
+        $bak = Join-Path $script:WHDRestore 'hosts.bak'
+        if (-not (Test-Path -LiteralPath $bak)) { Copy-Item -LiteralPath $hosts -Destination $bak -Force -EA Stop }
         $lines = Get-Content $hosts
         $keep = @(); $skip = $false
         foreach ($l in $lines) {
@@ -660,10 +751,13 @@ function Remove-WHDBlacklist {
 #  7) JSON FIREWALL PROFILE APPLIER  (drives everything above from one file)
 # =============================================================================
 function Invoke-WHDApplyFirewallProfile {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [switch]$NoConfirm)
     if (-not (Test-Path $Path)) { Write-WHDLog ("firewall profile not found: {0}" -f $Path) 'ERR'; return }
     $cfg = Get-Content $Path -Raw | ConvertFrom-Json
     Write-WHDLog ("Applying firewall profile: {0}" -f $cfg.name) 'ACT'
+    $what = "apply firewall profile '{0}'" -f $cfg.name
+    if ($cfg.defaultDenyOutbound -eq $true) { $what += ' (this also turns on default-deny outbound)' }
+    if (-not $NoConfirm -and -not (Confirm-WHDProceed $what)) { Write-WHDLog 'skipped.' 'WARN'; return }
 
     if ($cfg.profileDefaults) {
         $inb = if ($cfg.profileDefaults.inbound)  { $cfg.profileDefaults.inbound }  else { 'Block' }
@@ -680,7 +774,7 @@ function Invoke-WHDApplyFirewallProfile {
         } | Out-Null
     }
     if ($cfg.ipv6 -and $cfg.ipv6.disable) {
-        if ($cfg.ipv6.blockLoopback) { Invoke-WHDDisableIPv6 -BlockLoopback } else { Invoke-WHDDisableIPv6 }
+        if ($cfg.ipv6.blockLoopback) { Invoke-WHDDisableIPv6 -BlockLoopback -NoConfirm } else { Invoke-WHDDisableIPv6 -NoConfirm }
     }
     if ($cfg.allowList) {
         foreach ($a in @($cfg.allowList)) {
@@ -707,15 +801,19 @@ function Invoke-WHDApplyFirewallProfile {
     if ($cfg.blacklist) {
         $base = Split-Path -Parent $Path
         if ($cfg.blacklist.ipFile) {
-            $f = Join-Path $base $cfg.blacklist.ipFile; if (Test-Path $f) { Block-WHDIPList -Path $f }
+            $f = Join-Path $base $cfg.blacklist.ipFile
+            if (Test-Path $f) { Block-WHDIPList -Path $f -NoConfirm }
+            else { Write-WHDLog ("The IP list file named in the profile was not found ({0}), so no block list was applied. Block lists are not shipped; see Firewall F / profiles\incoming." -f $f) 'WARN' }
         }
         if ($cfg.blacklist.hostsFile) {
-            $f = Join-Path $base $cfg.blacklist.hostsFile; if (Test-Path $f) { Block-WHDHostsList -Path $f }
+            $f = Join-Path $base $cfg.blacklist.hostsFile
+            if (Test-Path $f) { Block-WHDHostsList -Path $f -NoConfirm }
+            else { Write-WHDLog ("The hosts list file named in the profile was not found ({0}), so no hosts sinkhole was applied. Block lists are not shipped." -f $f) 'WARN' }
         }
     }
     if ($cfg.defaultDenyOutbound -eq $true) {
         $mins = if ($cfg.rollbackMinutes) { [int]$cfg.rollbackMinutes } else { 10 }
-        Enable-WHDDefaultDenyOutbound -RollbackMinutes $mins
+        Enable-WHDDefaultDenyOutbound -RollbackMinutes $mins -NoConfirm
     }
     Write-WHDLog 'Firewall profile applied. Review results and confirm before it becomes permanent.' 'OK'
 }
@@ -797,7 +895,7 @@ function Read-WHDFirewallLog {
                 if ($v.Count -lt 8) { continue }
                 $h = @{}; for ($i = 0; $i -lt [math]::Min($fields.Count, $v.Count); $i++) { $h[$fields[$i]] = $v[$i] }
                 $t = [datetime]::MinValue
-                if (-not [datetime]::TryParse(("{0} {1}" -f $h['date'], $h['time']), [ref]$t)) { continue }
+                if (-not [datetime]::TryParseExact(("{0} {1}" -f $h['date'], $h['time']), 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$t)) { continue }
                 if ($t -lt $Since) { continue }
                 $h['when'] = $t
                 $rows.Add([pscustomobject]$h)
@@ -886,14 +984,14 @@ function Show-WHDBlockedConnections {
 function Add-WHDProgramAllow {
     param([Parameter(Mandatory)]$Item)
     if ($Item.Direction -ne 'Outbound') {
-        Write-WHDLog ("not allowed from here: {0} is INBOUND - allowing it would open this PC to the network. Add an inbound rule by hand if you really need it." -f $Item.Exe) 'WARN'; return
+        Write-WHDLog ("not allowed from the viewer: {0} is INBOUND - allowing it would open the PC to the network. Add an inbound rule by hand if you really need it." -f $Item.Exe) 'WARN'; return
     }
     $exe = if ($Item.Program) { Split-Path $Item.Program -Leaf } else { '' }
     if (-not $Item.Program -or $Item.Program -eq 'System' -or $exe -ieq 'svchost.exe' -or $Item.Program -notmatch '^[A-Za-z]:\\') {
-        Write-WHDLog ("not allowed from here: '{0}' is Windows service traffic (svchost/System). A program rule would open every service - add a port rule for the specific need instead." -f $Item.Exe) 'WARN'; return
+        Write-WHDLog ("not allowed from the viewer: '{0}' is Windows service traffic (svchost/System). A program rule would open every service - add a port rule for the specific need instead." -f $Item.Exe) 'WARN'; return
     }
     if ($Item.Protocol -notin @('TCP','UDP') -or -not $Item.RemotePort) {
-        Write-WHDLog ("not allowed from here: only TCP/UDP with a port can be allowed ({0} {1})." -f $Item.Protocol, $Item.RemotePort) 'WARN'; return
+        Write-WHDLog ("not allowed from the viewer: only TCP/UDP with a port can be allowed ({0} {1})." -f $Item.Protocol, $Item.RemotePort) 'WARN'; return
     }
     if (-not (Test-Path -LiteralPath $Item.Program)) { Write-WHDLog ("note: program path not found on disk (moved or updated?): {0}" -f $Item.Program) 'WARN' }
     $safe = ($exe -replace '[^A-Za-z0-9._-]', '_')
@@ -1242,7 +1340,7 @@ function Update-WHDBlocklistRules {
     Write-WHDLog 'REBUILD IP block rules from profiles\blacklist-ip.txt' 'ACT'
     if (-not (Confirm-WHDProceed 'rebuild the IP block rules now')) { Write-WHDLog 'skipped.' 'WARN'; return }
     Remove-WHDFwGroup -Group $script:WHDFwGroupBlock | Out-Null
-    Block-WHDIPList -Path (Join-Path $script:WHDRoot 'profiles\blacklist-ip.txt')
+    Block-WHDIPList -Path (Join-Path $script:WHDRoot 'profiles\blacklist-ip.txt') -NoConfirm
 }
 
 # =============================================================================

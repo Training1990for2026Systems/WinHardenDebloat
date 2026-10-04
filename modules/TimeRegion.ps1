@@ -66,7 +66,7 @@ function _WHDPickFromZones {
 function Invoke-WHDPickTimeZone {
     Write-WHDLog 'TIME ZONE: pick by hand' 'ACT'
     $cur = Get-WHDTimeSnapshot
-    Write-Host ("  Now: {0}  ({1:yyyy-MM-dd HH:mm})" -f $cur.ZoneId, $cur.Local)
+    Write-Host ("  Now: {0}  ({1})" -f $cur.ZoneId, $cur.Local.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture))
     Write-Host ''
     $all = @(Get-TimeZone -ListAvailable)
     $short = @(foreach ($s in $script:WHDTzShort) {
@@ -84,7 +84,8 @@ function Invoke-WHDPickTimeZone {
     elseif ($a -match '^[Ss]$') {
         $q = (Read-Host '  Search text (e.g. Tokyo, London, Hawaii)').Trim()
         if (-not $q) { return }
-        $hits = @($all | Where-Object { $_.Id -like "*$q*" -or $_.DisplayName -like "*$q*" -or $_.StandardName -like "*$q*" } |
+        $qe = [System.Management.Automation.WildcardPattern]::Escape($q)   # [ ] * ? in the search text are plain characters
+        $hits = @($all | Where-Object { $_.Id -like "*$qe*" -or $_.DisplayName -like "*$qe*" -or $_.StandardName -like "*$qe*" } |
                   ForEach-Object { [pscustomobject]@{ Id = $_.Id; Label = $_.DisplayName } })
         $pick = _WHDPickFromZones -Zones $hits
     }
@@ -99,7 +100,7 @@ function Invoke-WHDPickTimeZone {
 function Invoke-WHDSetDateTimeManual {
     Write-WHDLog 'DATE / TIME: set by hand' 'ACT'
     $cur = Get-WHDTimeSnapshot
-    Write-Host ("  Now: {0:yyyy-MM-dd HH:mm:ss}  ({1})" -f $cur.Local, $cur.ZoneId)
+    Write-Host ("  Now: {0}  ({1})" -f $cur.Local.ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture), $cur.ZoneId)
     Write-Host '  Type the correct LOCAL date and time for this time zone.'
     $txt = (Read-Host '  New date/time as yyyy-MM-dd HH:mm (Enter = cancel)').Trim()
     if (-not $txt) { return }
@@ -119,16 +120,16 @@ function Set-WHDDateTimeManual {
     $absMin = [math]::Abs($diff.TotalMinutes)
     Write-WHDLog ("Clock change: {0}{1:N1} minutes" -f $(if ($diff.TotalMinutes -ge 0) { '+' } else { '-' }), $absMin) 'INFO'
     $note = if ($absMin -lt 60) {
-        'Automatic sync stays on (your choice): a difference under 1 hour from time.cloudflare.com is corrected back at the next sync.'
+        'Automatic time sync stays on: a difference of under 1 hour from the real time is corrected back at the next sync.'
     } else {
-        'Automatic sync stays on (your choice): WHD''s 1 hour jump limit means sync will NOT move the clock back by more than 1 hour, so the time you type stays - make sure it is right.'
+        'Automatic time sync stays on: if the clock is set further from the real time than the correction Windows allows (1 hour after WHD''s time-sync option, Firewall T; otherwise the Windows default of 15 hours), sync will NOT move it back and the time you type stays - make sure it is right.'
     }
     Write-WHDRisk 'caution' ("Sets the PC clock. {0} To return to network time: Firewall S shows the source; 'w32tm /resync' or Settings > Date & time > Sync now." -f $note)
-    if (-not (Confirm-WHDProceed ("set the clock to {0:yyyy-MM-dd HH:mm}" -f $dt))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    if (-not (Confirm-WHDProceed ("set the clock to {0}" -f $dt.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)))) { Write-WHDLog 'skipped.' 'WARN'; return }
     $sdNew = $dt; $sdOld = $cur.Local
     $jr = @{ Kind = 'action'; OldTime = $sdOld.ToString('yyyy-MM-dd HH:mm:ss'); NewTime = $sdNew.ToString('yyyy-MM-dd HH:mm:ss')
              Hint = 'the clock keeps running - set it again by hand, or Settings > Date & time > Sync now' }
-    Invoke-WHDChange -Description ("set date/time {0:yyyy-MM-dd HH:mm} -> {1:yyyy-MM-dd HH:mm}" -f $sdOld, $sdNew) -Force -Journal $jr -Action {
+    Invoke-WHDChange -Description ("set date/time {0} -> {1}" -f $sdOld.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture), $sdNew.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)) -Force -Journal $jr -Action {
         Set-Date -Date $sdNew -EA Stop | Out-Null
     } | Out-Null
     if ($script:WHDExecute) { Show-WHDTimeRegionStatus }

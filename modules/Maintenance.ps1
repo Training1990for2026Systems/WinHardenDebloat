@@ -26,10 +26,13 @@ function _WHDRunDism {
     param([string[]]$DismArgs)
     Write-WHDLog ("DISM {0}" -f ($DismArgs -join ' ')) 'INFO'
     try {
+        # local to this function: a line DISM writes to stderr is shown, not turned into a terminating error
+        $ErrorActionPreference = 'Continue'
         & dism.exe @DismArgs 2>&1 | ForEach-Object { Write-Host ("    {0}" -f $_) }
         if ($LASTEXITCODE -ne 0) { throw "DISM exited with code $LASTEXITCODE" }
     } catch {
         Write-WHDLog ("DISM error: {0}" -f $_.Exception.Message) 'ERR'
+        throw   # the caller (Invoke-WHDChange) must record a failed DISM run as FAILED, not done
     }
 }
 
@@ -37,7 +40,7 @@ function Invoke-WHDComponentAnalyze {
     # Read-only: safe to run in any mode. Reports the ACTUAL reclaimable size
     # (not the inflated Explorer number) and whether cleanup is recommended.
     Write-WHDLog 'COMPONENT STORE ANALYSIS (read-only)' 'ACT'
-    _WHDRunDism -DismArgs @('/Online','/Cleanup-Image','/AnalyzeComponentStore')
+    try { _WHDRunDism -DismArgs @('/Online','/Cleanup-Image','/AnalyzeComponentStore') } catch { }   # already logged by _WHDRunDism
 }
 
 function Invoke-WHDComponentCleanup {
@@ -53,7 +56,9 @@ function Invoke-WHDComponentCleanup {
         Write-WHDRisk 'reversible' 'Removes only superseded components. Supported and safe; keeps the ability to uninstall installed updates.'
     }
     if (-not (Confirm-WHDProceed ("run DISM {0}" -f $label))) { Write-WHDLog 'skipped.' 'WARN'; return }
-    Invoke-WHDChange -Description ("DISM {0}" -f $label) -Force -Action {
+    $jr = @{ Kind = 'action' }
+    if ($ResetBase) { $jr['Hint'] = 'cannot be undone - after ResetBase the Windows updates installed before it can no longer be uninstalled, and a restore point does not bring that back' }
+    Invoke-WHDChange -Description ("DISM {0}" -f $label) -Force -Journal $jr -Action {
         _WHDRunDism -DismArgs $dismArgs
     }
 }
@@ -71,9 +76,9 @@ function Show-WHDMaintenanceMenu {
 }
 
 # ==============================================================================
-# Phase 9 - A2 UPDATE GUARD (alert only; never changes anything)
+# UPDATE GUARD (alert only; never changes anything)
 # ------------------------------------------------------------------------------
-# User choices (2026-09-24):
+# How it works:
 #   * runs at sign-in, 10 minutes after logon (scheduled task, user account,
 #     highest privileges, only while signed in)
 #   * checks: Verify ALL (every journaled WHD change) + inventory compare
@@ -203,13 +208,16 @@ function Invoke-WHDUpdateGuard {
     $bad = @($res | Where-Object { $_.Result -in @('CHANGED','RETURNED') })
     $rep.Add(("  {0} checked: {1} pass, {2} changed/returned" -f $res.Count, @($res | Where-Object { $_.Result -eq 'PASS' }).Count, $bad.Count))
     foreach ($b in $bad) { $rep.Add(("  !! {0,-8} {1}   now: {2}" -f $b.Result, $b.Target, $b.Now)) }
+    # No journal at all under this data folder (e.g. the WHD folder was moved): "0 changed" would be a false OK.
+    $jrnDirs = @(Get-ChildItem -LiteralPath (Get-WHDRestoreRoot) -Directory -EA SilentlyContinue | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'journal.jsonl') })
+    if (-not $jrnDirs.Count) { $alert = $true; $rep.Add(("  !! No WHD change history found at {0} - if the WHD folder was moved, start WHD from its new location, switch to EXECUTE (main menu 8), then press GU." -f $script:WHDRoot)) }
     if ($bad.Count) { $alert = $true; $rep.Add('  -> Fix: WHD menu (re-apply the item) or Undo center; Verify (V) shows the same list.') }
     if (@($bad | Where-Object { $_.Result -eq 'CHANGED' }).Count) { $rep.Add('  -> Settings that changed back: WHD main menu V, answer y to re-apply them (GUI: Inventory/Undo > "Re-apply settings that changed back").') }
     if (@($bad | Where-Object { $_.Result -eq 'RETURNED' }).Count) { $rep.Add('  -> Apps that came back: WHD main menu V, answer y to re-remove them (GUI: Inventory/Undo > "Re-remove apps that came back").') }
     $rep.Add('')
 
     # 2b) Time: refused time jumps since the last check (Time-Service event 34).
-    #     User decision 2026-09-24: alert (open the report) when there are any.
+    #     Alert (open the report) when there are any.
     if (Get-Command Get-WHDTimeJumpEvents -EA SilentlyContinue) {
         $rep.Add('-- 1b. TIME: REFUSED CLOCK JUMPS (1 h limit) -------------------------')
         $since = (Get-Date).AddDays(-7)
@@ -303,8 +311,13 @@ function _WHDIcacls {
 # Users read/execute, owner = Administrators (well-known SIDs, any language).
 function _WHDGuardCopy {
     param([string]$Src, [string]$Base, [string]$Dst)
+    # A pre-made junction/symlink here would send the scripts (and the permissions) somewhere else.
+    foreach ($d in @($Base, $Dst, (Join-Path $Dst 'modules'))) {
+        if ((Test-Path -LiteralPath $d) -and ((Get-Item -LiteralPath $d -Force -EA Stop).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'the guard folder is a link (reparse point) - refusing to use it' }
+    }
     foreach ($d in @($Base, $Dst, (Join-Path $Dst 'modules'))) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
     _WHDIcacls @($Base, '/setowner', '*S-1-5-32-544', '/T', '/C', '/Q')
+    _WHDIcacls @($Base, '/reset', '/Q')
     _WHDIcacls @($Base, '/inheritance:r', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX', '/Q')
     _WHDIcacls @((Join-Path $Base '*'), '/reset', '/T', '/C', '/Q')
     Get-ChildItem -LiteralPath $Dst -Recurse -File -EA SilentlyContinue | Remove-Item -Force -EA Stop

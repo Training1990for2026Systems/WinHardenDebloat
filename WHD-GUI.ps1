@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  WHD-GUI.ps1   (Phase 3 - PowerShell + WPF front end)
+ WinHardenDebloat  -  WHD-GUI.ps1   (PowerShell + WPF front end)
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -18,6 +18,13 @@
 [CmdletBinding()]
 param([switch]$NoElevate)
 $ErrorActionPreference = 'Stop'
+
+# WHD Classic is written for Windows PowerShell 5.1 (powershell.exe), not PowerShell 7 (pwsh).
+if ($PSVersionTable.PSVersion.Major -ne 5) {
+    Write-Host 'WHD Classic needs Windows PowerShell 5.1. Start it with powershell.exe (not pwsh):' -ForegroundColor Red
+    Write-Host '  powershell -ExecutionPolicy Bypass -File .\WHD-GUI.ps1' -ForegroundColor Red
+    exit 1
+}
 
 function _isAdmin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -109,7 +116,7 @@ $xaml = @'
                 <Button x:Name="FwRevertBtn" DockPanel.Dock="Left" Content="Revert"/>
               </DockPanel>
               <TextBlock Text="Blacklist" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
-              <Button x:Name="FwBlockIpBtn" Content="Block IP list (curated)"/>
+              <Button x:Name="FwBlockIpBtn" Content="Block IP list (your profiles\blacklist-ip.txt)"/>
               <Button x:Name="FwHostsBtn"   Content="Hosts sinkhole"/>
               <Button x:Name="FwClearBlBtn" Content="Clear blacklist"/>
               <Button x:Name="FwRefreshBlBtn" Content="Refresh blocklist (incoming)"/>
@@ -125,7 +132,7 @@ $xaml = @'
               <ComboBox x:Name="FwTzCombo" Margin="2" DisplayMemberPath="Label" ToolTip="* = common US zones; the rest is every Windows time zone"/>
               <Button x:Name="FwTzSetBtn" Content="Set time zone" ToolTip="Journaled; Verify / the update guard put it back if something changes it"/>
               <TextBox x:Name="FwDateBox" Margin="2" ToolTip="Local date and time as yyyy-MM-dd HH:mm"/>
-              <Button x:Name="FwDateSetBtn" Content="Set date/time" ToolTip="Automatic sync stays on (1 h jump limit)"/>
+              <Button x:Name="FwDateSetBtn" Content="Set date/time" ToolTip="Automatic time sync stays on"/>
               <TextBlock Text="Policy files" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
               <Button x:Name="FwApplyBtn"  Content="Apply baseline profile"/>
               <Button x:Name="FwExportBtn" Content="Export (json + .wfw)"/>
@@ -208,7 +215,7 @@ $xaml = @'
             <StackPanel Margin="2">
               <Button x:Name="UpdStatusBtn" Content="Updates status (read-only)" FontWeight="Bold"/>
               <TextBlock Text="Update gate" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
-              <Button x:Name="UpdGateCloseBtn" Content="CLOSE gate (Defender + DoH only)" ToolTip="Outbound default-deny; only Microsoft Defender and DNS-over-HTTPS may use HTTP/HTTPS. Windows Update, Store, drivers, app updaters, browsers and the Claude app are offline."/>
+              <Button x:Name="UpdGateCloseBtn" Content="CLOSE gate (Defender + DoH only)" ToolTip="Outbound default-deny; only Microsoft Defender and DNS-over-HTTPS may use HTTP/HTTPS. Windows Update, Store, drivers, app updaters, browsers and other apps are offline."/>
               <Button x:Name="UpdGateOpenBtn"  Content="OPEN gate (let updates in)" ToolTip="Puts back every rule the gate switched off; stays open until you close it."/>
               <Button x:Name="UpdDefenderBtn"  Content="Defender: update definitions now"/>
               <TextBlock Text="Policies (Home: tried + verified)" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
@@ -270,7 +277,7 @@ $xaml = @'
               <Button x:Name="SecSvcProxyBtn" Content="Proxy auto-detect (Settings switch only)"/>
               <Button x:Name="SecSvcFaxBtn"   Content="Fax + Phone service"/>
               <Button x:Name="SecSvcAllBtn"   Content="All safe ones (not the WinHTTP service)"/>
-              <Button x:Name="SecSvcProxySvcBtn" Content="WinHTTP proxy SERVICE off (breaks Wi-Fi here)" Foreground="#E8735B"/>
+              <Button x:Name="SecSvcProxySvcBtn" Content="WinHTTP proxy SERVICE off (test: broke Wi-Fi)" Foreground="#E8735B" ToolTip="Test only: in testing this stopped Wi-Fi from connecting after a restart. Undo: Undo center, then restart."/>
               <TextBlock Text="Devices (network adapters)" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
               <Button x:Name="DevBtBtn"     Content="Bluetooth network part off"/>
               <Button x:Name="DevWfdBtn"    Content="Wi-Fi Direct adapters off + block"/>
@@ -337,7 +344,7 @@ $xaml = @'
             <Button x:Name="AiStoreBtn"   Content="Store suppression"/>
           </StackPanel>
           <TextBlock DockPanel.Dock="Top" Foreground="#9AA6BF" Margin="2,2,2,6"
-                     Text="Select one or more AI surfaces, then choose an action. Green=reversible, red=don't touch."/>
+                     Text="Select one or more AI surfaces, then choose an action. Policy-only entries show their current state in brackets."/>
           <ListBox x:Name="AiList" SelectionMode="Extended" Background="#0F1218" Foreground="#E8EBF2"/>
         </DockPanel>
       </TabItem>
@@ -358,7 +365,7 @@ $xaml = @'
             <Button x:Name="GenPrivBtn"    Content="Privacy hardening"/>
             <Button x:Name="GenDiagBtn"    Content="Disable DiagTrack"/>
           </StackPanel>
-          <TextBlock DockPanel.Dock="Top" Foreground="#9AA6BF" Margin="2,2,2,6" Text="Curated non-AI Store apps (only reviewed-safe ones)."/>
+          <TextBlock DockPanel.Dock="Top" Foreground="#9AA6BF" Margin="2,2,2,6" Text="Curated non-AI Store apps, plus the non-Microsoft apps found on this PC (not reviewed)."/>
           <ListBox x:Name="GenList" SelectionMode="Extended" Background="#0F1218" Foreground="#E8EBF2"/>
         </DockPanel>
       </TabItem>
@@ -479,7 +486,7 @@ $xaml = @'
             </StackPanel>
             <TextBlock Text="Undo center" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,10,2,2"/>
             <TextBlock Foreground="#9AA6BF" Margin="2,0,2,4" TextWrapping="Wrap"
-                       Text="auto = put back automatically (exact previous value)   manual = see hint in the log   Sessions before Phase 5 only have .reg / firewall / hosts backups."/>
+                       Text="auto = put back automatically (exact previous value)   manual = see hint in the log   Older sessions (from before the change journal) only have .reg / firewall / hosts backups."/>
             <DockPanel Margin="0,2,0,4">
               <TextBlock DockPanel.Dock="Left" Text="Session:" Foreground="#9AA6BF" VerticalAlignment="Center" Margin="2,0,6,0"/>
               <Button   DockPanel.Dock="Right" x:Name="UndoRefreshBtn" Content="Refresh"/>
@@ -523,6 +530,12 @@ $xaml = @'
 
 $reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $win = [Windows.Markup.XamlReader]::Load($reader)
+# Small or scaled screens (1366x768, full HD at 150 %): never larger than the work area.
+try {
+    $whdWorkArea = [System.Windows.SystemParameters]::WorkArea
+    if ($win.Height -gt $whdWorkArea.Height) { $win.Height = $whdWorkArea.Height }
+    if ($win.Width  -gt $whdWorkArea.Width)  { $win.Width  = $whdWorkArea.Width }
+} catch { }
 
 # ---- grab controls ----------------------------------------------------------
 foreach ($n in 'ElevTxt','ModeChk','RpBtn','GuardRefreshBtn','ReRemoveBtn','ReApplyBtn','AiList','AiFeatureBtn','AiRemoveBtn','AiStoreBtn',
@@ -558,7 +571,7 @@ $script:WHDLogSink = {
 # ---- confirm strategy -> a Yes/No dialog ------------------------------------
 $script:WHDConfirm = {
     param($msg)
-    ([System.Windows.MessageBox]::Show(($msg + "`n`nProceed?"), 'WinHardenDebloat - confirm', 'YesNo', 'Warning')) -eq 'Yes'
+    ([System.Windows.MessageBox]::Show($win, ($msg + "`n`nProceed?"), 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)) -eq 'Yes'
 }
 
 function Set-WHDStatus { param($t) $StatusTxt.Text = $t }
@@ -704,7 +717,7 @@ function Invoke-FwAction {
     Write-WHDLog ("=== $Title ($(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'})) ===") 'ACT'
     $prev = $script:WHDConfirm
     if ($script:WHDExecute) {
-        $ok = ([System.Windows.MessageBox]::Show("About to: $Title`n`nThis changes the Windows firewall / DNS. Proceed?", 'WinHardenDebloat - firewall', 'YesNo', 'Warning')) -eq 'Yes'
+        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title`n`nThis changes Windows firewall, DNS or time settings. Proceed?", 'WinHardenDebloat - firewall', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)) -eq 'Yes'
         if (-not $ok) { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
         $script:WHDConfirm = { param($m) $true }
     }
@@ -728,7 +741,7 @@ $FwDenyBtn.Add_Click({
 })
 $FwKeepBtn.Add_Click({   Invoke-FwAction 'Confirm keep default-deny' { Confirm-WHDDefaultDenyKeep } })
 $FwRevertBtn.Add_Click({ Invoke-FwAction 'Revert default-deny' { Disable-WHDDefaultDenyOutbound } })
-$FwBlockIpBtn.Add_Click({ Invoke-FwAction 'Block IP list (curated)' { Block-WHDIPList -Path (Join-Path $FwProfilesPath 'blacklist-ip.txt') } -Reload })
+$FwBlockIpBtn.Add_Click({ Invoke-FwAction 'Block IP list (your profiles\blacklist-ip.txt)' { Block-WHDIPList -Path (Join-Path $FwProfilesPath 'blacklist-ip.txt') } -Reload })
 $FwHostsBtn.Add_Click({   Invoke-FwAction 'Hosts sinkhole' { Block-WHDHostsList -Path (Join-Path $FwProfilesPath 'blacklist-hosts.txt') } })
 $FwClearBlBtn.Add_Click({ Invoke-FwAction 'Clear blacklist' { Remove-WHDBlacklist } -Reload })
 $FwApplyBtn.Add_Click({   Invoke-FwAction 'Apply baseline profile' { Invoke-WHDApplyFirewallProfile -Path (Join-Path $FwProfilesPath 'firewall-baseline.json') } -Reload })
@@ -741,7 +754,9 @@ $FwImportBtn.Add_Click({
     $dlg.Filter = 'Firewall policy (*.json;*.wfw)|*.json;*.wfw'
     if ($dlg.ShowDialog()) {
         $mode = if ($dlg.FileName -match '\.wfw$') { 'Wfw' } else { 'Json' }
-        Invoke-FwAction ('Import ' + (Split-Path $dlg.FileName -Leaf)) ([scriptblock]::Create("Import-WHDFirewallPolicy -Path '$($dlg.FileName)' -Mode $mode")) -Reload
+        # No code built from the file name: the block reads these handler variables when it runs.
+        $fwImpFile = $dlg.FileName; $fwImpMode = $mode
+        Invoke-FwAction ('Import ' + (Split-Path $fwImpFile -Leaf)) { Import-WHDFirewallPolicy -Path $fwImpFile -Mode $fwImpMode } -Reload
     }
 })
 $FwRulesBtn.Add_Click({ Refresh-FwGrid })
@@ -775,7 +790,7 @@ function Update-TzControls {
         $FwTzCombo.ItemsSource = @(Get-WHDTimeZoneChoices)
         $curTz = "$((Get-TimeZone).Id)"
         $FwTzCombo.SelectedItem = @($FwTzCombo.ItemsSource | Where-Object { $_.Id -eq $curTz -and $_.Label -notlike '[*]*' })[0]
-        $FwDateBox.Text = (Get-Date).ToString('yyyy-MM-dd HH:mm')
+        $FwDateBox.Text = (Get-Date).ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)
     } catch { Write-WHDLog ("time zone list: " + $_.Exception.Message) 'WARN' }
 }
 Update-TzControls
@@ -796,7 +811,7 @@ $FwDateSetBtn.Add_Click({
     if (-not [datetime]::TryParseExact($dtTxt, 'yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$dtVal)) {
         Write-WHDLog 'Date/time not understood - use e.g. 2026-09-30 17:45' 'WARN'; return
     }
-    Invoke-GuiAction ("Set date/time -> " + $dtTxt) { Set-WHDDateTimeManual -Date $dtVal }
+    Invoke-GuiAction ("Set date/time -> " + $dtVal.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)) { Set-WHDDateTimeManual -Date $dtVal }
     Update-TzControls
 })
 $FwRefreshBlBtn.Add_Click({
@@ -808,13 +823,13 @@ $FwRefreshBlBtn.Add_Click({
     if (-not $script:WHDExecute) { Write-WHDLog 'DRY-RUN: preview only. Tick EXECUTE to merge or replace.' 'DRY'; Set-WHDStatus 'Preview done (DRY-RUN).'; return }
     $msg = ("Current list: {0} ranges. Incoming: {1} ranges.`n`nMERGE   -> {2} ranges (keep all, add {3} new)`nREPLACE -> {4} ranges (drops {5} not in the new files)`n`nYes = MERGE     No = REPLACE     Cancel = do nothing" -f `
         $sum.Current, $sum.Incoming, $sum.MergeTotal, $sum.Added, $sum.ReplaceTotal, $sum.Removed)
-    $ans = [System.Windows.MessageBox]::Show($msg, 'WinHardenDebloat - blocklist refresh', 'YesNoCancel', 'Question')
+    $ans = [System.Windows.MessageBox]::Show($win, $msg, 'WinHardenDebloat - blocklist refresh', [System.Windows.MessageBoxButton]::YesNoCancel, [System.Windows.MessageBoxImage]::Question)
     if ("$ans" -eq 'Cancel') { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
     $mode = if ("$ans" -eq 'Yes') { 'Merge' } else { 'Replace' }
     $prev = $script:WHDConfirm; $script:WHDConfirm = { param($m) $true }
     try {
         Invoke-WHDBlocklistRefresh -Mode $mode | Out-Null
-        $rb = [System.Windows.MessageBox]::Show('Blocklist file updated. Rebuild the firewall block rules from it now?', 'WinHardenDebloat - blocklist refresh', 'YesNo', 'Question')
+        $rb = [System.Windows.MessageBox]::Show($win, 'Blocklist file updated. Rebuild the firewall block rules from it now?', 'WinHardenDebloat - blocklist refresh', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
         if ("$rb" -eq 'Yes') { Update-WHDBlocklistRules }
     } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
     finally { $script:WHDConfirm = $prev }
@@ -909,7 +924,7 @@ $DevWfdBtn.Add_Click({    Invoke-SecAction 'Wi-Fi Direct adapters off + block' {
 $DevWanBtn.Add_Click({    Invoke-SecAction 'WAN Miniports: block + remove' { Invoke-WHDWanMiniportsOff } })
 $DevStatusBtn.Add_Click({ Invoke-GuiAction 'Devices status' { Show-WHDDevicesStatus } })
 $SecSvcAllBtn.Add_Click({   Invoke-SecAction 'Turn off all safe service groups' { foreach ($g in @($script:WHDNetServiceGroups | Where-Object { -not $_.NotInAll })) { Invoke-WHDNetServiceOff -Item $g } } })
-$SecSvcProxySvcBtn.Add_Click({ Invoke-SecAction 'WinHTTP proxy SERVICE off - tested 2026-09-29: breaks Wi-Fi on this PC' { Invoke-WHDNetServiceOff -Item @($script:WHDNetServiceGroups | Where-Object { $_.Key -eq 'proxysvc' })[0] } })
+$SecSvcProxySvcBtn.Add_Click({ Invoke-SecAction 'WinHTTP proxy SERVICE off - test only: in testing this stopped Wi-Fi from connecting after a restart (undo: Undo center, then restart)' { Invoke-WHDNetServiceOff -Item @($script:WHDNetServiceGroups | Where-Object { $_.Key -eq 'proxysvc' })[0] } })
 $SecUacBtn.Add_Click({      Invoke-SecAction 'UAC: Always notify' { Set-WHDUacAlwaysNotify } })
 $SecPwBtn.Add_Click({       Invoke-SecAction 'Password + lockout rules (14 chars, remember 5, never expire, 3 tries / 10 min)' { Invoke-WHDPasswordPolicy } })
 function Update-SecGuard { try { $SecStatus.Text = ("Update guard: {0}" -f (Get-WHDGuardStatus).Text) } catch {} }
@@ -950,7 +965,7 @@ function Invoke-UndoAction {
     Write-WHDLog ("=== $Title ($(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'})) ===") 'ACT'
     $prev = $script:WHDConfirm
     if ($script:WHDExecute) {
-        $ok = ([System.Windows.MessageBox]::Show("About to: $Title`n`nProceed?", 'WinHardenDebloat - undo', 'YesNo', 'Warning')) -eq 'Yes'
+        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title`n`nProceed?", 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)) -eq 'Yes'
         if (-not $ok) { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
         $script:WHDConfirm = { param($m) $true }
     }
@@ -984,7 +999,9 @@ $UndoRegBtn.Add_Click({   $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoA
 Refresh-UndoSessions
 
 Write-WHDLog 'GUI ready. DRY-RUN mode (tick EXECUTE to make changes).' 'INFO'
+Write-WHDLog 'Provided as is, with no warranty (MIT License) - use at your own risk.' 'INFO'
 Set-WHDStatus 'DRY-RUN mode - actions only preview.'
 try { Update-WHDGuardIfStale } catch { }
+try { Write-WHDAccountWarning } catch { }
 $win.ShowDialog() | Out-Null
 Stop-WHDTranscript

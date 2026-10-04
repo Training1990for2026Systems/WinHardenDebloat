@@ -1,6 +1,6 @@
 {
   "name": "validated",
-  "description": "VALIDATED = same settings as profiles\\standard.json (brought in line by the user's decision 2026-09-29, after the radio test rounds 1-8 all passed on <PC-NAME>). Earlier differences removed: Paint + Photos now removed, Camera kept, remove-all-recommended on, ASR in Block, firewall rules wiped first, update gate left open, OneDrive uninstalled. Network services: fileshare, dialvpn, ipsec, proxy (Settings switch only - the WinHTTP service is never disabled, it breaks Wi-Fi), faxphone, smb. Devices: Wi-Fi Direct, WAN Miniports and the Bluetooth network part off. Permissions = Lock (camera, microphone, radios and location off but not locked). Dry run first: WHD.ps1 -Apply profiles\\validated.json, then add -Execute. See docs\\standard-reimage.md and docs\\radio-group-test.md.",
+  "description": "Same settings as profiles\\standard.json, kept under its earlier name: the STRICT FULL LOCK-DOWN of the author's own test PC (Windows 11 Home), not a general default. PROVIDED AS IS, WITH NO WARRANTY: you run it at your own risk (see LICENSE). Read the description in profiles\\standard.json and the README section 'Read this before you run it' for what it does. Dry run first: WHD.ps1 -Apply profiles\\validated.json, then add -Execute.",
   "ai": {
     "featureOff": [
       "copilot",
