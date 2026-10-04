@@ -1,7 +1,7 @@
 > **WinHardenDebloat (WHD)** - by **Training1990for2026Systems** - contact: t90018273@gmail.com
 > License: [MIT](LICENSE) - Security reports: see [SECURITY.md](SECURITY.md) - Built with Claude by Anthropic.
 
-**Version: Classic 1.4.1** (2026-10-03) - runs on Windows PowerShell 5.1, which is built into Windows.
+**Version: Classic 1.4.2** (2026-10-04) - runs on Windows PowerShell 5.1, which is built into Windows.
 
 # WinHardenDebloat
 
@@ -31,6 +31,9 @@ WHD changes Windows security, network, update and privacy settings and removes a
   - most firewall changes are undone by restoring that session's firewall backup (Undo center **F**), not one by one;
     DNS and IPv6 are put back with Firewall **U** (DNS back to automatic) and Firewall **3** (re-enable IPv6);
   - if Windows cannot create the restore point, WHD warns and continues.
+- **Keep the WHD folder outside Documents, Pictures, Videos, Music, Favorites and Desktop** (for example `C:\WHD`). Ransomware
+  folder protection in BLOCK mode (Security+ **3B**; `standard.json` and `validated.json` switch it on) does not treat PowerShell as
+  a trusted app, so WHD may then be unable to write its log, change history and backups in those folders. WHD warns when it sees this.
 - **If you lose the network:** Firewall **8** (revert default-deny), Updates **O** (open the update gate), Undo center **F**
   (restore the firewall saved before that session), or in an administrator window `netsh advfirewall reset`.
 
@@ -302,8 +305,8 @@ Windows Update still waited for you. The old allow-list keeps HTTPS open to **ev
   4. Store `AutoDownload=2`
 - **E** Edge Update off (its tasks + services). **F** scans non-Windows scheduled tasks and services named update / updater /
   maintenance; you pick which to turn off. All journaled (Undo center, Verify, guard).
-- **D** updates Defender definitions now (source MMPC; meant to work with the gate closed, but that failed in the 2026-10-03 test -
-  see "live test and known issues"). **S** Status: gate, policies, Windows Update
+- **D** updates Defender definitions now (source MMPC). It was meant to work with the gate closed, but that failed in the
+  2026-10-03 test; if it fails, open the gate first (see "live test and known issues"). **S** Status: gate, policies, Windows Update
   installs (14 days), updaters.
 - Firewall fixes:
   - a firewall profile never lowers outbound from Block to Allow
@@ -432,7 +435,9 @@ data - check their licenses), planning docs.
 - **Update guard:** permissions already on a pre-existing `C:\ProgramData\WinHardenDebloat` folder are reset, a link (junction)
   there is refused, and the guard alerts when it finds no WHD change history (for example after the WHD folder was moved).
 - **Wording:** texts that referred to the author's PC were made neutral. `.gitattributes` keeps files byte-for-byte, so
-  `SHA256SUMS.txt` also matches for a Git clone.
+  `SHA256SUMS.txt` also matches for a Git clone. The 1.4 step in this branch's history still shows the earlier wording: one
+  note in `modules\Updates.ps1` names two manufacturer apps from the test PC as examples of "manufacturer companion apps". That
+  step is kept as it was first uploaded; the names are examples only and nothing in WHD depends on them.
 - **Known limits (not changed):** devices and `net accounts` output are matched by their English names, so Devices (N) and the
   password rules (Security+ W) only work on English Windows. DNS pinning (Firewall D) only touches adapters that are up at that moment.
 
@@ -444,20 +449,33 @@ firewall menu (wipe, allow-list, default-deny with its auto-rollback task, IPv6,
 update gate and the update policies, inventory compare, Verify (202 of 202 items still in place) and the update guard.
 **Not part of that test:** the GUI window, the one-run profile apply (`-Apply`) and undoing changes (Undo center).
 
-Known issues found in that test (not fixed in this version):
+Issues found in that test, and where they stand in 1.4.2:
 
-- **OneDrive uninstall is reported FAILED although it worked.** OneDrive's uninstaller ends with exit code -2147219813, and WHD
-  counts every exit code except 0, 3010 and 1641 as a failure. OneDrive is removed, but the step is not written to the change
-  history. Check the result with the inventory (menu 1) or Settings > Apps > Installed apps.
-- **Ransomware folder protection in BLOCK mode (Security+ 3B) when WHD runs from a protected folder** (Documents, Desktop,
-  Pictures ...). In the test WHD ran from Documents. Right after the protection was switched on, WHD could no longer write its
-  change history, the session log stopped, and two registry changes made after that point were not recorded (their `.reg` backup
-  was). The cause was not confirmed; Windows blocking PowerShell from writing into the protected folder is the likely one. Keep
-  the WHD folder outside the protected folders (for example `C:\WHD`).
-- **Defender definitions update (Updates D) failed with the gate closed** ("definitions update was completed with errors"), three
-  times out of three. It was not tried with the gate open, so the cause is not known. If it fails for you, try it with the gate
-  open (Updates O).
-- **Wipe all firewall rules (Firewall W) can take minutes:** about 7 minutes for 447 rules in the test. Let it finish.
+- **OneDrive uninstall was reported FAILED although it worked - fixed in 1.4.2.** OneDrive's uninstaller ends with exit code
+  -2147219813, and 1.4.1 counted every exit code except 0, 3010 and 1641 as a failure.
+- **Ransomware folder protection in BLOCK mode (Security+ 3B) when WHD runs from a protected folder - warning added in 1.4.2,
+  the cause itself is Windows behaviour.** In the test WHD ran from Documents. Right after the protection was switched on, WHD
+  could no longer write its change history, the session log stopped, and two registry changes made after that point were not
+  recorded (their `.reg` backup was). Microsoft's documentation says script engines like PowerShell are not trusted by this
+  protection. Keep the WHD folder outside the protected folders (for example `C:\WHD`).
+- **Defender definitions update (Updates D) failed with the gate closed - still open.** It failed three times out of three
+  ("definitions update was completed with errors") and was not tried with the gate open, so the cause is not known. 1.4.2 no
+  longer promises that it works, logs more detail when it fails, and tells you to try with the gate open (Updates O).
+- **Wipe all firewall rules (Firewall W) can take minutes - not changed:** about 7 minutes for 447 rules in the test. Let it finish.
+
+## v1.4.2 - fixes from the live test (2026-10-04; checked with a PowerShell parser and simulated runs, **not yet live-tested**)
+
+- **Win32 programs:** when an uninstaller ends with an unusual exit code, WHD now checks whether Windows still lists the program
+  as installed (it waits up to 10 seconds). Gone = reported done and written to the change history. Still listed = FAILED, as
+  before. The stray results table that could appear after an uninstall (menu 5, a number or **R**) is no longer printed; the same
+  goes for "Disable DiagTrack".
+- **Ransomware folder protection:** WHD warns when its own folder is inside a protected folder (Documents, Favorites, Music,
+  Pictures, Videos, Desktop, or a folder you added in Windows Security). The warning comes before 3B switches the protection to
+  BLOCK (console menu, GUI button and the "This profile will ..." list), and at start-up when the protection is already in BLOCK
+  mode. It is a warning only; WHD still does what you confirm. Only the folders of the account WHD runs as are checked.
+- **Defender definitions (Updates D):** the menu and log no longer say it works with the gate closed. On a failure WHD logs the
+  gate state, the error id and Defender's own error details (event 2001, English Windows), and, when the gate is closed, tells
+  you to try with the gate open.
 
 ## Menu
 ```

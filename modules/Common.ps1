@@ -124,6 +124,44 @@ function Write-WHDAccountWarning {
     } catch {}
 }
 
+# Ransomware folder protection (Controlled folder access) in BLOCK mode: Windows does not treat PowerShell as a
+# trusted app, so it may not write into protected folders. If the WHD folder is inside one, WHD may be unable to
+# write its log, change history and backups (seen in the 2026-10-03 live test).
+# Returns the protected folder that contains the WHD folder, or '' when there is none.
+# Checked: Documents, Favorites, Music, Pictures, Videos (Microsoft's list), Desktop (reported blocked on some PCs),
+# and the folders added in Windows Security. Only the folders of the account WHD runs as are known here.
+function Get-WHDProtectedFolderOfRoot {
+    param($MpPref)
+    $pfRoot = "$($script:WHDRoot)".TrimEnd('\')
+    if (-not $pfRoot) { return '' }
+    $pfList = @()
+    foreach ($pfName in @('MyDocuments','Favorites','MyMusic','MyPictures','MyVideos','DesktopDirectory','CommonDocuments','CommonMusic','CommonPictures','CommonVideos','CommonDesktopDirectory')) {
+        try { $pfList += [Environment]::GetFolderPath([Environment+SpecialFolder]$pfName) } catch {}
+    }
+    # folders the user added in Windows Security
+    try {
+        if (-not $MpPref) { $MpPref = Get-MpPreference -EA Stop }
+        $pfList += @($MpPref.ControlledFolderAccessProtectedFolders)
+    } catch {}
+    foreach ($pf in $pfList) {
+        $pfDir = "$pf".TrimEnd('\')
+        if (-not $pfDir) { continue }
+        if ($pfRoot.Equals($pfDir, [StringComparison]::OrdinalIgnoreCase) -or $pfRoot.StartsWith(($pfDir + '\'), [StringComparison]::OrdinalIgnoreCase)) { return $pfDir }
+    }
+    return ''
+}
+# Start-up warning: the protection is already in BLOCK mode and the WHD folder is inside a protected folder.
+function Write-WHDProtectedFolderWarning {
+    try {
+        $pwPref = Get-MpPreference -EA Stop
+        if ([int]$pwPref.EnableControlledFolderAccess -ne 1) { return }
+        $pwDir = Get-WHDProtectedFolderOfRoot -MpPref $pwPref
+        if (-not $pwDir) { return }
+        Write-WHDLog ("Ransomware folder protection is in BLOCK mode and WHD runs from '{0}', inside the protected folder '{1}'." -f $script:WHDRoot, $pwDir) 'WARN'
+        Write-WHDLog 'Windows does not treat PowerShell as a trusted app there, so WHD may be unable to write its log, change history (undo) and backups. Move the WHD folder outside the protected folders (for example C:\WHD) and start it from there.' 'WARN'
+    } catch {}
+}
+
 # ---- risk labelling ---------------------------------------------------------
 function Write-WHDRisk {
     param([ValidateSet('reversible','caution','hard')]$Tier, [string]$Text)
