@@ -305,8 +305,8 @@ Windows Update still waited for you. The old allow-list keeps HTTPS open to **ev
   4. Store `AutoDownload=2`
 - **E** Edge Update off (its tasks + services). **F** scans non-Windows scheduled tasks and services named update / updater /
   maintenance; you pick which to turn off. All journaled (Undo center, Verify, guard).
-- **D** updates Defender definitions now (source MMPC). It was meant to work with the gate closed, but that failed in the
-  2026-10-03 test; if it fails, open the gate first (see "live test and known issues"). **S** Status: gate, policies, Windows Update
+- **D** updates Defender definitions now (source MMPC). With the gate closed it worked in the 2026-10-04 test but failed in the
+  2026-10-03 test (cause not known); if it fails, open the gate first (see "live test and known issues"). **S** Status: gate, policies, Windows Update
   installs (14 days), updaters.
 - Firewall fixes:
   - a firewall profile never lowers outbound from Block to Allow
@@ -457,13 +457,15 @@ Issues found in that test, and where they stand in 1.4.2:
   the cause itself is Windows behaviour.** In the test WHD ran from Documents. Right after the protection was switched on, WHD
   could no longer write its change history, the session log stopped, and two registry changes made after that point were not
   recorded (their `.reg` backup was). Microsoft's documentation says script engines like PowerShell are not trusted by this
-  protection. Keep the WHD folder outside the protected folders (for example `C:\WHD`).
-- **Defender definitions update (Updates D) failed with the gate closed - still open.** It failed three times out of three
-  ("definitions update was completed with errors") and was not tried with the gate open, so the cause is not known. 1.4.2 no
-  longer promises that it works, logs more detail when it fails, and tells you to try with the gate open (Updates O).
+  protection. In the 2026-10-04 test on the same PC, WHD again ran from Documents with BLOCK on and could write its files, so
+  this does not happen every time. Keep the WHD folder outside the protected folders (for example `C:\WHD`).
+- **Defender definitions update (Updates D) failed with the gate closed - did not happen again, cause not known.** On
+  2026-10-03 it failed three times out of three ("definitions update was completed with errors"). On 2026-10-04, with the gate
+  closed, it worked. 1.4.2 no longer promises that it works, logs more detail when it fails, and tells you to try with the gate
+  open (Updates O).
 - **Wipe all firewall rules (Firewall W) can take minutes - not changed:** about 7 minutes for 447 rules in the test. Let it finish.
 
-## v1.4.2 - fixes from the live test (2026-10-04; checked with a PowerShell parser and simulated runs, **not yet live-tested**)
+## v1.4.2 - fixes from the live test (2026-10-04; checked with a PowerShell parser and simulated runs, **partly live-tested** - see the last point)
 
 - **Win32 programs:** when an uninstaller ends with an unusual exit code, WHD now checks whether Windows still lists the program
   as installed (it waits up to 10 seconds). Gone = reported done and written to the change history. Still listed = FAILED, as
@@ -476,6 +478,10 @@ Issues found in that test, and where they stand in 1.4.2:
 - **Defender definitions (Updates D):** the menu and log no longer say it works with the gate closed. On a failure WHD logs the
   gate state, the error id and Defender's own error details (event 2001, English Windows), and, when the gate is closed, tells
   you to try with the gate open.
+- **Live test of 1.4.2 (2026-10-04, same PC, console menus, EXECUTE):** the Defender definitions update worked with the gate
+  closed; the start-up folder-protection warning appeared when WHD ran from Documents; closing the gate, the Updates status,
+  Verify and the permission Lock check ran without errors. **Not yet run on Windows:** the new uninstall check (OneDrive had
+  already been removed from the test PC) and the warning shown before 3B switches the protection to BLOCK.
 
 ## Menu
 ```
