@@ -55,7 +55,7 @@ $script:WHDGuiMode = $true
 . (Join-Path $Root 'modules\Devices.ps1')
 . (Join-Path $Root 'modules\TimeRegion.ps1')
 . (Join-Path $Root 'modules\Profiles.ps1')
-Start-WHDTranscript
+try { Start-WHDTranscript } catch { $startErr = $_; Write-WHDProtectedFolderWarning; throw $startErr }   # if the WHD folder cannot be written, say why first
 
 Add-Type -AssemblyName PresentationFramework
 
@@ -903,7 +903,17 @@ $SecPuaBtn.Add_Click({      Invoke-SecAction 'Defender: block unwanted apps (PUA
 $SecNetAuditBtn.Add_Click({ Invoke-SecAction 'Defender: network protection AUDIT' { Invoke-WHDDefenderProtection -Which Network -Mode Audit } })
 $SecNetBlockBtn.Add_Click({ Invoke-SecAction 'Defender: network protection BLOCK' { Invoke-WHDDefenderProtection -Which Network -Mode On } })
 $SecCfaAuditBtn.Add_Click({ Invoke-SecAction 'Defender: ransomware folder protection AUDIT' { Invoke-WHDDefenderProtection -Which Folders -Mode Audit } })
-$SecCfaBlockBtn.Add_Click({ Invoke-SecAction 'Defender: ransomware folder protection BLOCK' { Invoke-WHDDefenderProtection -Which Folders -Mode On } })
+$SecCfaBlockBtn.Add_Click({
+    # WHD folder inside a protected folder: ask first, because the warning in the log would come after the confirm.
+    $cfaDir = ''
+    try { $cfaDir = Get-WHDProtectedFolderOfRoot } catch {}
+    if ($cfaDir -and $script:WHDExecute) {
+        $cfaMsg = ("WHD runs from inside the protected folder:`n{0}`n`nIn BLOCK mode Windows does not treat PowerShell as a trusted app there. WHD's log may stop and later changes may not be recorded for undo.`n`nBetter: answer No, move the WHD folder outside the protected folders (for example C:\WHD) and start it from there.`n`nSwitch it on anyway?" -f $cfaDir)
+        $cfaOk = ([System.Windows.MessageBox]::Show($win, $cfaMsg, 'WinHardenDebloat - warning', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)) -eq 'Yes'
+        if (-not $cfaOk) { Write-WHDLog 'Ransomware folder protection BLOCK: cancelled (WHD folder is inside a protected folder).' 'INFO'; return }
+    }
+    Invoke-SecAction 'Defender: ransomware folder protection BLOCK' { Invoke-WHDDefenderProtection -Which Folders -Mode On }
+})
 $SecAsrStdBtn.Add_Click({   Invoke-SecAction 'ASR: Microsoft standard 3 (AUDIT)' { Invoke-WHDAsrGroups -Groups standard -Mode Audit } })
 $SecAsrScrBtn.Add_Click({   Invoke-SecAction 'ASR: script + download rules (AUDIT)' { Invoke-WHDAsrGroups -Groups scripts -Mode Audit } })
 $SecAsrOffBtn.Add_Click({   Invoke-SecAction 'ASR: Office / Adobe / email rules (AUDIT)' { Invoke-WHDAsrGroups -Groups office -Mode Audit } })
@@ -1003,5 +1013,6 @@ Write-WHDLog 'Provided as is, with no warranty (MIT License) - use at your own r
 Set-WHDStatus 'DRY-RUN mode - actions only preview.'
 try { Update-WHDGuardIfStale } catch { }
 try { Write-WHDAccountWarning } catch { }
+try { Write-WHDProtectedFolderWarning } catch { }
 $win.ShowDialog() | Out-Null
 Stop-WHDTranscript

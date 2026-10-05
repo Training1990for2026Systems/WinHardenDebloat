@@ -88,6 +88,11 @@ function Invoke-WHDApplyProfile {
         if ($sx.pua)               { _WHDProfSay '   - Security+: block unwanted apps (PUA)' }
         if ($sx.networkProtection) { _WHDProfSay ("   - Security+: network protection {0}" -f $sx.networkProtection) }
         if ($sx.folderProtection)  { _WHDProfSay ("   - Security+: folder protection {0}" -f $sx.folderProtection) }
+        if ("$($sx.folderProtection)" -eq 'On') {
+            $ppDir = ''
+            try { $ppDir = Get-WHDProtectedFolderOfRoot } catch {}
+            if ($ppDir) { _WHDProfSay ("     WARNING: WHD runs from inside the protected folder '{0}'. Once folder protection is in BLOCK mode, WHD's log may stop and the steps after it may not be recorded for undo. Better: do not run the profile now. Move the WHD folder outside the protected folders (for example C:\WHD) and start it from there." -f $ppDir) 'Yellow' }
+        }
         if ($sx.asrGroups)         { _WHDProfSay ("   - Security+: ASR {0} ({1})" -f (@($sx.asrGroups) -join ', '), $(if ($sx.asrMode) { $sx.asrMode } else { 'Audit' })) }
         if ($sx.protocolsOff)      { _WHDProfSay ("   - Security+: protocols off: {0}" -f (@($sx.protocolsOff) -join ', ')) }
         if ($sx.servicesOff)       { _WHDProfSay ("   - Security+: network services off: {0}" -f (@($sx.servicesOff) -join ', ')) }
@@ -185,7 +190,7 @@ function Invoke-WHDApplyProfile {
                 $all = Get-WHDWin32Apps
                 foreach ($nm in @($p.win32.uninstall | Where-Object { $_ })) {
                     $app = @($all | Where-Object { $_.DisplayName -like "*$nm*" })[0]
-                    if ($app) { Invoke-WHDWin32Uninstall -App $app } else { Write-WHDLog "win32 uninstall: no match for '$nm'" 'WARN' }
+                    if ($app) { Invoke-WHDWin32Uninstall -App $app | Out-Null } else { Write-WHDLog "win32 uninstall: no match for '$nm'" 'WARN' }
                 }
                 foreach ($nm in @($p.win32.removeEverywhere | Where-Object { $_ })) { Remove-WHDAppEverywhere -Name $nm }
                 foreach ($exe in @($p.win32.blockExe | Where-Object { $_ }))        { Block-WHDExecutable -ExeName $exe }

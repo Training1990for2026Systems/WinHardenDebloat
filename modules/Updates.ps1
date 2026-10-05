@@ -307,16 +307,39 @@ function Show-WHDUpdatesStatus {
     foreach ($u in $up) { Write-WHDLog ("  {0}" -f $u.Label) $(if ($u.State -match 'Disabled') { 'OK' } else { 'INFO' }) }
     Write-WHDLog '================ END ================' 'ACT'
 }
-# Defender definitions through the closed gate (direct from Microsoft Malware Protection Center).
+# Defender definitions direct from Microsoft Malware Protection Center (MMPC). Meant to get through the closed
+# gate, but in the 2026-10-03 live test it failed with the gate closed (cause not known yet), so the texts no
+# longer promise that. On a failure the gate state and Defender's own error details are logged (read-only).
 function Invoke-WHDDefenderUpdateTest {
-    Write-WHDLog 'DEFENDER: update definitions now (source MMPC - works while the gate is closed)' 'ACT'
+    Write-WHDLog 'DEFENDER: update definitions now (source MMPC)' 'ACT'
+    $duGate = $false
+    try {
+        $duSt = Get-WHDGateState
+        $duGate = [bool]$duSt.Closed
+        Write-WHDLog ("  update gate: {0}   outbound: {1}" -f $(if ($duGate) { 'CLOSED' } else { 'open' }), $duSt.Outbound) 'INFO'
+    } catch {}
     try { $before = (Get-MpComputerStatus -EA Stop).AntivirusSignatureVersion } catch { $before = '?' }
     if (-not $script:WHDExecute) { Write-WHDLog ("would: Update-MpSignature -UpdateSource MMPC   (definitions now {0})" -f $before) 'DRY'; return }
+    $duStart = Get-Date
     try {
         Update-MpSignature -UpdateSource MMPC -EA Stop
         $s = Get-MpComputerStatus -EA Stop
         Write-WHDLog ("Definitions {0} -> {1}  (age {2} day(s))" -f $before, $s.AntivirusSignatureVersion, $s.AntivirusSignatureAge) 'OK'
-    } catch { Write-WHDLog ("Defender update failed: {0}" -f $_.Exception.Message) 'ERR' }
+    } catch {
+        $duErr = $_
+        Write-WHDLog ("Defender update failed: {0}" -f $duErr.Exception.Message) 'ERR'
+        try { Write-WHDLog ("  error id: {0}" -f $duErr.FullyQualifiedErrorId) 'INFO' } catch {}
+        # Defender's own record of the failed update (event 2001): error code and the source it tried.
+        try {
+            $duEv = @(Get-WinEvent -FilterHashtable @{ LogName = 'Microsoft-Windows-Windows Defender/Operational'; Id = 2001; StartTime = $duStart.AddSeconds(-5) } -MaxEvents 1 -EA SilentlyContinue)
+            if ($duEv.Count) {
+                foreach ($duLine in @("$($duEv[0].Message)" -split "`r?`n" | ForEach-Object { "$_".Trim() } | Where-Object { $_ -match '^(Error code|Error description|Update Source|Update Stage|Update Type|Source Path)\s*:' })) {
+                    Write-WHDLog ("  Defender event 2001: {0}" -f $duLine) 'INFO'
+                }
+            }
+        } catch {}
+        if ($duGate) { Write-WHDLog 'The update gate is closed. Try again with the gate open (O), then close it again (C).' 'WARN' }
+    }
 }
 
 # ---- menu ------------------------------------------------------------------------
@@ -335,7 +358,7 @@ function Show-WHDUpdatesMenu {
     Write-Host '   A. All four policies above'
     Write-Host '   E. Edge Update off (tasks + services)'
     Write-Host '   F. Find other app updaters -> choose which to turn off'
-    Write-Host '   D. Defender definitions: update now (works with the gate closed)'
+    Write-Host '   D. Defender definitions: update now (if it fails with the gate closed, open the gate first)'
     Write-Host '   S. Status (gate, policies, recent Windows Update installs, updaters)'
     Write-Host '   B. Back'
 }

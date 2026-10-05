@@ -49,11 +49,29 @@ function Get-WHDWin32Apps {
                     QuietUninstall  = $_.QuietUninstallString
                     InstallLocation = $_.InstallLocation
                     Hive            = ($r -split ':')[0]
+                    KeyPath         = "$($_.PSPath)"
                     Protected       = (Test-WHDWin32Protected $_.DisplayName)
                 }
             }
     }
     @($apps | Sort-Object DisplayName -Unique)
+}
+
+# True while Windows still lists the program as installed (its uninstall registry entry exists).
+# Some uninstallers remove that entry a moment after they exit, so this can wait a few seconds.
+# If the check itself fails, the answer is "still installed" (the careful answer).
+function Test-WHDWin32StillInstalled {
+    param($App, [int]$WaitSeconds = 0)
+    for ($siTry = 0; $siTry -le $WaitSeconds; $siTry++) {
+        $siStill = $true
+        try {
+            if ("$($App.KeyPath)") { $siStill = [bool](Test-Path -LiteralPath "$($App.KeyPath)" -EA Stop) }
+            else { $siStill = [bool](@(Get-WHDWin32Apps | Where-Object { $_.DisplayName -eq $App.DisplayName -and $_.Hive -eq $App.Hive }).Count) }
+        } catch { $siStill = $true }
+        if (-not $siStill) { return $false }
+        if ($siTry -lt $WaitSeconds) { Start-Sleep -Seconds 1 }
+    }
+    return $true
 }
 
 function Invoke-WHDWin32Uninstall {
@@ -81,12 +99,24 @@ function Invoke-WHDWin32Uninstall {
         Write-WHDLog 'No silent uninstaller registered - the vendor UI may appear; complete it manually.' 'INFO'
     }
     if (-not (Confirm-WHDProceed ("uninstall {0}" -f $App.DisplayName))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $uninstWasListed = Test-WHDWin32StillInstalled -App $App
     Invoke-WHDChange -Description ("run uninstaller for {0}" -f $App.DisplayName) -Force -Action {
         # /s + one extra pair of quotes: cmd removes exactly that outer pair and keeps the inner quotes.
         $uninstProc = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList ('/d /s /c "' + $cmd + '"') -Wait -PassThru -WindowStyle Hidden -EA Stop
         $uninstCode = $uninstProc.ExitCode
         if ($uninstCode -eq 3010 -or $uninstCode -eq 1641) { Write-WHDLog ("uninstaller exit code {0} - restart needed to finish the uninstall" -f $uninstCode) 'INFO' }
-        elseif ($uninstCode -ne 0) { throw ("uninstaller exit code {0}" -f $uninstCode) }
+        elseif ($uninstCode -ne 0) {
+            # Some uninstallers (OneDrive, for example) end with their own exit code although they removed the program.
+            # So: the program was listed before and is no longer listed now = done. Otherwise it is a failure.
+            if ($uninstWasListed) { Write-WHDLog ("uninstaller exit code {0} - checking whether '{1}' is still installed (up to 10 s) ..." -f $uninstCode, $App.DisplayName) 'INFO' }
+            if ($uninstWasListed -and -not (Test-WHDWin32StillInstalled -App $App -WaitSeconds 10)) {
+                Write-WHDLog ("uninstaller exit code {0}, but '{1}' is no longer listed as installed - counted as done" -f $uninstCode, $App.DisplayName) 'INFO'
+            } elseif ($uninstWasListed) {
+                throw ("uninstaller exit code {0} (the program is still listed as installed)" -f $uninstCode)
+            } else {
+                throw ("uninstaller exit code {0}" -f $uninstCode)
+            }
+        }
     }
 }
 
@@ -222,8 +252,8 @@ function Remove-WHDAppEverywhere {
         Write-WHDLog ("An uninstall failed - startup entries and scheduled tasks matching '{0}' are left in place. Sort out the uninstall, then run this again." -f $Name) 'WARN'
         return
     }
-    foreach ($s in $found.Startups) { Remove-WHDStartupEntry -Entry $s }
-    foreach ($t in $found.Tasks)    { Remove-WHDTask -Task $t }
+    foreach ($s in $found.Startups) { Remove-WHDStartupEntry -Entry $s | Out-Null }
+    foreach ($t in $found.Tasks)    { Remove-WHDTask -Task $t | Out-Null }
     Write-WHDLog ("Done. If a helper still relaunches it, use the IFEO block on its .exe (menu X)." -f $Name) 'INFO'
 }
 

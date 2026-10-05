@@ -107,9 +107,10 @@ if ($Guard) {
     }
     return
 }
-Start-WHDTranscript
+try { Start-WHDTranscript } catch { $startErr = $_; Write-WHDProtectedFolderWarning; throw $startErr }   # if the WHD folder cannot be written, say why first
 Update-WHDGuardIfStale
 Write-WHDAccountWarning   # never reached in guard mode (returned above)
+Write-WHDProtectedFolderWarning
 try { $Host.UI.RawUI.WindowTitle = 'WinHardenDebloat (Administrator) - type in this window' } catch {}
 $elevated = _isAdmin
 
@@ -331,7 +332,7 @@ function Invoke-WHDWin32Submenu {
         if ($c -match '^\d+$') {
             $idx = [int]$c - 1
             if ($idx -lt 0 -or $idx -ge $script:WHDWin32Cache.Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
-            Invoke-WHDWin32Uninstall -App $script:WHDWin32Cache[$idx]
+            Invoke-WHDWin32Uninstall -App $script:WHDWin32Cache[$idx] | Out-Null
         } else { Write-Host '  invalid.' -ForegroundColor Yellow }
     }
 }
