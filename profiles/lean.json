@@ -1,0 +1,44 @@
+﻿{
+    "name":  "lean",
+    "description":  "Starter profile - a middle ground for a fresh Windows 11 Home install (edit to taste). PROVIDED AS IS, WITH NO WARRANTY: you run it at your own risk (see LICENSE). Turns off Copilot, Bing in search and Recall; removes Copilot, Power Automate, Phone Link, Widgets, the recommended Store apps, the Xbox app, To Do and Sticky Notes (removed for all users; their local data is deleted); Store suppression, privacy hardening, DiagTrack off, Balanced permissions, component store cleanup. Dry run first: Start-WHD.ps1 -Apply profiles\\lean.json, then add -Execute.",
+    "ai":  {
+               "featureOff":  [
+                                  "copilot",
+                                  "bing",
+                                  "recall"
+                              ],
+               "remove":  [
+                              "copilot",
+                              "powerautomate",
+                              "phonelink",
+                              "webexp"
+                          ]
+           },
+    "storeSuppression":  true,
+    "general":  {
+                    "removeRecommended":  true,
+                    "remove":  [
+                                   "xboxapp",
+                                   "todos",
+                                   "sticky"
+                               ]
+                },
+    "privacyHardening":  true,
+    "disableDiagTrack":  true,
+    "permissions":  "Balanced",
+    "win32":  {
+                  "uninstall":  [
+
+                                ],
+                  "removeEverywhere":  [
+
+                                       ],
+                  "blockExe":  [
+
+                               ]
+              },
+    "componentCleanup":  {
+                             "run":  true,
+                             "resetBase":  false
+                         }
+}

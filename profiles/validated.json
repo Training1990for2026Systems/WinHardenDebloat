@@ -1,0 +1,124 @@
+{
+  "name": "validated",
+  "description": "Same settings as profiles\\standard.json, kept under its earlier name: the STRICT FULL LOCK-DOWN of the author's own test PC (Windows 11 Home), not a general default. PROVIDED AS IS, WITH NO WARRANTY: you run it at your own risk (see LICENSE). Read the description in profiles\\standard.json and the README section 'Read this before you run it' for what it does. Dry run first: Start-WHD.ps1 -Apply profiles\\validated.json, then add -Execute.",
+  "ai": {
+    "featureOff": [
+      "copilot",
+      "bing",
+      "recall",
+      "clicktodo",
+      "recallsnap",
+      "paintai",
+      "notepadai",
+      "edgeai",
+      "edgelocalai"
+    ],
+    "remove": [
+      "copilot",
+      "powerautomate",
+      "bing",
+      "webexp",
+      "paint",
+      "photos",
+      "phonelink"
+    ]
+  },
+  "storeSuppression": true,
+  "general": {
+    "removeRecommended": true,
+    "remove": [
+      "clipchamp",
+      "solitaire",
+      "todos",
+      "sticky",
+      "feedback",
+      "gethelp",
+      "quickassist",
+      "devhome",
+      "family",
+      "outlooknew",
+      "teams",
+      "crossdevice",
+      "alarms",
+      "soundrec",
+      "zune",
+      "xboxapp",
+      "xboxoverlay",
+      "xboxstt",
+      "xboxtcui",
+      "xboxid"
+    ],
+    "oem": "ask"
+  },
+  "privacyHardening": true,
+  "disableDiagTrack": true,
+  "privacy": [
+    "activity",
+    "clipboard",
+    "suggestions",
+    "speech",
+    "edgebg",
+    "edgediag"
+  ],
+  "security": {
+    "pua": true,
+    "networkProtection": "On",
+    "folderProtection": "On",
+    "asrGroups": [
+      "standard",
+      "scripts",
+      "office"
+    ],
+    "asrMode": "Block",
+    "protocolsOff": [
+      "llmnr",
+      "netbios",
+      "wpad",
+      "remoteassist"
+    ],
+    "servicesOff": [
+      "fileshare",
+      "dialvpn",
+      "ipsec",
+      "proxy",
+      "faxphone",
+      "smb"
+    ],
+    "uacAlwaysNotify": true,
+    "passwordPolicy": true,
+    "updateGuard": true
+  },
+  "devices": {
+    "btNetworkOff": true,
+    "wifiDirectOff": true,
+    "wanMiniportsOff": true
+  },
+  "permissions": "Lock",
+  "win32": {
+    "uninstall": [
+      "Microsoft OneDrive"
+    ],
+    "removeEverywhere": [],
+    "blockExe": []
+  },
+  "network": {
+    "firewallWipeFirst": true,
+    "timeSync": "Cloudflare",
+    "firewallProfile": "profiles\\firewall-baseline.json",
+    "dns": "Cloudflare",
+    "connectionLogging": true
+  },
+  "updates": {
+    "windowsUpdatePolicy": true,
+    "drivers": true,
+    "driverPolicy": true,
+    "storePolicy": true,
+    "edgeUpdaterOff": true,
+    "updatersOff": [],
+    "gate": ""
+  },
+  "componentCleanup": {
+    "run": true,
+    "resetBase": false
+  }
+}

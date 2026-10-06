@@ -1,0 +1,19 @@
+# WHD Next - never commit PC-specific data
+logs/
+inventory/
+restore/
+archive/
+publish/
+reports/
+profiles/incoming/
+profiles/*.bak
+*.log
+REPORT.txt
+
+# third-party block lists (other people's data - not ours to publish)
+profiles/blacklist-*.txt
+# PowerShell installer files someone put in installers\ (only the note is published)
+installers/*
+!installers/README.txt
+# this PC's publish rules (they name the hardware)
+tools/publish-generalize.txt

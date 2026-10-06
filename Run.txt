@@ -1,0 +1,35 @@
+WHD Next - how to start
+
+Double-click:   Start-WHD.cmd
+
+Or in an admin terminal:
+  cd "C:\path\to\WHD-Next"   # the folder you unpacked or cloned
+
+  # menu (dry-run by default)
+  powershell -ExecutionPolicy Bypass -File .\Start-WHD.ps1
+  # window version
+  powershell -ExecutionPolicy Bypass -File .\Start-WHD.ps1 -Gui
+  # full dry-run plan (no changes), then exit
+  powershell -ExecutionPolicy Bypass -File .\Start-WHD.ps1 -Plan
+  # preview a profile (no changes)
+  powershell -ExecutionPolicy Bypass -File .\Start-WHD.ps1 -Apply profiles\lean.json
+  # apply it (one upfront y/N, restore point first) - FULL mode only
+  powershell -ExecutionPolicy Bypass -File .\Start-WHD.ps1 -Apply profiles\lean.json -Execute
+  # safe mode on Windows PowerShell 5.1 (checks, Verify, Undo, re-apply)
+  powershell -ExecutionPolicy Bypass -File .\Start-WHD.ps1 -SafeMode
+
+The launcher checks the PC first and tells you which mode is available.
+FULL mode needs PowerShell 7.6 or newer; the launcher offers to install it.
+
+Optional theme (ship sounds, space pictures, dark mode, lock-screen pictures) - not part of any profile:
+  menu version:   main menu X   (A = everything on, Z = everything put back)
+  window version: tab "Theme"
+  The look needs one click on the theme "WHD Next" in Windows' Settings; WHD says when.
+  Described in docs\theme.md
+
+Folder protection (Controlled folder access) in the way?
+  Either allow pwsh.exe in Windows Security (the launcher shows where), or let the launcher copy
+  WHD Next to an unlocked folder and run it from there (no permission needed):
+  powershell -ExecutionPolicy Bypass -File .\Start-WHD.ps1 -CopyToUnlocked
+  The copy lives in C:\ProgramData\WinHardenDebloatNext\app. Nothing is removed here. After that,
+  starting WHD Next from this folder hands over to the copy; add -Here to stay in this folder.

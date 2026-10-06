@@ -1,0 +1,543 @@
+<#
+================================================================================
+ WHD Next  -  WHD.ps1   (Phase 1 launcher)
+ Author : Training1990for2026Systems   Contact: t90018273@gmail.com
+ License: MIT (see LICENSE)            Built with Claude by Anthropic
+--------------------------------------------------------------------------------
+ Menu-driven front end. Self-elevates (UAC). DRY-RUN by default: nothing is
+ changed until you switch to EXECUTE mode from the menu (or pass -Execute).
+
+ WHD Next: start it through the launcher, which picks the engine:
+   double-click Start-WHD.cmd       or
+   powershell -ExecutionPolicy Bypass -File .\Start-WHD.ps1  [-Execute] [-Plan] [-Apply <profile>] ...
+ FULL mode  = PowerShell 7.6+ (everything).   SAFE mode = Windows PowerShell 5.1
+ (read-only screens, dry-run plan, Verify, Undo, re-apply, re-remove; no new changes).
+ Started directly under 5.1, this script is always in SAFE mode.
+================================================================================
+#>
+[CmdletBinding()]
+param(
+    [switch]$Execute,     # start in EXECUTE mode (default is dry-run)
+    [switch]$Plan,        # non-interactive: print the FULL dry-run plan and exit
+    [string]$Apply,       # non-interactive: apply a JSON profile, then exit
+    [string]$Export,      # write a starter profile to this path, then exit
+    [switch]$Yes,         # skip the one upfront gate when applying (scripted runs)
+    [switch]$NoElevate,
+    [switch]$SafeMode,    # WHD Next: force SAFE mode even on PowerShell 7.6 (testing); 5.1 is always SAFE mode
+    [switch]$Guard,       # Phase 9: run the update-guard check (read-only) and exit (used by the scheduled task)
+    [string]$DataRoot     # Phase 9: project folder for reports/journals when running from the protected copy
+)
+
+$ErrorActionPreference = 'Stop'
+
+# ---- self-elevation ---------------------------------------------------------
+function _isAdmin {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    (New-Object Security.Principal.WindowsPrincipal($id)).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+if (-not $NoElevate -and -not $Guard -and -not (_isAdmin)) {
+    Write-Host ''
+    Write-Host ' This session is not elevated.' -ForegroundColor Yellow
+    if ($Plan -or $Apply -or $Export) {
+        # Non-interactive: spawning a separate elevated window is fine.
+        Write-Host ' Opening an elevated window to run...' -ForegroundColor Yellow
+    } else {
+        # Interactive menu: a spawned window causes the focus/second-window
+        # problem. Best experience is to run inside an ALREADY-admin terminal.
+        Write-Host ''
+        Write-Host ' For the interactive menu, the most reliable way is to run this from a' -ForegroundColor Cyan
+        Write-Host ' terminal that is ALREADY elevated, so the menu appears in THIS window:' -ForegroundColor Cyan
+        Write-Host '   1. Close this window.' -ForegroundColor Cyan
+        Write-Host '   2. Start menu > type "PowerShell" > right-click > Run as administrator.' -ForegroundColor Cyan
+        Write-Host ('   3. cd "{0}"' -f $PSScriptRoot) -ForegroundColor Cyan
+        Write-Host '   4. powershell -ExecutionPolicy Bypass -File .\Start-WHD.ps1' -ForegroundColor Cyan
+        Write-Host ''
+        $go = Read-Host ' Or press [E] to open an elevated window now, anything else to cancel'
+        if ($go -notmatch '^[Ee]$') { return }
+    }
+    $psExe = (Get-Process -Id $PID).Path
+    # -NoExit keeps the elevated window open; it comes to the foreground on UAC accept.
+    $argList = @('-NoExit','-ExecutionPolicy','Bypass','-NoProfile','-File', "`"$($MyInvocation.MyCommand.Path)`"",'-NoElevate')
+    if ($Execute) { $argList += '-Execute' }
+    if ($SafeMode) { $argList += '-SafeMode' }
+    if ($Plan)    { $argList += '-Plan' }
+    if ($Yes)     { $argList += '-Yes' }
+    if ($Apply)   { $argList += @('-Apply',  "`"$Apply`"") }
+    if ($Export)  { $argList += @('-Export', "`"$Export`"") }
+    try { Start-Process -FilePath $psExe -Verb RunAs -ArgumentList $argList; return }
+    catch { Write-Host "Elevation declined: $($_.Exception.Message)" -ForegroundColor Red; return }
+}
+
+# ---- load engine + modules --------------------------------------------------
+$Root = $PSScriptRoot
+$script:WHDRoot    = $Root
+$script:WHDCodeRoot = $Root
+if ($Guard -and $DataRoot) { $script:WHDRoot = $DataRoot }
+$script:WHDExecute = [bool]$Execute
+# ---- WHD Next: FULL mode needs PowerShell 7.6+; anything else is SAFE mode (see modules\Common.ps1) ----
+$whdEngineOk = ($PSVersionTable.PSEdition -eq 'Core' -and $PSVersionTable.PSVersion -ge [version]'7.6.0')
+$script:WHDSafeMode    = ([bool]$SafeMode -or -not $whdEngineOk)
+$script:WHDSafeExecute = $false
+if ($script:WHDSafeMode) { $script:WHDSafeExecute = [bool]$Execute; $script:WHDExecute = $false }
+. (Join-Path $Root 'modules\Common.ps1')
+. (Join-Path $Root 'modules\Debloat-AI.ps1')
+. (Join-Path $Root 'modules\Debloat-General.ps1')
+. (Join-Path $Root 'modules\Permissions.ps1')
+. (Join-Path $Root 'modules\Debloat-Win32.ps1')
+. (Join-Path $Root 'modules\Maintenance.ps1')
+. (Join-Path $Root 'modules\Firewall.ps1')
+. (Join-Path $Root 'modules\Security.ps1')
+. (Join-Path $Root 'modules\Updates.ps1')
+. (Join-Path $Root 'modules\Devices.ps1')
+. (Join-Path $Root 'modules\TimeRegion.ps1')
+. (Join-Path $Root 'modules\Profiles.ps1')
+. (Join-Path $Root 'modules\Theme.ps1')      # WHD Next build step 12b: the optional theme (own menu entry X; never part of a profile)
+$script:WHDYes = [bool]$Yes
+$script:WHDQuit = $false
+
+# ---- Phase 9: update guard (scheduled task) - read-only, no transcript -------
+if ($Guard) {
+    $script:WHDExecute = $false
+    try { Invoke-WHDUpdateGuard | Out-Null }
+    catch {
+        try {
+            $gd = Get-WHDGuardDataDir      # step 11b: the guard's own folder (under ProgramData)
+            if (-not (Test-Path -LiteralPath $gd)) { New-Item -ItemType Directory -Path $gd -Force | Out-Null }
+            ("{0}  guard error: {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $_.Exception.Message) | Add-Content -LiteralPath (Join-Path $gd 'guard-errors.txt') -Encoding UTF8
+        } catch {}
+    }
+    return
+}
+Start-WHDTranscript
+Update-WHDGuardIfStale
+try { $Host.UI.RawUI.WindowTitle = ('WHD Next - {0} - type here' -f (Get-WHDModeText)) } catch {}
+$elevated = _isAdmin
+
+# ---- non-interactive: export a starter profile, then exit -------------------
+if ($Export) {
+    Export-WHDProfile -Path $Export
+    Stop-WHDTranscript
+    return
+}
+# ---- non-interactive: apply a profile, then exit ----------------------------
+if ($Apply) {
+    if ($script:WHDSafeMode -and $Execute) { Write-WHDLog 'SAFE MODE: a profile cannot be applied for real here (new changes need PowerShell 7.6 / FULL mode). Showing the preview only.' 'WARN' }
+    Invoke-WHDApplyProfile -Path $Apply
+    Stop-WHDTranscript
+    if (Test-WHDJournalStop) { Write-WHDLog 'Apply STOPPED before the end: the change journal could not be written (see the box above).' 'ERR' }
+    else                     { Write-WHDLog 'Apply finished. See logs\ for the full transcript.' 'OK' }
+    return
+}
+
+# ---- non-interactive full plan (no Read-Host anywhere) ----------------------
+function Invoke-WHDPlanAll {
+    $script:WHDExecute = $false   # -Plan is always a preview
+    Write-WHDLog '================ FULL DRY-RUN PLAN (no changes) ================' 'DRY'
+    foreach ($m in $script:WHDAiModules) {
+        $p = Get-WHDModulePresence -Module $m
+        Write-Host ''
+        Write-Host ("### {0}   [{1}]" -f $m.Name, $(if($p.Installed){'present'}else{'absent'})) -ForegroundColor White
+        Invoke-WHDAiFeatureOff -Module $m
+        Invoke-WHDAiRemove     -Module $m
+    }
+    Write-Host ''
+    Invoke-WHDStoreSuppression
+    Write-Host ''
+    Write-WHDLog '---- GENERAL (non-AI) apps ----' 'DRY'
+    foreach ($e in $script:WHDGeneralApps) {
+        $gp = Test-WHDAppPresent -Package $e.Package
+        Write-Host ("### {0}   [{1}]{2}" -f $e.Name, $(if($gp){'present'}else{'absent'}), $(if($e.Rec){'  *recommended'}else{''})) -ForegroundColor White
+        Invoke-WHDGeneralRemove -Entry $e
+    }
+    Write-Host ''
+    Invoke-WHDPrivacyHardening
+    Invoke-WHDDisableDiagTrack
+    Write-Host ''
+    Write-WHDLog '---- APP PERMISSIONS (Balanced profile shown as example) ----' 'DRY'
+    Invoke-WHDPermissionProfile -Profile 'Balanced'
+    Write-Host ''
+    Write-WHDLog '---- COMPONENT STORE (analysis is read-only; cleanup shown as plan) ----' 'DRY'
+    Invoke-WHDComponentAnalyze
+    Invoke-WHDComponentCleanup
+    Write-Host ''
+    Write-WHDLog '---- FIREWALL (current state, read-only) ----' 'DRY'
+    Show-WHDFirewallSummary
+    Write-WHDLog '================ END PLAN ================' 'DRY'
+}
+if ($Plan) {
+    Invoke-WHDPlanAll
+    Stop-WHDTranscript
+    Write-WHDLog 'Plan written to logs\. No changes were made.' 'OK'
+    return
+}
+
+function Show-WHDMode {
+    if ($script:WHDSafeMode) {
+        Write-Host ''
+        Write-Host ('  ### {0} ###' -f (Get-WHDModeText)) -ForegroundColor Yellow
+        if ($script:WHDSafeExecute) { Write-Host '  *** EXECUTE is ON for Undo / re-apply / re-remove only. New changes stay previews (they need PowerShell 7.6). ***' -ForegroundColor Red }
+        else                        { Write-Host '  --- DRY-RUN - nothing changes; actions are only previewed. New changes need PowerShell 7.6 (FULL mode). ---' -ForegroundColor Cyan }
+    } elseif ($script:WHDExecute) {
+        Write-Host ''
+        Write-Host ('  {0}' -f (Get-WHDModeText)) -ForegroundColor DarkGray
+        Write-Host '  *** EXECUTE MODE - changes WILL be applied (with confirm + restore point) ***' -ForegroundColor Red
+    } else {
+        Write-Host ''
+        Write-Host ('  {0}' -f (Get-WHDModeText)) -ForegroundColor DarkGray
+        Write-Host '  --- DRY-RUN MODE - nothing changes; actions are only previewed ---' -ForegroundColor Cyan
+    }
+    if (Test-WHDJournalStop) { Write-Host '  !!! STOPPED: the change journal could not be written. No changes until WHD Next is started again. !!!' -ForegroundColor Red }
+    $gtx = if (Get-Command Get-WHDGuardStatus -EA SilentlyContinue) { (Get-WHDGuardStatus).Text } else { '?' }
+    Write-Host ('  GU = refresh update guard (works in every menu)   guard: {0}' -f $gtx) -ForegroundColor DarkGray
+}
+
+function Show-WHDMain {
+    Write-Host ''
+    Write-Host '  ===================== WHD Next =====================' -ForegroundColor White
+    Write-Host '  Provided as is, with no warranty (MIT License) - use at your own risk. Dry run first.' -ForegroundColor DarkGray
+    Write-Host ('  Root: {0}' -f $script:WHDRoot) -ForegroundColor DarkGray
+    if (-not $elevated) { Write-Host '  (NOT elevated - inventory/removal will be limited)' -ForegroundColor Yellow }
+    Write-Host '  Type a number/letter below and press Enter.' -ForegroundColor DarkGray
+    Show-WHDMode
+    Write-Host ''
+    Write-Host '   1. Run inventory (read-only)'
+    Write-Host '   2. AI debloat        (feature-off / remove, per surface)'
+    Write-Host '   3. General debloat   (non-AI Store apps + privacy/telemetry)'
+    Write-Host '   M. More privacy settings (activity, clipboard, ads, speech, Edge - pick several at once)'
+    Write-Host '   4. App permissions   (Lockdown / Balanced / Open / Custom)'
+    Write-Host '   5. Win32 programs     (uninstall + block re-appearance)'
+    Write-Host '   6. Component store    (WinSxS analyze / cleanup via DISM)'
+    Write-Host '   9. Firewall           (IPv6 off / clean listing / allow-list / block lists from your own files)'
+    Write-Host '   S. Security+          (Defender, attack-surface rules, old protocols, UAC, report)'
+    Write-Host '   W. Updates            (update gate, Windows Update / driver / Store policies, app updaters)'
+    Write-Host '   N. Devices            (Bluetooth network, Wi-Fi Direct adapters, WAN Miniports)'
+    Write-Host '   T. Time & region      (time zone, set date and time)'
+    Write-Host '   7. Create a System Restore point now'
+    Write-Host ('   8. Toggle mode  (currently: {0})' -f $(if(Test-WHDExecuteWanted){'EXECUTE'}else{'DRY-RUN'}))
+    Write-Host '   P. Apply a profile      E. Export starter profile'
+    Write-Host '   D. Compare inventory scans (what changed)'
+    Write-Host '   U. Undo center (list / undo past changes)'
+    Write-Host '   V. Verify changes are still in place'
+    Write-Host '   X. Theme (optional)   (ship sounds, pictures, dark mode, lock screen + sign-in screen pictures)'
+    Write-Host '   Q. Quit'
+    Write-Host ''
+}
+
+function Invoke-WHDAiSubmenu {
+    while ($true) {
+        Show-WHDMode
+        Show-WHDAiMenu
+        Write-Host ''
+        $c = (Read-Host '  Select #, a list + action (e.g. 1,3,5 r), S, or B').Trim()
+        if (Invoke-WHDGuardHotkey $c) { continue }
+        if ($c -match '^[Bb]$') { return }
+        if ($c -match '^[Ss]$') { Invoke-WHDStoreSuppression; continue }
+        # WHD Next (user request 2026-10-02): several items at once - "1,3,5 r", "2-6 f", "* r", or a list alone.
+        if ($c -notmatch '^\d+$' -and $c -match '^([\d,\s\-\*]+?)\s*([FfRr]?)$') {
+            $whdSelText = $Matches[1]; $whdAct = $Matches[2]
+            $whdStar = @(for ($whdI = 1; $whdI -le $script:WHDAiModules.Count; $whdI++) { if (Test-WHDAiRecommended -Module $script:WHDAiModules[$whdI - 1]) { $whdI } })
+            $whdSel = ConvertFrom-WHDSelection -Text $whdSelText -Max $script:WHDAiModules.Count -Star $whdStar
+            if ($null -eq $whdSel -or -not @($whdSel).Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
+            if (-not $whdAct) { $whdAct = (Read-Host ("  {0} item(s) selected:  r = remove + set the off-switch (OFF where it cannot be removed),  f = feature-off,  c = cancel" -f @($whdSel).Count)).Trim() }
+            $whdMods = @(foreach ($whdN in @($whdSel)) { $script:WHDAiModules[$whdN - 1] })
+            switch -regex ($whdAct) {
+                '^[Rr]$' { Invoke-WHDAiBatch -Modules $whdMods -Action remove }
+                '^[Ff]$' { Invoke-WHDAiBatch -Modules $whdMods -Action off }
+                default  { Write-Host '  cancelled.' -ForegroundColor DarkGray }
+            }
+            continue
+        }
+        if ($c -match '^\d+$') {
+            $idx = [int]$c - 1
+            if ($idx -lt 0 -or $idx -ge $script:WHDAiModules.Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
+            $m = $script:WHDAiModules[$idx]
+            $act = (Read-Host ("  [{0}]  f = feature-off,  r = remove + set its off-switch (OFF where it cannot be removed),  c = cancel" -f $m.Name)).Trim()
+            switch -regex ($act) {
+                '^[Ff]$' { Invoke-WHDAiFeatureOff -Module $m }
+                '^[Rr]$' { Invoke-WHDAiBatch -Modules @($m) -Action remove }   # WHD Next: same rule for one item as for a list
+                default  { Write-Host '  cancelled.' -ForegroundColor DarkGray }
+            }
+        } else { Write-Host '  invalid.' -ForegroundColor Yellow }
+    }
+}
+
+function Invoke-WHDGeneralSubmenu {
+    while ($true) {
+        Show-WHDMode
+        Show-WHDGeneralMenu
+        Write-Host ''
+        $c = (Read-Host '  Select # to remove, a list (e.g. 1,3,5), A / P / D / PD, or B').Trim()
+        if (Invoke-WHDGuardHotkey $c) { continue }
+        if ($c -match '^[Bb]$') { return }
+        # WHD Next (user request 2026-10-02): "More privacy settings" has its own main-menu entry (M); P and D can run together.
+        if ($c -match '^([Pp][Dd]|[Dd][Pp])$') { Invoke-WHDPrivacyAndDiagTrack; continue }
+        if ($c -match '^[Pp]$') { Invoke-WHDPrivacyHardening;  continue }
+        if ($c -match '^[Dd]$') { Invoke-WHDDisableDiagTrack;  continue }
+        # A and lists: one y/N for the whole list.
+        if ($c -match '^[Aa]$') { $c = '*' }
+        if ($c -notmatch '^\d+$' -and $c -match '^[\d,\s\-\*]+$') {
+            $whdCat = @($script:WHDGenCatalog)
+            $whdStar = @(for ($whdI = 1; $whdI -le $whdCat.Count; $whdI++) { if ($whdCat[$whdI - 1].Rec) { $whdI } })
+            $whdSel = ConvertFrom-WHDSelection -Text $c -Max $whdCat.Count -Star $whdStar
+            if ($null -eq $whdSel -or -not @($whdSel).Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
+            Invoke-WHDGeneralBatch -Entries @(foreach ($whdN in @($whdSel)) { $whdCat[$whdN - 1] })
+            continue
+        }
+        if ($c -match '^\d+$') {
+            $idx = [int]$c - 1
+            if ($idx -lt 0 -or $idx -ge @($script:WHDGenCatalog).Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
+            Invoke-WHDGeneralRemove -Entry $script:WHDGenCatalog[$idx]
+        } else { Write-Host '  invalid.' -ForegroundColor Yellow }
+    }
+}
+
+function Invoke-WHDPrivacySubmenu {
+    while ($true) {
+        Show-WHDMode
+        Show-WHDPrivacyMenu
+        $c = (Read-Host '  Select # / A / B').Trim()
+        if (Invoke-WHDGuardHotkey $c) { continue }
+        if ($c -match '^[Bb]$' -or -not $c) { return }
+        if ($c -match '^[Aa]$') { Invoke-WHDPrivacyBatch -Items @($script:WHDPrivacyItems); continue }
+        if ($c -match '^\d+$' -and [int]$c -ge 1 -and [int]$c -le $script:WHDPrivacyItems.Count) { Invoke-WHDPrivacyItem -Item $script:WHDPrivacyItems[[int]$c - 1]; continue }
+        if ($c -match '^[\d,\s\-]+$') {
+            $whdSel = ConvertFrom-WHDSelection -Text $c -Max $script:WHDPrivacyItems.Count
+            if ($null -ne $whdSel -and @($whdSel).Count) { Invoke-WHDPrivacyBatch -Items @(foreach ($whdN in @($whdSel)) { $script:WHDPrivacyItems[$whdN - 1] }); continue }
+        }
+        Write-Host '  invalid.' -ForegroundColor Yellow
+    }
+}
+
+function Invoke-WHDPerAppSubmenu {
+    $i = 0
+    Write-Host ''
+    Write-Host '  PER-APP PERMISSIONS (Store apps)  - pick a permission:' -ForegroundColor White
+    foreach ($cp in $script:WHDCapabilities) { $i++; Write-Host ("  {0,2}. {1,-24} global: {2}" -f $i, $cp.Name, (Get-WHDCapabilityValue -Cap $cp.Cap)) }
+    $c = (Read-Host '  Select # (Enter = back)').Trim()
+    if ($c -notmatch '^\d+$' -or [int]$c -lt 1 -or [int]$c -gt $script:WHDCapabilities.Count) { return }
+    $cap = $script:WHDCapabilities[[int]$c - 1]
+    while ($true) {
+        $apps = @(Get-WHDAppPermissions -Cap $cap.Cap)
+        Write-Host ''
+        Write-Host ("  {0} - Store apps that asked for it   (global switch: {1})" -f $cap.Name, (Get-WHDCapabilityValue -Cap $cap.Cap)) -ForegroundColor White
+        if (-not $apps.Count) { Write-Host '  (no Store apps have requested this permission)' -ForegroundColor DarkGray; return }
+        $j = 0
+        foreach ($a in $apps) {
+            $j++
+            $col = switch ($a.Value) { 'Deny' { 'Green' } 'Allow' { 'Yellow' } default { 'Gray' } }
+            Write-WHDParts @(("  {0,3}. {1,-40} " -f $j, $(if ($a.Installed) { $a.App } else { $a.App + ' (not installed)' })), @("$($a.Value)", $col))
+        }
+        $pick = (Read-Host '  #(s) then a=allow / d=deny  (e.g. "3 d" or "1,4 a"), Enter = back').Trim()
+        if (-not $pick) { return }
+        if ($pick -notmatch '^([\d,\s]+)\s+([AaDd])$') { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
+        $nums = @($matches[1] -split '[,\s]+' | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ } | Where-Object { $_ -ge 1 -and $_ -le $apps.Count })
+        $val = if ($matches[2] -match '[Aa]') { 'Allow' } else { 'Deny' }
+        if ($nums.Count) { Invoke-WHDAppPermission -Cap $cap.Cap -Apps @($nums | ForEach-Object { $apps[$_ - 1] }) -Value $val }
+    }
+}
+
+function Invoke-WHDPermSubmenu {
+    while ($true) {
+        Show-WHDMode
+        Show-WHDPermMenu
+        Write-Host ''
+        $c = (Read-Host '  Select L, 1-6 or B').Trim()
+        if (Invoke-WHDGuardHotkey $c) { continue }
+        switch -regex ($c) {
+            '^5$'   { Show-WHDCapabilityUsage }
+            '^6$'   { Invoke-WHDPerAppSubmenu }
+            '^[Ll]$'{ Invoke-WHDPrivacyLock }
+            '^1$'   { Invoke-WHDPermissionProfile -Profile 'Lockdown' }
+            '^2$'   { Invoke-WHDPermissionProfile -Profile 'Balanced' }
+            '^3$'   { Invoke-WHDPermissionProfile -Profile 'Open' }
+            '^4$'   { Invoke-WHDPermissionCustom }
+            '^[Bb]$'{ return }
+            default { Write-Host '  invalid.' -ForegroundColor Yellow }
+        }
+    }
+}
+
+function Invoke-WHDWin32Submenu {
+    while ($true) {
+        Show-WHDMode
+        Show-WHDWin32Menu
+        Write-Host ''
+        $c = (Read-Host '  Select # to uninstall, or F / R / X / B').Trim()
+        if (Invoke-WHDGuardHotkey $c) { continue }
+        if ($c -match '^[Bb]$') { return }
+        if ($c -match '^[Ff]$') { $n = (Read-Host '  App name to find').Trim(); if ($n) { Find-WHDApp -Name $n | Out-Null }; continue }
+        if ($c -match '^[Rr]$') { $n = (Read-Host '  App name to remove everywhere').Trim(); if ($n) { Remove-WHDAppEverywhere -Name $n }; continue }
+        if ($c -match '^[Xx]$') { $n = (Read-Host '  .exe name to block (e.g. LogiDownloadAssistant.exe)').Trim(); if ($n) { Block-WHDExecutable -ExeName $n }; continue }
+        if ($c -match '^\d+$') {
+            $idx = [int]$c - 1
+            if ($idx -lt 0 -or $idx -ge $script:WHDWin32Cache.Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
+            Invoke-WHDWin32Uninstall -App $script:WHDWin32Cache[$idx]
+        } else { Write-Host '  invalid.' -ForegroundColor Yellow }
+    }
+}
+
+function Invoke-WHDMaintenanceSubmenu {
+    while ($true) {
+        Show-WHDMode
+        Show-WHDMaintenanceMenu
+        Write-Host ''
+        $c = (Read-Host '  Select A / C / R / B').Trim()
+        if (Invoke-WHDGuardHotkey $c) { continue }
+        switch -regex ($c) {
+            '^[Aa]$' { Invoke-WHDComponentAnalyze }
+            '^[Cc]$' { Invoke-WHDComponentCleanup }
+            '^[Rr]$' { Invoke-WHDComponentCleanup -ResetBase }
+            '^[Bb]$' { return }
+            default  { Write-Host '  invalid.' -ForegroundColor Yellow }
+        }
+    }
+}
+
+# ---- Phase 5: Undo center ----------------------------------------------------
+function Invoke-WHDUndoSubmenu {
+    while ($true) {
+        Show-WHDMode
+        $sessions = @(Get-WHDUndoSessions)
+        Write-Host ''
+        Write-Host '  UNDO CENTER - sessions with recorded changes or backups (newest first)' -ForegroundColor White
+        Write-Host '  ----------------------------------------------------------------'
+        if (-not $sessions.Count) { Write-Host '  (nothing recorded yet)'; Write-Host '   B. Back'; }
+        $i = 0
+        foreach ($s in $sessions) { $i++; Write-Host ("  {0,3}. {1}" -f $i, $s.Label) }
+        Write-Host '  ----------------------------------------------------------------'
+        $hiddenN = @(Get-WHDUndoSessions -IncludeOtherPCs | Where-Object { $_.Owner -in @('other','legacy-other') }).Count
+        Write-Host '   #. Open a session     B. Back'
+        $hiddenScans = @(Get-WHDOtherPcScans).Count; $hiddenGuard = @(Get-WHDOtherPcGuardFiles).Count
+        Write-Host ('   H. History from other PCs / previous Windows installs: {0} session(s), {1} inventory scan(s), {2} guard file(s) -> archive + tag this PC''s sessions' -f $hiddenN, $hiddenScans, $hiddenGuard)
+        $c = (Read-Host '  Select').Trim()
+        if (Invoke-WHDGuardHotkey $c) { continue }
+        if ($c -match '^[Bb]$' -or -not $c) { return }
+        if ($c -match '^[Hh]$') { Invoke-WHDArchiveOtherHistory; continue }
+        if ($c -notmatch '^\d+$' -or [int]$c -lt 1 -or [int]$c -gt $sessions.Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
+        $sess = $sessions[[int]$c - 1]
+        while ($true) {
+            $entries = @(Get-WHDJournal -SessionPath $sess.Path)
+            Write-Host ''
+            Write-Host ("  SESSION {0}" -f $sess.Stamp) -ForegroundColor White
+            Write-Host '  [auto] = can be undone automatically   [manual] = see hint   [undone] = already undone' -ForegroundColor DarkGray
+            if ($entries.Count) { Show-WHDUndoEntries -Entries $entries } else { Write-Host '  (no journal - this session is from before the change journal existed; use its backups below)' }
+            Write-Host ''
+            Write-Host '   #   Undo one change (e.g. 3, or 3,5,7)'
+            Write-Host '   A.  Undo ALL automatic changes in this session (newest first)'
+            if ($sess.HasWfw)   { Write-Host '   F.  Restore the firewall saved before this session' }
+            if ($sess.HasHosts) { Write-Host '   H.  Restore the hosts file saved before this session' }
+            if ($sess.RegFiles) { Write-Host ('   R.  Import this session''s {0} .reg backup(s)  (older sessions)' -f $sess.RegFiles) }
+            Write-Host '   V.  Verify this session''s changes are still in place'
+            Write-Host '   B.  Back'
+            $a = (Read-Host '  Select').Trim()
+            if ($a -match '^[Bb]$' -or -not $a) { break }
+            switch -regex ($a) {
+                '^[Aa]$' { Invoke-WHDUndoSession -SessionPath $sess.Path }
+                '^[Ff]$' { Restore-WHDSessionFirewall -SessionPath $sess.Path }
+                '^[Hh]$' { Restore-WHDSessionHosts -SessionPath $sess.Path }
+                '^[Rr]$' { Import-WHDLegacyRegBackups -SessionPath $sess.Path }
+                '^[Vv]$' { Invoke-WHDVerify -SessionPath $sess.Path | Out-Null }
+                '^[\d,\s]+$' {
+                    $pick = @($a -split '[,\s]+' | Where-Object { $_ -match '^\d+$' } | ForEach-Object { [int]$_ } |
+                              Where-Object { $_ -ge 1 -and $_ -le $entries.Count } | ForEach-Object { $entries[$_ - 1] })
+                    if ($pick.Count) { Invoke-WHDUndo -Entries $pick } else { Write-Host '  invalid.' -ForegroundColor Yellow }
+                }
+                default { Write-Host '  invalid.' -ForegroundColor Yellow }
+            }
+        }
+    }
+}
+
+# ---- main loop --------------------------------------------------------------
+# Labeled loop so 'Q' can break the WHILE (a bare 'break' only exits the switch).
+try {
+    :mainloop while ($true) {
+        Show-WHDMain
+        $choice = (Read-Host '  Select').Trim()
+        # WHD Next (user decisions 2026-10-02):
+        #  * an action that stops on an error no longer ends WHD Next - the error is explained and the menu comes back;
+        #  * "| Out-Null" keeps the result rows of the actions off the screen (everything meant for the screen is
+        #    written with Write-Host / Out-Host and is not affected).
+        try {
+        if (Invoke-WHDGuardHotkey $choice) { continue mainloop }
+        switch -regex ($choice) {
+            '^1$' {
+                $inv = Join-Path $script:WHDRoot 'Inventory.ps1'
+                if (Test-Path $inv) { & $inv -NoElevate } else { Write-WHDLog 'Inventory.ps1 not found at root.' 'ERR' }
+            }
+            '^2$' { Invoke-WHDAiSubmenu | Out-Null }
+            '^3$' { Invoke-WHDGeneralSubmenu | Out-Null }
+            '^[Mm]$' { Invoke-WHDPrivacySubmenu | Out-Null }
+            '^4$' { Invoke-WHDPermSubmenu | Out-Null }
+            '^5$' { Invoke-WHDWin32Submenu | Out-Null }
+            '^6$' { Invoke-WHDMaintenanceSubmenu | Out-Null }
+            '^9$' { Invoke-WHDFirewallSubmenu | Out-Null; if ($script:WHDQuit) { break mainloop } }
+            '^7$' { New-WHDCheckpointNow | Out-Null }
+            '^8$' {
+                if ($script:WHDSafeMode -and (Test-WHDJournalStop)) { Show-WHDJournalStop; Write-Host '  EXECUTE stays off until WHD Next is started again.' -ForegroundColor Yellow; continue mainloop }
+                if ($script:WHDSafeMode) {
+                    # SAFE mode: the real switch stays off; this only arms Undo / re-apply / re-remove.
+                    $script:WHDSafeExecute = -not $script:WHDSafeExecute
+                    Write-WHDLog ("mode -> {0} (SAFE MODE)" -f $(if($script:WHDSafeExecute){'EXECUTE for Undo / re-apply / re-remove only'}else{'DRY-RUN'})) 'ACT'
+                    if ($script:WHDSafeExecute) { Write-Host '  SAFE MODE: only Undo, re-apply and re-remove can make changes. Everything else stays a preview until PowerShell 7.6 is used.' -ForegroundColor Yellow }
+                    continue mainloop
+                }
+                if (Test-WHDJournalStop) { Show-WHDJournalStop; Write-Host '  EXECUTE stays off until WHD Next is started again.' -ForegroundColor Yellow; continue mainloop }
+                $script:WHDExecute = -not $script:WHDExecute
+                Write-WHDLog ("mode -> {0}" -f $(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'})) 'ACT'
+                if ($script:WHDExecute) {
+                    Write-Host '  You just enabled EXECUTE mode. Each action still asks y/N and a restore point is made first.' -ForegroundColor Yellow
+                }
+            }
+            '^[Pp]$' {
+                $def = Join-Path $script:WHDRoot 'profiles\lean.json'
+                $pp = (Read-Host ("  Profile path [{0}]" -f $def)).Trim()
+                if (-not $pp) { $pp = $def }
+                Invoke-WHDApplyProfile -Path $pp | Out-Null
+            }
+            '^[Ee]$' {
+                $def = Join-Path $script:WHDRoot 'profiles\lean.json'
+                $pp = (Read-Host ("  Export starter profile to [{0}]" -f $def)).Trim()
+                if (-not $pp) { $pp = $def }
+                Export-WHDProfile -Path $pp | Out-Null
+            }
+            '^[Dd]$' {
+                $inv = Join-Path $script:WHDRoot 'Inventory.ps1'
+                if (Test-Path $inv) { & $inv -Compare -NoElevate | ForEach-Object { Write-Host $_ } } else { Write-WHDLog 'Inventory.ps1 not found at root.' 'ERR' }
+            }
+            '^[Uu]$' { Invoke-WHDUndoSubmenu | Out-Null }
+            '^[Ss]$' { Invoke-WHDSecuritySubmenu | Out-Null }
+            '^[Ww]$' { Invoke-WHDUpdatesSubmenu | Out-Null }
+            '^[Nn]$' { Invoke-WHDDevicesSubmenu | Out-Null }
+            '^[Tt]$' { Invoke-WHDTimeRegionSubmenu | Out-Null }
+            '^[Xx]$' { Invoke-WHDThemeSubmenu | Out-Null }
+            '^[Vv]$' {
+                $vr = @(Invoke-WHDVerify -All)
+                if (@($vr | Where-Object { $_.Result -eq 'RETURNED' -and "$($_.Entry.Kind)" -in @('appx','provisioned') }).Count) { Invoke-WHDReRemoveReturned -Results $vr | Out-Null }
+                if (@($vr | Where-Object { $_.Result -eq 'CHANGED' }).Count) { Invoke-WHDReApplyChanged -Results $vr | Out-Null }
+            }
+            '^[Qq]$' { Write-WHDLog 'Quit selected.' 'INFO'; break mainloop }
+            default  { Write-Host '  invalid.' -ForegroundColor Yellow }
+        }
+        } catch {
+            $whdErr = $_
+            Write-WHDLog ("That action stopped on an error: {0}" -f $whdErr.Exception.Message) 'ERR'
+            if ($whdErr.InvocationInfo -and $whdErr.InvocationInfo.ScriptName) {
+                Write-WHDLog ("  where: {0} line {1}" -f (Split-Path -Leaf $whdErr.InvocationInfo.ScriptName), $whdErr.InvocationInfo.ScriptLineNumber) 'INFO'
+            }
+            # An error while writing one of WHD Next's own files is most often folder protection - say so.
+            $whdW = Test-WHDDataWritable
+            if (-not $whdW.Ok) {
+                Write-WHDLog 'WHD Next cannot write into its own folder right now:' 'ERR'
+                Write-WHDLog ('  {0}' -f $whdW.Reason) 'WARN'
+                Show-WHDWriteBlockedHelp
+            }
+            Write-WHDLog 'WHD Next keeps running - back to the main menu.' 'INFO'
+        }
+    }
+}
+finally {
+    Stop-WHDTranscript
+    Write-Host ''
+    Write-WHDLog 'Session ended.' 'INFO'
+}
