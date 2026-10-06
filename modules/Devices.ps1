@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  modules\Devices.ps1   (v1.2, user's choices 2026-09-27)
+ WHD Next  -  modules\Devices.ps1   (v1.2, user's choices 2026-09-27)
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -155,26 +155,21 @@ function Invoke-WHDWanMiniportsOff {
     $ids = @($script:WHDWanIds)
     foreach ($d in $devs) { $ids += @(Get-WHDDeviceHwIds -Device $d | Where-Object { $_ -match '^ms_' }) }
     Add-WHDDenyDeviceIds -Ids $ids
-    $script:WHDPnpRestartNeeded = $false
     foreach ($d in $devs) {
         $wmId = "$($d.InstanceId)"; $wmName = "$($d.FriendlyName)"
         $jr = @{ Kind = 'action'; InstanceId = $wmId; Name = $wmName
                  Hint = 'remove the WAN Miniport block (Undo center, the DenyDeviceIDs lines), turn RasMan back on, then Settings > Network & internet > Advanced network settings > Network reset' }
         Invoke-WHDChange -Description ("remove device {0}" -f $wmName) -Force -Journal $jr -Action {
             $r = Invoke-WHDNative -Exe 'pnputil.exe' -ArgList @('/remove-device', $wmId)
-            # pnputil: 0 = removed; 3010 / 1641 = removed, restart needed to finish
-            if (@(0, 3010, 1641) -notcontains $r.Code) { throw ("pnputil exit {0}: {1}" -f $r.Code, (($r.Out | Select-Object -Last 2) -join ' ')) }
-            if ($r.Code -ne 0) { $script:WHDPnpRestartNeeded = $true }
+            if ($r.Code -ne 0) { throw ("pnputil exit {0}: {1}" -f $r.Code, (($r.Out | Select-Object -Last 2) -join ' ')) }
         } | Out-Null
     }
-    if ($script:WHDPnpRestartNeeded) { Write-WHDLog 'A restart is needed to finish removing the devices.' 'INFO' }
     Write-WHDLog 'Restart, then Devices S: WAN Miniports should stay gone.' 'INFO'
 }
 
 # ---- status ----------------------------------------------------------------------
 function Show-WHDDevicesStatus {
     Write-WHDLog '================ DEVICES STATUS (read-only) ================' 'ACT'
-    if ("$((Get-UICulture).Name)" -notlike 'en*') { Write-WHDLog 'Devices are matched by their English names; on this display language they may not be found.' 'WARN' }
     $bt = @(Get-WHDBtPanAdapters)
     if (-not $bt.Count) { Write-WHDLog 'Bluetooth network adapter : none' 'OK' }
     foreach ($a in $bt) {

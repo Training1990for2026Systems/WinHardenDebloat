@@ -1,15 +1,15 @@
 <#
 ================================================================================
- WinHardenDebloat  -  modules\Profiles.ps1
+ WHD Next  -  modules\Profiles.ps1   (Phase 2)
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
  Profile-driven, non-interactive runner. Reads a JSON profile and drives the
- SAME engine functions the interactive menu and the GUI use.
+ SAME engine functions the interactive menu uses - the "contract a GUI drives".
 
  It does not own any UI: it injects an auto-approve confirm strategy (after one
  upfront gate, unless -Yes) and reads back structured results from the engine
- (Get-WHDResults). The GUI (WHD-GUI.ps1) drives the identical functions the same way.
+ (Get-WHDResults). A future GUI drives the identical functions the same way.
 
  Profile schema (JSON) - every section optional:
  {
@@ -19,7 +19,7 @@
              "remove":     ["copilot","powerautomate","phonelink"] },
    "storeSuppression": true,
    "general": { "removeRecommended": true, "remove": ["xboxapp","todos"], "oem": "ask" },
-   (general.oem = "ask": list the installed non-Microsoft apps and ask which to remove; console only)
+   (general.oem = "ask": list the non-Microsoft apps found on THIS PC and ask which to remove; console only)
    "privacyHardening": true,
    "disableDiagTrack": true,
    "permissions": "Balanced",                         // Lock | Lockdown | Balanced | Open
@@ -51,16 +51,12 @@
 
 function _WHDAiByKey  { param($Key) @($script:WHDAiModules   | Where-Object { $_.Key -eq $Key })[0] }
 function _WHDGenByKey { param($Key) @($script:WHDGeneralApps | Where-Object { $_.Key -eq $Key })[0] }
-# Profile summary lines: the GUI only shows Write-WHDLog output (its console is hidden), the terminal keeps its colours.
-function _WHDProfSay { param([string]$Text, [string]$Color) if ($script:WHDGuiMode) { Write-WHDLog $Text 'INFO' } elseif ($Color) { Write-Host $Text -ForegroundColor $Color } else { Write-Host $Text } }
 
 function Invoke-WHDApplyProfile {
     param([Parameter(Mandatory)][string]$Path)
 
     # Resolve a relative path against the project root (a self-elevated window's
-    # working directory is system32, not the project folder). A path pasted with
-    # surrounding double quotes is accepted (IsPathRooted throws on a quote).
-    $Path = $Path.Trim().Trim('"')
+    # working directory is system32, not the project folder).
     if (-not [System.IO.Path]::IsPathRooted($Path)) { $Path = Join-Path $script:WHDRoot $Path }
     if (-not (Test-Path -LiteralPath $Path)) { Write-WHDLog ("profile not found: {0}" -f $Path) 'ERR'; return }
     try { $p = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json } catch {
@@ -69,82 +65,68 @@ function Invoke-WHDApplyProfile {
     Reset-WHDResults
     $pname = if ($p.name) { $p.name } else { Split-Path $Path -Leaf }
     Write-WHDLog ("================ APPLY PROFILE: {0} ================" -f $pname) 'ACT'
-    if ($p.description) { _WHDProfSay ("  {0}" -f $p.description) 'DarkGray' }
+    if ($p.description) { Write-Host ("  {0}" -f $p.description) -ForegroundColor DarkGray }
 
     # ---- summary of intended actions --------------------------------------
     Write-Host ''
-    _WHDProfSay '  This profile will (in the current mode):' 'White'
-    if ($p.ai.featureOff)          { _WHDProfSay ("   - AI feature-off : {0}" -f (@($p.ai.featureOff) -join ', ')) }
-    if ($p.ai.remove)              { _WHDProfSay ("   - AI remove      : {0}" -f (@($p.ai.remove) -join ', ')) }
-    if ($p.storeSuppression)       { _WHDProfSay '   - Store / silent-reinstall suppression' }
-    if ($p.general.removeRecommended) { _WHDProfSay '   - General: remove ALL recommended apps' }
-    if ($p.general.remove)         { _WHDProfSay ("   - General remove : {0}" -f (@($p.general.remove) -join ', ')) }
-    if ("$($p.general.oem)" -eq 'ask') { _WHDProfSay '   - General: list the installed non-Microsoft apps and ask which to remove' }
-    if ($p.privacyHardening)       { _WHDProfSay '   - Privacy / telemetry hardening' }
-    if ($p.disableDiagTrack)       { _WHDProfSay '   - Disable DiagTrack service' }
-    if ($p.privacy)                { _WHDProfSay ("   - More privacy settings : {0}" -f (@($p.privacy) -join ', ')) }
+    Write-Host '  This profile will (in the current mode):' -ForegroundColor White
+    if ($p.ai.featureOff)          { Write-Host ("   - AI feature-off : {0}" -f (@($p.ai.featureOff) -join ', ')) }
+    if ($p.ai.remove)              { Write-Host ("   - AI remove      : {0}" -f (@($p.ai.remove) -join ', ')) }
+    if ($p.storeSuppression)       { Write-Host  '   - Store / silent-reinstall suppression' }
+    if ($p.general.removeRecommended) { Write-Host '   - General: remove ALL recommended apps' }
+    if ($p.general.remove)         { Write-Host ("   - General remove : {0}" -f (@($p.general.remove) -join ', ')) }
+    if ("$($p.general.oem)" -eq 'ask') { Write-Host  '   - General: list the non-Microsoft apps found on THIS PC and ask which to remove' }
+    if ($p.privacyHardening)       { Write-Host  '   - Privacy / telemetry hardening' }
+    if ($p.disableDiagTrack)       { Write-Host  '   - Disable DiagTrack service' }
+    if ($p.privacy)                { Write-Host ("   - More privacy settings : {0}" -f (@($p.privacy) -join ', ')) }
     if ($p.security) {
         $sx = $p.security
-        if ($sx.pua)               { _WHDProfSay '   - Security+: block unwanted apps (PUA)' }
-        if ($sx.networkProtection) { _WHDProfSay ("   - Security+: network protection {0}" -f $sx.networkProtection) }
-        if ($sx.folderProtection)  { _WHDProfSay ("   - Security+: folder protection {0}" -f $sx.folderProtection) }
-        if ("$($sx.folderProtection)" -eq 'On') {
-            $ppDir = ''
-            try { $ppDir = Get-WHDProtectedFolderOfRoot } catch {}
-            if ($ppDir) { _WHDProfSay ("     WARNING: WHD runs from inside the protected folder '{0}'. Once folder protection is in BLOCK mode, WHD's log may stop and the steps after it may not be recorded for undo. Better: do not run the profile now. Move the WHD folder outside the protected folders (for example C:\WHD) and start it from there." -f $ppDir) 'Yellow' }
-        }
-        if ($sx.asrGroups)         { _WHDProfSay ("   - Security+: ASR {0} ({1})" -f (@($sx.asrGroups) -join ', '), $(if ($sx.asrMode) { $sx.asrMode } else { 'Audit' })) }
-        if ($sx.protocolsOff)      { _WHDProfSay ("   - Security+: protocols off: {0}" -f (@($sx.protocolsOff) -join ', ')) }
-        if ($sx.servicesOff)       { _WHDProfSay ("   - Security+: network services off: {0}" -f (@($sx.servicesOff) -join ', ')) }
-        if ($sx.uacAlwaysNotify)   { _WHDProfSay '   - Security+: UAC Always notify' }
-        if ($sx.passwordPolicy)    { _WHDProfSay '   - Security+: password + lockout rules (14 chars, remember 5, never expire, 3 tries / 10 min)' }
-        if ($sx.updateGuard)       { _WHDProfSay '   - Security+: update guard (alert only, sign-in +10 min)' }
+        if ($sx.pua)               { Write-Host  '   - Security+: block unwanted apps (PUA)' }
+        if ($sx.networkProtection) { Write-Host ("   - Security+: network protection {0}" -f $sx.networkProtection) }
+        if ($sx.folderProtection)  { Write-Host ("   - Security+: folder protection {0}" -f $sx.folderProtection) }
+        if ($sx.asrGroups)         { Write-Host ("   - Security+: ASR {0} ({1})" -f (@($sx.asrGroups) -join ', '), $(if ($sx.asrMode) { $sx.asrMode } else { 'Audit' })) }
+        if ($sx.protocolsOff)      { Write-Host ("   - Security+: protocols off: {0}" -f (@($sx.protocolsOff) -join ', ')) }
+        if ($sx.servicesOff)       { Write-Host ("   - Security+: network services off: {0}" -f (@($sx.servicesOff) -join ', ')) }
+        if ($sx.uacAlwaysNotify)   { Write-Host  '   - Security+: UAC Always notify' }
+        if ($sx.passwordPolicy)    { Write-Host  '   - Security+: password + lockout rules (14 chars, remember 5, never expire, 3 tries / 10 min)' }
+        if ($sx.updateGuard)       { Write-Host  '   - Security+: update guard (alert only, sign-in +10 min)' }
     }
     if ($p.devices) {
-        if ($p.devices.btNetworkOff)    { _WHDProfSay '   - Devices: Bluetooth network part off (DHCP + autoconfig off, adapter off)' }
-        if ($p.devices.wifiDirectOff)   { _WHDProfSay '   - Devices: Wi-Fi Direct adapters off + install block' }
-        if ($p.devices.wanMiniportsOff) { _WHDProfSay '   - Devices: WAN Miniports install block + remove' }
+        if ($p.devices.btNetworkOff)    { Write-Host  '   - Devices: Bluetooth network part off (DHCP + autoconfig off, adapter off)' }
+        if ($p.devices.wifiDirectOff)   { Write-Host  '   - Devices: Wi-Fi Direct adapters off + install block' }
+        if ($p.devices.wanMiniportsOff) { Write-Host  '   - Devices: WAN Miniports install block + remove' }
     }
-    if ($p.permissions)            { _WHDProfSay ("   - App-permission profile : {0}" -f $p.permissions) }
-    if ($p.win32.uninstall)        { _WHDProfSay ("   - Win32 uninstall : {0}" -f (@($p.win32.uninstall) -join ', ')) }
-    if ($p.win32.removeEverywhere) { _WHDProfSay ("   - Win32 remove-everywhere : {0}" -f (@($p.win32.removeEverywhere) -join ', ')) }
-    if ($p.win32.blockExe)         { _WHDProfSay ("   - Win32 block exe : {0}" -f (@($p.win32.blockExe) -join ', ')) }
+    if ($p.permissions)            { Write-Host ("   - App-permission profile : {0}" -f $p.permissions) }
+    if ($p.win32.uninstall)        { Write-Host ("   - Win32 uninstall : {0}" -f (@($p.win32.uninstall) -join ', ')) }
+    if ($p.win32.removeEverywhere) { Write-Host ("   - Win32 remove-everywhere : {0}" -f (@($p.win32.removeEverywhere) -join ', ')) }
+    if ($p.win32.blockExe)         { Write-Host ("   - Win32 block exe : {0}" -f (@($p.win32.blockExe) -join ', ')) }
     if ($p.network) {
         $nx = $p.network
-        if ($nx.firewallWipeFirst) {
-            _WHDProfSay '   - Network: WIPE ALL firewall rules first (Windows defaults included; .wfw backup taken)'
-            # v1.5: the wipe also deletes the update gate's own rules - say what happens to a gate that is set now
-            $ppGateNow = ''
-            if (Get-Command Get-WHDGateState -EA SilentlyContinue) { try { $ppGs = Get-WHDGateState; if ($ppGs.Closed) { $ppGateNow = "$($ppGs.Mode)".ToUpper() } } catch { $ppGateNow = '' } }
-            if ($ppGateNow) {
-                if ($p.updates -and @('closed', 'programs') -contains "$($p.updates.gate)") { _WHDProfSay ("     The update gate is {0} now: the wipe deletes its rules and your program allows. The last step of this profile sets the gate again." -f $ppGateNow) 'Yellow' }
-                else { _WHDProfSay ("     The update gate is {0} now: the wipe deletes its rules and your program allows. After the network steps the gate is set to {0} again (no extra question - this profile's one approval covers it)." -f $ppGateNow) 'Yellow' }
-            }
-        }
-        if ($nx.timeSync)          { _WHDProfSay ("   - Network: time sync {0}{1}" -f $nx.timeSync, $(if ($nx.timeSync -eq 'Cloudflare') { ' (UDP 123 pinned, 1 h jump limit)' } else { '' })) }
-        if ($nx.firewallProfile)   { _WHDProfSay ("   - Network: firewall profile {0}" -f $nx.firewallProfile) }
-        if ($nx.dns)               { _WHDProfSay ("   - Network: DNS {0}" -f $(if ($nx.dns -eq 'Cloudflare') { 'Cloudflare 1.1.1.2 + encrypted DoH' } else { $nx.dns })) }
-        if ($nx.connectionLogging) { _WHDProfSay '   - Network: Windows Firewall log ON (default file, dropped + allowed, 32,767 KB)' }
+        if ($nx.firewallWipeFirst) { Write-Host  '   - Network: WIPE ALL firewall rules first (Windows defaults included; .wfw backup taken)' }
+        if ($nx.timeSync)          { Write-Host ("   - Network: time sync {0}{1}" -f $nx.timeSync, $(if ($nx.timeSync -eq 'Cloudflare') { ' (UDP 123 pinned, 1 h jump limit)' } else { '' })) }
+        if ($nx.firewallProfile)   { Write-Host ("   - Network: firewall profile {0}" -f $nx.firewallProfile) }
+        if ($nx.dns)               { Write-Host ("   - Network: DNS {0}" -f $(if ($nx.dns -eq 'Cloudflare') { 'Cloudflare 1.1.1.2 + encrypted DoH' } else { $nx.dns })) }
+        if ($nx.connectionLogging) { Write-Host  '   - Network: Windows Firewall log ON (default file, dropped + allowed, 32,767 KB)' }
     }
     if ($p.updates) {
         $ux = $p.updates
         $pl = @(); if ($ux.windowsUpdatePolicy) { $pl += 'Windows Update' }; if ($ux.drivers) { $pl += 'drivers (Device Installation = No)' }
         if ($ux.driverPolicy) { $pl += 'driver policy' }; if ($ux.storePolicy) { $pl += 'Store auto-update' }
-        if ($pl.Count)             { _WHDProfSay ("   - Updates: policies -> {0}" -f ($pl -join ', ')) }
-        if ($ux.edgeUpdaterOff)    { _WHDProfSay '   - Updates: Edge Update off' }
-        if ($ux.updatersOff)       { _WHDProfSay ("   - Updates: app updaters off matching: {0}" -f (@($ux.updatersOff) -join ', ')) }
+        if ($pl.Count)             { Write-Host ("   - Updates: policies -> {0}" -f ($pl -join ', ')) }
+        if ($ux.edgeUpdaterOff)    { Write-Host  '   - Updates: Edge Update off' }
+        if ($ux.updatersOff)       { Write-Host ("   - Updates: app updaters off matching: {0}" -f (@($ux.updatersOff) -join ', ')) }
     }
-    if ($p.componentCleanup.run)   { _WHDProfSay ("   - Component store cleanup{0}" -f $(if($p.componentCleanup.resetBase){' + ResetBase'}else{''})) }
-    if ($p.security -and $p.security.updateGuard) { _WHDProfSay '   - then: install the update guard' }
-    if ($p.updates -and "$($p.updates.gate)" -eq 'closed') { _WHDProfSay '   - LAST: CLOSE the update gate (only Defender + DNS-over-HTTPS may use the web)' }
-    if ($p.updates -and "$($p.updates.gate)" -eq 'programs') { _WHDProfSay '   - LAST: set the update gate to PROGRAMS (Defender + DNS-over-HTTPS + the programs you allowed)' }
+    if ($p.componentCleanup.run)   { Write-Host ("   - Component store cleanup{0}" -f $(if($p.componentCleanup.resetBase){' + ResetBase'}else{''})) }
+    if ($p.security -and $p.security.updateGuard) { Write-Host  '   - then: install the update guard' }
+    if ($p.updates -and "$($p.updates.gate)" -eq 'closed')   { Write-Host  '   - LAST: CLOSE the update gate (only Defender + DNS-over-HTTPS may use the web)' }
+    if ($p.updates -and "$($p.updates.gate)" -eq 'programs') { Write-Host  '   - LAST: set the update gate to PROGRAMS (Defender + DNS-over-HTTPS + the programs you allowed)' }
     Write-Host ''
 
     # ---- one upfront gate in EXECUTE mode (unless -Yes) -------------------
     if ($script:WHDExecute -and -not $script:WHDYes) {
         # Same confirm strategy as every other action: y/N in the terminal, a Yes/No dialog in the GUI
         # (a Read-Host here would wait on the hidden console behind the GUI window).
-        _WHDProfSay '  *** EXECUTE MODE - this will change the system. ***' 'Red'
+        Write-Host '  *** EXECUTE MODE - this will change the system. ***' -ForegroundColor Red
         if (-not (Confirm-WHDProceed ("EXECUTE MODE: apply profile '{0}' now (every step above)" -f $pname))) { Write-WHDLog 'Profile apply cancelled at gate.' 'WARN'; return }
     }
 
@@ -152,8 +134,6 @@ function Invoke-WHDApplyProfile {
     # or dry-run) is the decision. Save/restore the injected strategy.
     $prevConfirm = $script:WHDConfirm
     $script:WHDConfirm = { param($Msg) $true }
-    $applyAborted = $false
-    $script:WHDProfWiped = $false      # v1.5: set when this run wiped the firewall (see the safety net after the steps)
     try {
         # Action functions return result objects (recorded in WHDResults). Run
         # them inside a scriptblock piped to Out-Null so those objects don't leak
@@ -201,7 +181,7 @@ function Invoke-WHDApplyProfile {
                 $all = Get-WHDWin32Apps
                 foreach ($nm in @($p.win32.uninstall | Where-Object { $_ })) {
                     $app = @($all | Where-Object { $_.DisplayName -like "*$nm*" })[0]
-                    if ($app) { Invoke-WHDWin32Uninstall -App $app | Out-Null } else { Write-WHDLog "win32 uninstall: no match for '$nm'" 'WARN' }
+                    if ($app) { Invoke-WHDWin32Uninstall -App $app } else { Write-WHDLog "win32 uninstall: no match for '$nm'" 'WARN' }
                 }
                 foreach ($nm in @($p.win32.removeEverywhere | Where-Object { $_ })) { Remove-WHDAppEverywhere -Name $nm }
                 foreach ($exe in @($p.win32.blockExe | Where-Object { $_ }))        { Block-WHDExecutable -ExeName $exe }
@@ -209,12 +189,8 @@ function Invoke-WHDApplyProfile {
             if ($p.network -and (Get-Command Invoke-WHDSetTimeSync -EA SilentlyContinue)) {
                 $nx = $p.network
                 # Time first, so the firewall profile keeps NTP pinned to Cloudflare.
-                $whdPrWipe = ''
-                if ($nx.firewallWipeFirst) {
-                    Invoke-WHDFirewallWipe      # empty slate BEFORE any WHD rule is added
-                    $whdPrWipe = "$($script:WHDFwToolStatus)"
-                    if ($whdPrWipe -eq 'done') { $script:WHDProfWiped = $true }
-                }
+                # empty slate BEFORE any WHD rule is added (the IP block list is re-checked once, by the firewall profile below)
+                if ($nx.firewallWipeFirst) { if ($nx.firewallProfile) { Invoke-WHDBlocklistHold { Invoke-WHDFirewallWipe } } else { Invoke-WHDFirewallWipe } }
                 if ($nx.timeSync) { Invoke-WHDSetTimeSync -Mode $nx.timeSync }
                 if ($nx.firewallProfile) {
                     $fp = "$($nx.firewallProfile)"
@@ -224,11 +200,6 @@ function Invoke-WHDApplyProfile {
                 if ($nx.dns -eq 'Cloudflare') { Invoke-WHDSetDns -Mode Cloudflare }
                 elseif ($nx.dns -eq 'Reset')  { Invoke-WHDSetDns -Mode Reset }
                 if ($nx.connectionLogging)    { Enable-WHDConnectionLogging }
-                # v1.5: a gate that was CLOSED / on PROGRAMS lost its rules with the wipe. When this profile does not set
-                # the gate itself (its last step), it is set again here in the same position - after DNS, which the gate checks.
-                if ($whdPrWipe -eq 'done' -and -not ($p.updates -and @('closed', 'programs') -contains "$($p.updates.gate)") -and (Get-Command Invoke-WHDGateRepairOffer -EA SilentlyContinue)) {
-                    Invoke-WHDGateRepairOffer -After 'the wipe'
-                }
             }
             if ($p.updates -and (Get-Command Invoke-WHDUpdatePolicy -EA SilentlyContinue)) {
                 $ux = $p.updates
@@ -255,31 +226,19 @@ function Invoke-WHDApplyProfile {
             }
         } | Out-Null
     }
-    catch   { $applyAborted = $true; Write-WHDLog ("apply error: {0}" -f $_.Exception.Message) 'ERR' }
-    finally {
-        # v1.5 safety net: this run wiped the firewall while the update gate was CLOSED / on PROGRAMS, and the gate is
-        # still without its rules (the run stopped before the step that sets it again). Outbound is Block with nothing
-        # allowed then - not even DNS. Set the gate again in its position, under the profile's approval.
-        try {
-            if ($script:WHDExecute -and $script:WHDProfWiped -and (Get-Command Invoke-WHDGateRepairOffer -EA SilentlyContinue)) {
-                $ppH = Get-WHDGateHealth
-                if ($ppH.Closed -and $ppH.NeedsSet) {
-                    Write-WHDLog 'The firewall was wiped in this run and the update gate is still without its rules. Setting the gate again now, so that DHCP, Microsoft Defender and DNS to the pinned servers get out.' 'WARN'
-                    Invoke-WHDGateRepairOffer -After 'the wipe' | Out-Null
-                }
-            }
-        } catch { try { Write-WHDLog ("The update gate could not be set again after the wipe: {0}. Outbound is Block: set DNS (Firewall D) and the gate (Updates C or P), or revert default-deny (Firewall 8)." -f $_.Exception.Message) 'ERR' } catch { } }
-        $script:WHDProfWiped = $false
-        $script:WHDConfirm = $prevConfirm
-    }
+    catch   { Write-WHDLog ("apply error: {0}" -f $_.Exception.Message) 'ERR' }
+    finally { $script:WHDConfirm = $prevConfirm }
 
     # ---- results summary: read the engine's running counters (no iteration) --
     try {
         $c = Get-WHDCounts
         Write-Host ''
-        $sumTxt = "" + [int]$c.done + " done, " + [int]$c.planned + " planned (dry-run), " + [int]$c.failed + " failed, " + [int]$c.skipped + " skipped"
-        if ($applyAborted) { Write-WHDLog ("PROFILE '" + $pname + "' ABORTED after an error - the remaining steps were NOT applied - " + $sumTxt) 'ERR' }
-        else               { Write-WHDLog ("PROFILE '" + $pname + "' complete - " + $sumTxt) 'ACT' }
+        if (Test-WHDJournalStop) {
+            Write-WHDLog ("PROFILE '" + $pname + "' STOPPED before the end - " + [int]$c.done + " done, " + [int]$c.skipped + " skipped / not done, " + [int]$c.failed + " failed") 'ERR'
+            Show-WHDJournalStop
+        } else {
+        Write-WHDLog ("PROFILE '" + $pname + "' complete - " + [int]$c.done + " done, " + [int]$c.planned + " planned (dry-run), " + [int]$c.failed + " failed") 'ACT'
+        }
         if ([int]$c.failed -gt 0) {
             foreach ($r in @(Get-WHDResults)) {
                 if ("$($r.Status)" -eq 'failed') { Write-WHDLog ("  FAILED: " + $r.Action + " :: " + $r.Detail) 'ERR' }
@@ -298,11 +257,10 @@ function Invoke-WHDApplyProfile {
 # Write a starter profile (the curated lean setup) the user can edit.
 function Export-WHDProfile {
     param([Parameter(Mandatory)][string]$Path)
-    $Path = $Path.Trim().Trim('"')
     if (-not [System.IO.Path]::IsPathRooted($Path)) { $Path = Join-Path $script:WHDRoot $Path }
     $lean = [ordered]@{
         name             = 'lean'
-        description      = 'Curated lean debloat for a fresh Windows 11 Home install (edit to taste).'
+        description      = 'Curated lean debloat for a fresh Win11 Home box (edit to taste).'
         ai               = [ordered]@{ featureOff = @('copilot','bing','recall'); remove = @('copilot','powerautomate','phonelink','webexp') }
         storeSuppression = $true
         general          = [ordered]@{ removeRecommended = $true; remove = @('xboxapp','todos','sticky'); oem = 'ask' }

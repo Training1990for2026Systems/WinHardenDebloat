@@ -1,6 +1,6 @@
 {
   "name": "validated",
-  "description": "Same settings as profiles\\standard.json, kept under its earlier name: the STRICT FULL LOCK-DOWN of the author's own test PC (Windows 11 Home), not a general default. PROVIDED AS IS, WITH NO WARRANTY: you run it at your own risk (see LICENSE). Read the description in profiles\\standard.json and the README section 'Read this before you run it' for what it does. Dry run first: WHD.ps1 -Apply profiles\\validated.json, then add -Execute.",
+  "description": "Same settings as profiles\\standard.json, kept under its earlier name: the STRICT FULL LOCK-DOWN of the author's own test PC (Windows 11 Home), not a general default. PROVIDED AS IS, WITH NO WARRANTY: you run it at your own risk (see LICENSE). Read the description in profiles\\standard.json and the README section 'Read this before you run it' for what it does. Dry run first: Start-WHD.ps1 -Apply profiles\\validated.json, then add -Execute.",
   "ai": {
     "featureOff": [
       "copilot",

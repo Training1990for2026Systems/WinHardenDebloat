@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  modules\Common.ps1
+ WHD Next  -  modules\Common.ps1
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -27,6 +27,162 @@ if (-not (Get-Variable -Name WHDRoot -Scope Script -EA SilentlyContinue)) {
 }
 $script:WHDRestoreDone   = $false      # restore point made this session?
 $script:WHDStamp         = Get-Date -Format 'yyyy-MM-dd_HHmmss'
+
+# ---- WHD Next: FULL mode / SAFE mode (decision D6, Option C) ---------------
+# FULL mode  = PowerShell 7.6 or newer: everything works as in Classic.
+# SAFE mode  = Windows PowerShell 5.1 (or an older PowerShell 7): read-only screens, the dry-run plan,
+#              Verify, Undo, re-apply and re-remove only. NEW changes need FULL mode.
+# How it is enforced (two locks):
+#   1. In SAFE mode $script:WHDExecute is never switched on globally. The EXECUTE toggle only sets
+#      $script:WHDSafeExecute ("I want my undo / re-apply to be real"). Every code path that checks
+#      $script:WHDExecute therefore stays a dry-run.
+#   2. The change gate (Invoke-WHDChange) refuses anything that is not inside an allowed operation.
+# The allowed operations call Invoke-WHDSafeAllowed, which switches EXECUTE on for that one operation.
+if (-not (Get-Variable -Name WHDSafeMode -Scope Script -EA SilentlyContinue)) {
+    $whdEngineOk = ($PSVersionTable.PSEdition -eq 'Core' -and $PSVersionTable.PSVersion -ge [version]'7.6.0')
+    $script:WHDSafeMode = (-not $whdEngineOk)
+}
+if (-not (Get-Variable -Name WHDSafeExecute -Scope Script -EA SilentlyContinue)) { $script:WHDSafeExecute = $false }
+$script:WHDSafeAllow = 0                # >0 while an allowed operation (undo / re-apply / re-remove) is running
+if ($script:WHDSafeMode) { $script:WHDExecute = $false }
+
+# ---- WHD Next: stop when WHD Next cannot write its own files ----------------
+# (user decisions 2026-10-01 gap G10, and 2026-10-02 gap G11)
+# A change that cannot be written to the change journal has no Undo and no Verify. So the FIRST failed
+# journal write stops the run: EXECUTE is switched off and the change gate refuses everything else until
+# WHD Next is started again. The same stop (Kind 'data') is used when the write test that follows
+# "folder protection -> Block" fails: nothing unrecorded has happened yet, WHD Next just must not go on.
+$script:WHDJournalStop = $null          # $null = fine; otherwise the facts about the failed write
+function Test-WHDJournalStop { return [bool]$script:WHDJournalStop }
+function Get-WHDThisProgram {
+    $p = ''
+    try { $p = (Get-Process -Id $PID -ErrorAction Stop).Path } catch {}
+    return "$p"
+}
+# The "what to do" lines, shared by every message about a blocked write.
+function Show-WHDWriteBlockedHelp {
+    param([string]$Program)
+    if (-not $Program) { $Program = Get-WHDThisProgram }
+    $ps51 = ''
+    if ($env:SystemRoot) { $ps51 = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe' }
+    Write-WHDLog 'Likely cause: folder protection (Controlled folder access) is blocking this PowerShell.' 'WARN'
+    Write-WHDLog 'To allow it: Windows Security > Virus & threat protection > Ransomware protection >' 'WARN'
+    Write-WHDLog ('  Allow an app through Controlled folder access > add: {0}' -f $Program) 'WARN'
+    if ($ps51 -and "$Program" -ne "$ps51") { Write-WHDLog ('  The launcher and the update guard scan also use: {0}' -f $ps51) 'WARN' }
+    if ($env:ProgramData) {
+        Write-WHDLog ('Or, without any permission: quit and start WHD Next again with  Start-WHD.ps1 -CopyToUnlocked  - the launcher') 'WARN'
+        Write-WHDLog ('  copies WHD Next to {0} and runs it from there.' -f (Join-Path $env:ProgramData 'WinHardenDebloatNext\app')) 'WARN'
+    }
+    Write-WHDLog 'Other causes: disk full, or the WHD folder is read-only.' 'WARN'
+}
+function Show-WHDJournalStop {
+    if (-not $script:WHDJournalStop) { return }
+    $j = $script:WHDJournalStop
+    # Through Write-WHDLog so the same lines reach the console, the transcript and the window's log.
+    Write-WHDLog '################################################################################' 'ERR'
+    if ("$($j.Kind)" -eq 'data') {
+        Write-WHDLog 'STOPPED - WHD Next can no longer write its own files (journal, logs, reports).' 'ERR'
+        Write-WHDLog 'No further change is made in this run. EXECUTE is switched off.' 'ERR'
+        Write-WHDLog ('File   : {0}' -f $j.File) 'WARN'
+        Write-WHDLog ('Reason : {0}' -f $j.Reason) 'WARN'
+        Write-WHDLog ('Found right after: {0}   (that change itself IS recorded)' -f $j.Description) 'WARN'
+    } else {
+        Write-WHDLog 'STOPPED - the change journal could not be written.' 'ERR'
+        Write-WHDLog 'No further change is made in this run. EXECUTE is switched off.' 'ERR'
+        Write-WHDLog ('File   : {0}' -f $j.File) 'WARN'
+        Write-WHDLog ('Reason : {0}' -f $j.Reason) 'WARN'
+        Write-WHDLog ('This change WAS made but is NOT recorded (no Undo / Verify for it): {0}' -f $j.Description) 'WARN'
+        if ($j.Line) { Write-WHDLog ('Its record (keep this line): {0}' -f $j.Line) 'WARN' }
+    }
+    Show-WHDWriteBlockedHelp -Program $j.Program
+    Write-WHDLog 'Fix it, then start WHD Next again.' 'WARN'
+    Write-WHDLog '################################################################################' 'ERR'
+}
+function Set-WHDJournalStop {
+    param([string]$Description, [string]$Reason, [string]$File, [string]$Line, [ValidateSet('journal','data')][string]$Kind = 'journal')
+    if ($script:WHDJournalStop) { return }          # keep the first failure; later ones cannot happen (gate is closed)
+    $script:WHDJournalStop = [pscustomobject]@{ Time = (Get-Date); Kind = $Kind; Description = $Description; Reason = $Reason; File = $File; Line = $Line; Program = (Get-WHDThisProgram) }
+    $script:WHDExecute     = $false
+    $script:WHDSafeExecute = $false
+    try { Show-WHDJournalStop } catch { Write-Host ('STOPPED - WHD Next cannot write its files: {0}' -f $Reason) -ForegroundColor Red }   # the message must never break the stop
+    # The window version hooks in here to untick its EXECUTE box.
+    if ($script:WHDJournalStopHook) { try { & $script:WHDJournalStopHook } catch {} }
+}
+
+# Can this PowerShell write into WHD Next's data folder right now? One small fixed file (logs\write-test.txt)
+# is overwritten - nothing is deleted. Folder protection blocks such a write with "Could not find file".
+function Test-WHDDataWritable {
+    $f = ''
+    try {
+        if (-not $script:WHDLogs) { Initialize-WHDPaths }
+        $f = Join-Path $script:WHDLogs 'write-test.txt'
+        Set-Content -LiteralPath $f -Value ('WHD Next write test {0}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) -Encoding ASCII -ErrorAction Stop
+        return [pscustomobject]@{ Ok = $true; File = $f; Reason = '' }
+    } catch { return [pscustomobject]@{ Ok = $false; File = $f; Reason = "$($_.Exception.Message)" } }
+}
+# Called right after folder protection was switched to Block for real (user decision 2026-10-02).
+# The block needs some seconds to take effect, so the write test is repeated for about 25 seconds unless this
+# PowerShell is already on the allowed list. If the test fails: explain, let the user allow the program and
+# test again (y), or stop making changes in this run (n). Returns $true when WHD Next can write.
+function Wait-WHDFolderProtectionCheck {
+    param([string]$After = 'folder protection -> Block')
+    if (-not $script:WHDExecute) { return $true }
+    $prog = Get-WHDThisProgram
+    $allowed = $false
+    try {
+        $whdMp = Get-WHDMpPreference
+        $allowed = (@($whdMp.ControlledFolderAccessAllowedApplications | Where-Object { $_ } | ForEach-Object { "$_".ToLower() }) -contains $prog.ToLower())
+    } catch {}
+    $r = $null
+    if ($allowed) {
+        $r = Test-WHDDataWritable
+    } else {
+        Write-WHDLog 'Checking that WHD Next can still write its own files (folder protection needs some seconds to take effect; about 25 s)...' 'INFO'
+        for ($whdTry = 1; $whdTry -le 5; $whdTry++) {
+            Start-Sleep -Seconds 5
+            $r = Test-WHDDataWritable
+            if (-not $r.Ok) { break }
+        }
+    }
+    $whdAsk = 0
+    while (-not $r.Ok) {
+        $whdAsk++
+        Write-WHDLog 'FOLDER PROTECTION NOW BLOCKS WHD NEXT from writing its own files (journal, logs, reports).' 'ERR'
+        Write-WHDLog ('File   : {0}' -f $r.File) 'WARN'
+        Write-WHDLog ('Reason : {0}' -f $r.Reason) 'WARN'
+        Show-WHDWriteBlockedHelp -Program $prog
+        if ($whdAsk -gt 5 -or -not (Confirm-WHDProceed 'test again (answer y AFTER you allowed the program; n = stop making changes in this run)')) {
+            Set-WHDJournalStop -Kind 'data' -Description $After -Reason $r.Reason -File $r.File -Line ''
+            return $false
+        }
+        Start-Sleep -Seconds 2
+        $r = Test-WHDDataWritable
+    }
+    Write-WHDLog 'OK - WHD Next can write its own files with folder protection on.' 'OK'
+    return $true
+}
+
+# Is the user asking for real changes? (FULL: the EXECUTE toggle. SAFE: the toggle, for allowed operations only.)
+function Test-WHDExecuteWanted {
+    return [bool]($script:WHDExecute -or ($script:WHDSafeMode -and $script:WHDSafeExecute))
+}
+function Get-WHDModeText {
+    if ($script:WHDSafeMode) { return 'SAFE MODE (PowerShell {0}) - checks, Verify, Undo and re-apply only' -f $PSVersionTable.PSVersion }
+    return 'FULL mode (PowerShell {0})' -f $PSVersionTable.PSVersion
+}
+# Runs one allowed operation. FULL mode: just runs it. SAFE mode: marks it as allowed and, when the
+# user switched EXECUTE on, makes it real for the duration of this operation only.
+function Invoke-WHDSafeAllowed {
+    param([Parameter(Mandatory)][scriptblock]$Do)
+    if (-not $script:WHDSafeMode) { & $Do; return }
+    $script:WHDSafeAllow = [int]$script:WHDSafeAllow + 1
+    if ($script:WHDSafeExecute) { $script:WHDExecute = $true }
+    try { & $Do }
+    finally {
+        $script:WHDSafeAllow = [int]$script:WHDSafeAllow - 1
+        if ($script:WHDSafeAllow -le 0) { $script:WHDSafeAllow = 0; $script:WHDExecute = $false }
+    }
+}
 
 # ---- engine/UI contract (Phase 2) -------------------------------------------
 # The confirmation STRATEGY is injected by the caller (dependency injection),
@@ -100,7 +256,7 @@ function Start-WHDTranscript {
     Initialize-WHDPaths
     $log = Join-Path $script:WHDLogs ("run_{0}.log" -f $script:WHDStamp)
     try { Start-Transcript -Path $log -Append | Out-Null } catch {}
-    Write-WHDLog ("Session start | Execute={0} | Root={1}" -f $script:WHDExecute, $script:WHDRoot)
+    Write-WHDLog ("Session start | {0} | Execute={1} | Root={2}" -f (Get-WHDModeText), (Test-WHDExecuteWanted), $script:WHDRoot)
 }
 function Stop-WHDTranscript { try { Stop-Transcript | Out-Null } catch {} }
 
@@ -110,82 +266,55 @@ function Test-WHDAdmin {
     (New-Object Security.Principal.WindowsPrincipal($id)
         ).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
-# Warns when the elevated process runs as a different account than the user who is signed in
-# (the UAC prompt was answered with another administrator's name and password): per-user
-# settings then go to the elevated account. Read-only, never throws, silent when they match.
-function Write-WHDAccountWarning {
-    try {
-        $awRun  = "{0}\{1}" -f $env:USERDOMAIN, $env:USERNAME
-        $awUser = "$((Get-CimInstance Win32_ComputerSystem -EA Stop).UserName)"
-        if ($awUser -and ($awUser -ne $awRun)) {
-            Write-WHDLog ("WHD is running as {0} but the signed-in user is {1}." -f $awRun, $awUser) 'WARN'
-            Write-WHDLog ("Per-user settings (app permissions, Copilot, suggestions, privacy switches, proxy auto-detect) and the update guard task will apply to {0}, not to the signed-in user. Sign in with the administrator account itself, or make the daily account an administrator for the run." -f $awRun) 'WARN'
+
+# ---- one screen line made of coloured parts ---------------------------------
+# WHD Next (user decision 2026-10-02, log clutter): PowerShell 7 writes every "Write-Host -NoNewline" piece on
+# its own line in the log file, which made the menus unreadable there. On PowerShell 7 the line is therefore
+# written with ONE Write-Host that carries colour codes (the log gets one clean line). Windows PowerShell 5.1,
+# or a host without colour-code support, keeps the classic piece-by-piece way.
+#   Write-WHDParts @('   1. ', @('Name', 'Green'), '  [present]')
+$script:WHDAnsiColor = @{ Black = 'Black'; DarkBlue = 'Blue'; DarkGreen = 'Green'; DarkCyan = 'Cyan'; DarkRed = 'Red'; DarkMagenta = 'Magenta'
+                          DarkYellow = 'Yellow'; Gray = 'White'; DarkGray = 'BrightBlack'; Blue = 'BrightBlue'; Green = 'BrightGreen'; Cyan = 'BrightCyan'
+                          Red = 'BrightRed'; Magenta = 'BrightMagenta'; Yellow = 'BrightYellow'; White = 'BrightWhite' }
+function Write-WHDParts {
+    param([Parameter(Mandatory)][object[]]$Parts)
+    $whdAnsi = $false
+    try { $whdAnsi = ($PSVersionTable.PSVersion.Major -ge 7 -and $null -ne $PSStyle -and $Host.UI.SupportsVirtualTerminal -and "$($PSStyle.OutputRendering)" -ne 'PlainText') } catch { $whdAnsi = $false }
+    if ($whdAnsi) {
+        $sb = New-Object System.Text.StringBuilder
+        foreach ($p in $Parts) {
+            if ($p -is [array]) { $t = "$($p[0])"; $c = "$($p[1])" } else { $t = "$p"; $c = '' }
+            if ($c -and $script:WHDAnsiColor.ContainsKey($c)) { [void]$sb.Append($PSStyle.Foreground.($script:WHDAnsiColor[$c])).Append($t).Append($PSStyle.Reset) }
+            else { [void]$sb.Append($t) }
         }
-    } catch {}
+        Write-Host $sb.ToString()
+        return
+    }
+    foreach ($p in $Parts) {
+        if ($p -is [array]) { $t = "$($p[0])"; $c = "$($p[1])" } else { $t = "$p"; $c = '' }
+        if ($c) { Write-Host $t -ForegroundColor $c -NoNewline } else { Write-Host $t -NoNewline }
+    }
+    Write-Host ''
 }
 
-# Ransomware folder protection (Controlled folder access) in BLOCK mode: Windows does not treat PowerShell as a
-# trusted app, so it may not write into protected folders. If the WHD folder is inside one, WHD may be unable to
-# write its log, change history and backups (seen in the 2026-10-03 live test).
-# Returns the protected folder that contains the WHD folder, or '' when there is none.
-# Checked: Documents, Favorites, Music, Pictures, Videos (Microsoft's list), Desktop (reported blocked on some PCs),
-# and the folders added in Windows Security. Only the folders of the account WHD runs as are known here.
-function Get-WHDProtectedFolderOfRoot {
-    param($MpPref)
-    $pfRoot = "$($script:WHDRoot)".TrimEnd('\')
-    if (-not $pfRoot) { return '' }
-    $pfList = @()
-    foreach ($pfName in @('MyDocuments','Favorites','MyMusic','MyPictures','MyVideos','DesktopDirectory','CommonDocuments','CommonMusic','CommonPictures','CommonVideos','CommonDesktopDirectory')) {
-        try { $pfList += [Environment]::GetFolderPath([Environment+SpecialFolder]$pfName) } catch {}
-    }
-    # folders the user added in Windows Security
-    try {
-        if (-not $MpPref) { $MpPref = Get-MpPreference -EA Stop }
-        $pfList += @($MpPref.ControlledFolderAccessProtectedFolders)
-    } catch {}
-    foreach ($pf in $pfList) {
-        $pfDir = "$pf".TrimEnd('\')
-        if (-not $pfDir) { continue }
-        if ($pfRoot.Equals($pfDir, [StringComparison]::OrdinalIgnoreCase) -or $pfRoot.StartsWith(($pfDir + '\'), [StringComparison]::OrdinalIgnoreCase)) { return $pfDir }
-    }
-    return ''
-}
-# Start-up warning: the protection is already in BLOCK mode and the WHD folder is inside a protected folder.
-function Write-WHDProtectedFolderWarning {
-    try {
-        $pwPref = Get-MpPreference -EA Stop
-        if ([int]$pwPref.EnableControlledFolderAccess -ne 1) { return }
-        $pwDir = Get-WHDProtectedFolderOfRoot -MpPref $pwPref
-        if (-not $pwDir) { return }
-        Write-WHDLog ("Ransomware folder protection is in BLOCK mode and WHD runs from '{0}', inside the protected folder '{1}'." -f $script:WHDRoot, $pwDir) 'WARN'
-        Write-WHDLog 'Windows does not treat PowerShell as a trusted app there, so WHD may be unable to write its log, change history (undo) and backups. Move the WHD folder outside the protected folders (for example C:\WHD) and start it from there.' 'WARN'
-    } catch {}
-}
-
-# ---- "1,3,5-7" style selections ----------------------------------------------
+# ---- "1,3,5-7" style selections (user request 2026-10-02) --------------------
 # Numbers separated by commas or spaces, ranges like 5-7, and * for the recommended set ($Star).
 # Returns the sorted, unique numbers (all within 1..$Max), or $null when the text is not understood.
-# A piece must be a number of 1-9 digits, a range of two such numbers, or *; anything else makes the
-# whole entry invalid (so a very long number can never overflow). [0-9] on purpose: \d also matches digits of
-# other scripts, which [int] cannot convert. Never throws.
 function ConvertFrom-WHDSelection {
     param([string]$Text, [int]$Max, [int[]]$Star = @())
     $t = "$Text".Trim()
     if (-not $t) { return $null }
     $out = New-Object System.Collections.Generic.List[int]
     foreach ($tok in @($t -split '[,\s]+' | Where-Object { $_ })) {
-        if ($tok -eq '*') {
-            foreach ($s in @($Star)) { if ([int]$s -ge 1 -and [int]$s -le $Max -and -not $out.Contains([int]$s)) { $out.Add([int]$s) } }
-            continue
-        }
-        if ($tok -match '^([0-9]{1,9})-([0-9]{1,9})$') {
+        if ($tok -eq '*') { foreach ($s in @($Star)) { if (-not $out.Contains([int]$s)) { $out.Add([int]$s) } }; continue }
+        if ($tok -match '^(\d+)-(\d+)$') {
             $a = [int]$Matches[1]; $b = [int]$Matches[2]
             if ($a -gt $b) { $x = $a; $a = $b; $b = $x }
             if ($a -lt 1 -or $b -gt $Max) { return $null }
             for ($n = $a; $n -le $b; $n++) { if (-not $out.Contains($n)) { $out.Add($n) } }
             continue
         }
-        if ($tok -match '^[0-9]{1,9}$') {
+        if ($tok -match '^\d+$') {
             $n = [int]$tok
             if ($n -lt 1 -or $n -gt $Max) { return $null }
             if (-not $out.Contains($n)) { $out.Add($n) }
@@ -196,15 +325,14 @@ function ConvertFrom-WHDSelection {
     return ,@($out.ToArray() | Sort-Object)
 }
 
-# ---- progress for slow loops -------------------------------------------------
+# ---- progress for slow loops (user request 2026-10-02) -----------------------
 # A progress bar in the console plus a log line every $Every steps, so a long action is seen working
 # (the log lines also reach the window version's log box).
-# The window version may set $script:WHDProgressHook = { param($Activity, $Done, $Total) ... } to move its own progress bar.
-if (-not (Get-Variable -Name WHDProgressHook -Scope Script -EA SilentlyContinue)) { $script:WHDProgressHook = $null }
 function Write-WHDProgressStep {
     param([string]$Activity, [int]$Done, [int]$Total, [int]$Every = 25)
     try { Write-Progress -Activity $Activity -Status ('{0} of {1}' -f $Done, $Total) -PercentComplete ([math]::Min(100, [int](100 * $Done / [math]::Max(1, $Total)))) } catch {}
     if ($Done -ge $Total) { try { Write-Progress -Activity $Activity -Completed } catch {} }
+    # The window version hooks in here to move its progress bar.
     if ($script:WHDProgressHook) { try { & $script:WHDProgressHook $Activity $Done $Total } catch {} }
     if ($Done -ge $Total -or ($Every -gt 0 -and ($Done % $Every) -eq 0)) { Write-WHDLog ('  {0}: {1} of {2}' -f $Activity, $Done, $Total) 'INFO' }
 }
@@ -213,52 +341,127 @@ function Write-WHDProgressStep {
 function Write-WHDRisk {
     param([ValidateSet('reversible','caution','hard')]$Tier, [string]$Text)
     $map = @{ reversible = 'Green'; caution = 'Yellow'; hard = 'Red' }
-    Write-Host ("    [{0}] " -f $Tier.ToUpper()) -ForegroundColor $map[$Tier] -NoNewline
-    Write-Host $Text
+    Write-WHDParts @(@(("    [{0}] " -f $Tier.ToUpper()), $map[$Tier]), $Text)
     if ($script:WHDLogSink) { try { & $script:WHDLogSink ("    [{0}] {1}" -f $Tier.ToUpper(), $Text) 'INFO' } catch {} }
 }
 
 # =============================================================================
-#  Alerts: a small window + a Windows event log entry
+#  WHD Next - Windows' built-in CIM for Defender and System Restore (build step 5)
 # -----------------------------------------------------------------------------
-#  Used by the update guard next to its .txt report.
-#  The event source is registered when the guard is INSTALLED and removed when
-#  the guard is removed - a guard CHECK itself only writes an entry, it never registers.
-#  None of these helpers throws to its caller.
+#  PowerShell 7.6 cannot load the Defender module or the restore-point cmdlets
+#  natively (they only work through its Windows PowerShell 5.1 helper). The CIM
+#  classes underneath them work natively in BOTH engines, so WHD Next talks to
+#  those directly - one code path, no helper:
+#     root/Microsoft/Windows/Defender : MSFT_MpPreference   (methods Set / Add / Remove)
+#                                       MSFT_MpComputerStatus
+#     root/default                    : SystemRestore       (Enable, CreateRestorePoint)
+#  Checked on the user's PC 2026-10-01 (tools\Test-WHDCompat.ps1, area "CIM").
 # =============================================================================
-$script:WHDEventSource = 'WinHardenDebloat'
+$script:WHDDefenderNs = 'root/Microsoft/Windows/Defender'
+
+function Get-WHDMpPreference     { Get-CimInstance -Namespace $script:WHDDefenderNs -ClassName 'MSFT_MpPreference'     -ErrorAction Stop }
+function Get-WHDMpComputerStatus { Get-CimInstance -Namespace $script:WHDDefenderNs -ClassName 'MSFT_MpComputerStatus' -ErrorAction Stop }
+function Test-WHDDefenderCim {
+    try { [void](Get-CimClass -Namespace $script:WHDDefenderNs -ClassName 'MSFT_MpPreference' -ErrorAction Stop); return $true } catch { return $false }
+}
+
+# Converts a value to the exact CIM type a method parameter declares (uint8, uint8[], string[], ...).
+function ConvertTo-WHDCimValue {
+    param($Value, [string]$CimType)
+    switch ($CimType) {
+        'Boolean'     { return [bool]$Value }
+        'UInt8'       { return [byte]$Value }
+        'UInt16'      { return [uint16]$Value }
+        'UInt32'      { return [uint32]$Value }
+        'UInt64'      { return [uint64]$Value }
+        'SInt8'       { return [sbyte]$Value }
+        'SInt16'      { return [int16]$Value }
+        'SInt32'      { return [int32]$Value }
+        'SInt64'      { return [int64]$Value }
+        'String'      { return [string]$Value }
+        'UInt8Array'  { return ,([byte[]]@($Value)) }
+        'UInt16Array' { return ,([uint16[]]@($Value)) }
+        'UInt32Array' { return ,([uint32[]]@($Value)) }
+        'SInt32Array' { return ,([int32[]]@($Value)) }
+        'SInt64Array' { return ,([int64[]]@($Value)) }
+        'StringArray' { return ,([string[]]@($Value)) }
+        default       { return $Value }
+    }
+}
+
+# Calls a static CIM method. The parameter types are read from the class on THIS Windows version,
+# so a renamed or missing parameter gives a clear error instead of a silent no-op.
+function Invoke-WHDCimStatic {
+    param([Parameter(Mandatory)][string]$Namespace, [Parameter(Mandatory)][string]$ClassName,
+          [Parameter(Mandatory)][string]$Method, [hashtable]$Values = @{})
+    $cls = Get-CimClass -Namespace $Namespace -ClassName $ClassName -ErrorAction Stop
+    $m = $cls.CimClassMethods[$Method]
+    if (-not $m) { throw ("CIM method {0}.{1} does not exist on this Windows version" -f $ClassName, $Method) }
+    $cimArgs = @{}
+    foreach ($k in @($Values.Keys)) {
+        $p = $m.Parameters[$k]
+        if (-not $p) { throw ("CIM method {0}.{1} has no parameter '{2}' on this Windows version" -f $ClassName, $Method, $k) }
+        $cimArgs[$k] = ConvertTo-WHDCimValue -Value $Values[$k] -CimType "$($p.CimType)"
+    }
+    $r = Invoke-CimMethod -Namespace $Namespace -ClassName $ClassName -MethodName $Method -Arguments $cimArgs -ErrorAction Stop
+    if ($r -and $null -ne $r.ReturnValue -and [int64]$r.ReturnValue -ne 0) {
+        throw ("CIM {0}.{1} returned error code {2}" -f $ClassName, $Method, $r.ReturnValue)
+    }
+    return $r
+}
+
+# System Restore (Microsoft Learn: SystemRestore class; RESTOREPOINTINFO values MODIFY_SETTINGS = 12, BEGIN_SYSTEM_CHANGE = 100).
+function Enable-WHDSystemRestore {
+    param([string]$Drive = "$env:SystemDrive\")
+    $v = @{ Drive = $Drive }
+    # This PC's class also has WaitTillEnabled (seen 2026-10-01): wait, so a restore point can follow at once.
+    try {
+        $srm = (Get-CimClass -Namespace 'root/default' -ClassName 'SystemRestore' -ErrorAction Stop).CimClassMethods['Enable']
+        if ($srm -and $srm.Parameters['WaitTillEnabled']) { $v['WaitTillEnabled'] = $true }
+    } catch { }
+    [void](Invoke-WHDCimStatic -Namespace 'root/default' -ClassName 'SystemRestore' -Method 'Enable' -Values $v)
+}
+function New-WHDSystemRestorePoint {
+    param([Parameter(Mandatory)][string]$Description)
+    [void](Invoke-WHDCimStatic -Namespace 'root/default' -ClassName 'SystemRestore' -Method 'CreateRestorePoint' -Values @{
+        Description = $Description; RestorePointType = 12; EventType = 100 })
+}
+# Defender definitions update (replaces Update-MpSignature). UpdateSource numbers are from Microsoft's own
+# definition file on the PC (ConfigDefender\MSFT_MpSignature.cdxml, read 2026-10-01):
+#   0 = InternalDefinitionUpdateServer, 1 = MicrosoftUpdateServer, 2 = MMPC, 3 = FileShares
+function Update-WHDMpSignature {
+    param([ValidateSet('InternalDefinitionUpdateServer', 'MicrosoftUpdateServer', 'MMPC', 'FileShares')][string]$UpdateSource = 'MMPC')
+    $map = @{ InternalDefinitionUpdateServer = 0; MicrosoftUpdateServer = 1; MMPC = 2; FileShares = 3 }
+    [void](Invoke-WHDCimStatic -Namespace $script:WHDDefenderNs -ClassName 'MSFT_MpSignature' -Method 'Update' -Values @{ UpdateSource = $map[$UpdateSource] })
+}
+function Get-WHDSystemRestorePoints {
+    @(Get-CimInstance -Namespace 'root/default' -ClassName 'SystemRestore' -ErrorAction Stop)
+}
+
+# =============================================================================
+#  WHD Next - alerts: a small window + a Windows event log entry (build step 5)
+# -----------------------------------------------------------------------------
+#  Used by the update guard next to opening its .txt report (as Classic did).
+#  The event source is registered when the guard is INSTALLED (a journaled
+#  change) - a guard CHECK itself only writes an entry, it never registers.
+# =============================================================================
+$script:WHDEventSource = 'WHD Next'
 $script:WHDEventLog    = 'Application'
 
 function Test-WHDEventSource {
     # Looks at the registration itself. (EventLog.SourceExists also searches the Security log and throws when not elevated.)
-    try { return [bool](Test-Path -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\{0}\{1}' -f $script:WHDEventLog, $script:WHDEventSource)) }
-    catch { return $false }
+    return [bool](Test-Path -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\{0}\{1}' -f $script:WHDEventLog, $script:WHDEventSource))
 }
-# Registers the source (needs an elevated session; writes one key under
-# HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application). Safe to call again: an existing source is left alone.
-# Nothing is done in DRY-RUN. No output; a failure is one WARN line - Test-WHDEventSource tells whether it is there.
 function Register-WHDEventSource {
-    try {
-        if (Test-WHDEventSource) { return }
-        if (-not $script:WHDExecute) { Write-WHDLog ("would: register Windows event log source '{0}' ({1} log)" -f $script:WHDEventSource, $script:WHDEventLog) 'DRY'; return }
-        [System.Diagnostics.EventLog]::CreateEventSource($script:WHDEventSource, $script:WHDEventLog)
-    } catch {
-        try { Write-WHDLog ("Windows event log source '{0}' could not be registered (alerts still show the window and the report): {1}" -f $script:WHDEventSource, $_.Exception.Message) 'WARN' } catch { }
-    }
+    if (Test-WHDEventSource) { return }
+    [System.Diagnostics.EventLog]::CreateEventSource($script:WHDEventSource, $script:WHDEventLog)
 }
-# Removes the source again. Safe to call when it is not registered. Nothing is done in DRY-RUN.
 function Unregister-WHDEventSource {
-    try {
-        if (-not (Test-WHDEventSource)) { return }
-        if (-not $script:WHDExecute) { Write-WHDLog ("would: remove Windows event log source '{0}'" -f $script:WHDEventSource) 'DRY'; return }
-        [System.Diagnostics.EventLog]::DeleteEventSource($script:WHDEventSource)
-    } catch {
-        try { Write-WHDLog ("Windows event log source '{0}' could not be removed: {1}" -f $script:WHDEventSource, $_.Exception.Message) 'WARN' } catch { }
-    }
+    if (-not (Test-WHDEventSource)) { return }
+    [System.Diagnostics.EventLog]::DeleteEventSource($script:WHDEventSource)
 }
-# Writes one entry (Event Viewer > Windows Logs > Application, source "WinHardenDebloat"). Never throws.
+# Writes one entry (Event Viewer > Windows Logs > Application, source "WHD Next"). Never throws.
 # Returns $true when it was written, $false when the source is not registered or writing failed.
-# Writing an entry changes no setting, so it also works in DRY-RUN (the guard check runs that way).
 function Write-WHDEventLog {
     param([Parameter(Mandatory)][string]$Message,
           [ValidateSet('Information','Warning','Error')][string]$Type = 'Information', [int]$EventId = 1000)
@@ -272,12 +475,10 @@ function Write-WHDEventLog {
 }
 
 # A small always-on-top window with a few lines and two buttons. Blocks until it is closed.
-# Built from plain WPF objects. Never throws: returns $true when the window was shown and closed,
-# $false when it could not be shown (no desktop session, WPF not available) so the caller can fall back.
+# Built from plain WPF objects (works in Windows PowerShell 5.1 and PowerShell 7). Never throws.
 function Show-WHDAlertWindow {
-    param([string]$Title = 'WinHardenDebloat', [string]$Heading = '', [string[]]$Lines = @(), [string]$ReportPath = '')
+    param([string]$Title = 'WHD Next', [string]$Heading = '', [string[]]$Lines = @(), [string]$ReportPath = '')
     try {
-        if (-not [Environment]::UserInteractive) { return $false }   # nobody could close it
         Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase -ErrorAction Stop
         $win = New-Object System.Windows.Window
         $win.Title = $Title
@@ -322,7 +523,6 @@ function Show-WHDAlertWindow {
             $open.Padding = New-Object System.Windows.Thickness(12, 4, 12, 4)
             $open.Margin = New-Object System.Windows.Thickness(0, 0, 8, 0)
             $whdAlertReport = $ReportPath
-            # Opened through the desktop shell, so the report shows in a normal (non-admin) window.
             $open.Add_Click({ try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $whdAlertReport) } catch { } }.GetNewClosure())
             [void]$buttons.Children.Add($open)
         }
@@ -332,7 +532,7 @@ function Show-WHDAlertWindow {
         $close.IsCancel = $true
         $close.Padding = New-Object System.Windows.Thickness(12, 4, 12, 4)
         $whdAlertWin = $win
-        $close.Add_Click({ try { $whdAlertWin.Close() } catch { } }.GetNewClosure())
+        $close.Add_Click({ $whdAlertWin.Close() }.GetNewClosure())
         [void]$buttons.Children.Add($close)
         [void]$root.Children.Add($buttons)
 
@@ -353,8 +553,8 @@ function New-WHDRestorePoint {
     if (-not $script:WHDExecute) { return }
     Write-WHDLog 'Creating System Restore point before first change...' 'ACT'
     try {
-        Enable-ComputerRestore -Drive "$env:SystemDrive\" -EA Stop
-    } catch { Write-WHDLog "Enable-ComputerRestore: $($_.Exception.Message)" 'WARN' }
+        Enable-WHDSystemRestore -Drive "$env:SystemDrive\"      # WHD Next: CIM instead of Enable-ComputerRestore
+    } catch { Write-WHDLog "turn on System Restore: $($_.Exception.Message)" 'WARN' }
     # lift the once-per-24h throttle so our checkpoint isn't silently skipped
     $srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
     try {
@@ -362,10 +562,10 @@ function New-WHDRestorePoint {
         New-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -Value 0 -PropertyType DWord -Force | Out-Null
     } catch {}
     try {
-        Checkpoint-Computer -Description ("WinHardenDebloat {0}" -f $script:WHDStamp) -RestorePointType 'MODIFY_SETTINGS' -EA Stop
-        Write-WHDLog 'System Restore point created.' 'OK'
+        New-WHDSystemRestorePoint -Description ("WHD Next {0}" -f $script:WHDStamp)      # WHD Next: CIM instead of Checkpoint-Computer
+        Write-WHDLog ("System Restore point created: WHD Next {0}" -f $script:WHDStamp) 'OK'
     } catch {
-        Write-WHDLog "Checkpoint-Computer failed: $($_.Exception.Message)" 'WARN'
+        Write-WHDLog "restore point could not be created: $($_.Exception.Message)" 'WARN'
         Write-WHDLog 'Continuing; registry/package exports in restore\ are still captured.' 'WARN'
     }
     $script:WHDRestoreDone = $true
@@ -373,6 +573,7 @@ function New-WHDRestorePoint {
 
 function New-WHDCheckpointNow {
     # On-demand restore point (ignores the once-per-session guard).
+    if ($script:WHDSafeMode -and [int]$script:WHDSafeAllow -le 0) { Invoke-WHDSafeAllowed { New-WHDCheckpointNow }; return }   # WHD Next: allowed in SAFE mode (protective)
     if (-not $script:WHDExecute) { Write-WHDLog 'would: create a System Restore point now' 'DRY'; return }
     Write-WHDLog 'Creating a System Restore point on demand...' 'ACT'
     $script:WHDRestoreDone = $false
@@ -383,10 +584,6 @@ function Backup-WHDRegistryKey {
     param([string]$PsPath)   # PowerShell form: HKLM:\...  or  HKCU:\...
     if (-not $script:WHDExecute) { return }
     Initialize-WHDPaths
-    # Each key is handled only ONCE per session (first write): a later export would already contain WHD's own values.
-    if (-not $script:WHDRegBackupSeen) { $script:WHDRegBackupSeen = @{} }
-    if ($script:WHDRegBackupSeen.ContainsKey($PsPath)) { return }
-    $script:WHDRegBackupSeen[$PsPath] = $true
     # Only export keys that already exist. A key we are about to CREATE has
     # nothing to back up (rollback = delete it), and running reg.exe on a
     # missing key just throws a noisy (caught) error into the transcript.
@@ -394,7 +591,6 @@ function Backup-WHDRegistryKey {
     $regPath = $PsPath -replace '^HKLM:\\', 'HKLM\' -replace '^HKCU:\\', 'HKCU\'
     $safe = ($PsPath -replace '[:\\]', '_')
     $out  = Join-Path $script:WHDRestore ("$safe.reg")
-    if (Test-Path -LiteralPath $out -EA SilentlyContinue) { return }   # never overwrite an export already in this session folder
     $ErrorActionPreference = 'Continue'
     try { & reg.exe export "$regPath" "$out" /y 2>$null 1>$null } catch {}
 }
@@ -413,15 +609,27 @@ function Invoke-WHDChange {
         # Omit -> recorded as Kind 'action' (listed in the Undo center, manual undo).
         [hashtable]$Journal
     )
+    # WHD Next, journal stop: after a failed journal write nothing else is changed in this run.
+    if ($script:WHDJournalStop) {
+        Write-WHDLog ("STOPPED - not done (WHD Next cannot write its files - see the STOPPED box): {0}" -f $Description) 'WARN'
+        return (New-WHDResult -Action $Description -Status 'skipped' -Detail 'stopped: WHD Next could not write its own files')
+    }
+    # WHD Next, lock 2: in SAFE mode only an allowed operation (undo / re-apply / re-remove) may pass.
+    if ($script:WHDSafeMode -and [int]$script:WHDSafeAllow -le 0) {
+        if ($script:WHDExecute -or $script:WHDSafeExecute) {
+            Write-WHDLog ("SAFE MODE - not done (new changes need PowerShell 7.6 / FULL mode): {0}" -f $Description) 'WARN'
+            return (New-WHDResult -Action $Description -Status 'skipped' -Detail 'safe mode: new changes need PowerShell 7.6 (FULL mode)')
+        }
+        Write-WHDLog ("would (FULL mode only): {0}" -f $Description) 'DRY'
+        return (New-WHDResult -Action $Description -Status 'planned')
+    }
     if (-not $script:WHDExecute) {
         Write-WHDLog ("would: {0}" -f $Description) 'DRY'
         return (New-WHDResult -Action $Description -Status 'planned')
     }
     New-WHDRestorePoint
-    $script:WHDFwScanCache = $null      # v1.5: a change is being made - the short-lived look at the firewall rules (Firewall.ps1) is not reused
     try {
         & $Action
-        $script:WHDFwScanCache = $null
         Write-WHDLog ("done: {0}" -f $Description) 'OK'
         Add-WHDJournal -Description $Description -Data $Journal
         return (New-WHDResult -Action $Description -Status 'done')
@@ -491,15 +699,10 @@ function Set-WHDRegistryValue {
     # never spill a result table onto the console.
     Invoke-WHDChange -Description $desc -Force -Journal $jr -Action {
         Backup-WHDRegistryKey -PsPath $Path
-        # -LiteralPath: a path is never treated as a wildcard pattern (one key only).
-        if (-not (Test-Path -LiteralPath $Path)) {
-            # New-Item has no -LiteralPath for the registry, so a key that has to be created must not hold wildcard characters.
-            if ($Path -match '[*?\[\]]') { throw 'registry path contains wildcard characters' }
-            New-Item -Path $Path -Force | Out-Null
-        }
+        if (-not (Test-Path $Path)) { New-Item -Path $Path -Force | Out-Null }
         # Set-ItemProperty creates-or-updates; New-ItemProperty -Force throws
         # "unauthorized operation" when the value already exists.
-        Set-ItemProperty -LiteralPath $Path -Name $Name -Value $Value -Type $Type -Force
+        Set-ItemProperty -Path $Path -Name $Name -Value $Value -Type $Type -Force
         # F21: read it back - a silently ignored write (policy lock) is a failure.
         $after = Get-WHDRegValueState -Path $Path -Name $Name
         if (-not $after.Exists -or -not (Test-WHDRegValueEqual $after.Value $Value $Type)) {
@@ -549,11 +752,10 @@ function Remove-WHDAppxAllUsers {
     if (-not $pkgs) { Write-WHDLog ("no installed package matches '{0}'" -f $NameLike) 'INFO'; return }
     foreach ($p in $pkgs) {
         $jr = @{ Kind = 'appx'; Package = "$($p.Name)"; FullName = "$($p.PackageFullName)" }
-        # The result is the last object returned; mark only when the removal did not fail (dry-run: 'planned').
-        $rmRes = @(Invoke-WHDChange -Description ("remove Appx (all users): {0}" -f $p.PackageFullName) -Force -Journal $jr -Action {
+        Invoke-WHDChange -Description ("remove Appx (all users): {0}" -f $p.PackageFullName) -Force -Journal $jr -Action {
             Remove-AppxPackage -Package $p.PackageFullName -AllUsers -EA Stop
-        })[-1]
-        if (("$($rmRes.Status)" -in @('done', 'planned')) -and "$($p.PackageFamilyName)") { Add-WHDDeprovisionMark -Pfn "$($p.PackageFamilyName)" }
+        }
+        if ("$($p.PackageFamilyName)") { Add-WHDDeprovisionMark -Pfn "$($p.PackageFamilyName)" }
     }
 }
 # Microsoft's "keep removed apps from returning during an update" mark (Microsoft Learn:
@@ -572,8 +774,9 @@ function Add-WHDDeprovisionMark {
 # instead of extra locks). Puts back the value WHD recorded as its own change. One confirm for the batch.
 function Invoke-WHDReApplyChanged {
     param([object[]]$Results)
+    if ($script:WHDSafeMode -and [int]$script:WHDSafeAllow -le 0) { $whdSafeArgs = $PSBoundParameters; Invoke-WHDSafeAllowed { Invoke-WHDReApplyChanged @whdSafeArgs }; return }   # WHD Next: allowed in SAFE mode
     if (-not $Results) { $Results = @(Invoke-WHDVerify -All -Quiet) }
-    $auto = @('reg', 'service', 'task', 'pnpdev', 'deprov', 'fwlog', 'mppref', 'asr', 'tz', 'fwoff')
+    $auto = @('reg', 'service', 'task', 'pnpdev', 'deprov', 'fwlog', 'mppref', 'asr', 'tz')
     $bad  = @($Results | Where-Object { $_.Result -eq 'CHANGED' })
     $todo = @($bad | Where-Object { $auto -contains "$($_.Entry.Kind)" })
     $hand = @($bad | Where-Object { $auto -notcontains "$($_.Entry.Kind)" })
@@ -625,16 +828,6 @@ function Invoke-WHDReApplyChanged {
                         Set-NetFirewallProfile -Name $flP -LogAllowed $flA -LogBlocked $flB -LogMaxSizeKilobytes $flS -EA Stop
                     } | Out-Null
                 }
-                'fwoff' {
-                    # v1.5: a firewall rule WHD switched off (it was not made by WHD) is on again -> switch it off again
-                    $raRn = "$($e.RuleName)"; $raOn = ("$($e.NewEnabled)" -eq 'True')
-                    $jr = @{ Kind = 'fwoff'; RuleName = $raRn; RuleDisplay = "$($e.RuleDisplay)"; Direction = "$($e.Direction)"; OldEnabled = $(if ($raOn) { 'False' } else { 'True' }); NewEnabled = $(if ($raOn) { 'True' } else { 'False' }) }
-                    Invoke-WHDChange -Description ("firewall rule {0} -> {1}" -f "$($e.RuleDisplay)", $(if ($raOn) { 'switched on' } else { 'switched OFF' })) -Force -Journal $jr -Action {
-                        $raRule = @(Get-WHDFwRuleExact -Name $raRn)
-                        if (-not $raRule.Count) { throw 'the rule is no longer there' }
-                        $raRule | Set-NetFirewallRule -Enabled $(if ($raOn) { 'True' } else { 'False' }) -EA Stop
-                    } | Out-Null
-                }
                 'mppref' { if (Get-Command Set-WHDMpPreference -EA SilentlyContinue) { Set-WHDMpPreference -Setting $e.Setting -Value ([int]$e.NewValue) | Out-Null } }
                 'asr'    { if (Get-Command Set-WHDAsrRule -EA SilentlyContinue) { Set-WHDAsrRule -Id $e.RuleId -Action ([int]$e.NewAction) -Name $e.RuleName | Out-Null } }
             }
@@ -644,6 +837,7 @@ function Invoke-WHDReApplyChanged {
 # Re-remove apps that Verify reports as RETURNED (appx / provisioned). One confirm for the batch.
 function Invoke-WHDReRemoveReturned {
     param([object[]]$Results)
+    if ($script:WHDSafeMode -and [int]$script:WHDSafeAllow -le 0) { $whdSafeArgs = $PSBoundParameters; Invoke-WHDSafeAllowed { Invoke-WHDReRemoveReturned @whdSafeArgs }; return }   # WHD Next: allowed in SAFE mode
     if (-not $Results) { $Results = @(Invoke-WHDVerify -All -Quiet) }
     $pk = @($Results | Where-Object { $_.Result -eq 'RETURNED' -and "$($_.Entry.Kind)" -in @('appx', 'provisioned') } |
             ForEach-Object { "$($_.Entry.Package)" } | Where-Object { $_ } | Select-Object -Unique)
@@ -661,11 +855,10 @@ function Remove-WHDProvisioned {
     if (-not $prov) { Write-WHDLog ("no provisioned package matches '{0}'" -f $NameLike) 'INFO'; return }
     foreach ($p in $prov) {
         $jr = @{ Kind = 'provisioned'; Package = "$($p.DisplayName)"; FullName = "$($p.PackageName)" }
-        # The result is the last object returned; mark only when the removal did not fail (dry-run: 'planned').
-        $rmRes = @(Invoke-WHDChange -Description ("deprovision (new users won't get): {0}" -f $p.PackageName) -Force -Journal $jr -Action {
+        Invoke-WHDChange -Description ("deprovision (new users won't get): {0}" -f $p.PackageName) -Force -Journal $jr -Action {
             Remove-AppxProvisionedPackage -Online -PackageName $p.PackageName -AllUsers -EA Stop
-        })[-1]
-        if (("$($rmRes.Status)" -in @('done', 'planned')) -and "$($p.DisplayName)" -and "$($p.PublisherId)") { Add-WHDDeprovisionMark -Pfn ("{0}_{1}" -f $p.DisplayName, $p.PublisherId) }
+        }
+        if ("$($p.DisplayName)" -and "$($p.PublisherId)") { Add-WHDDeprovisionMark -Pfn ("{0}_{1}" -f $p.DisplayName, $p.PublisherId) }
     }
 }
 
@@ -741,22 +934,9 @@ function Get-WHDSessionOwner {
     return 'legacy-this'
 }
 
-# Does a saved update-guard status (state.json content) belong to THIS PC / this Windows install?
-# Tagged status: the MachineId decides. Untagged (older) status: a last check older than this Windows
-# install = another PC / an earlier install. No status at all counts as this PC's. Read-only.
-function Test-WHDGuardStateIsThisPC {
-    param($State)
-    if (-not $State) { return $true }
-    if ("$($State.MachineId)") { return ("$($State.MachineId)".ToLower() -eq (Get-WHDMachineId)) }
-    $inst = Get-WHDWindowsInstallDate
-    $lc = $null
-    try { $lc = [datetime]::ParseExact("$($State.LastCheck)", 'yyyy-MM-dd HH:mm', $null) } catch { $lc = $null }
-    if ($inst -and $lc -and $lc -lt $inst) { return $false }
-    return $true
-}
-
 function Add-WHDJournal {
     param([string]$Description, [hashtable]$Data)
+    $line = ''
     try {
         if (-not $script:WHDRestore) { Initialize-WHDPaths }
         if (-not (Test-Path $script:WHDRestore)) { New-Item -ItemType Directory -Path $script:WHDRestore -Force | Out-Null }
@@ -777,7 +957,9 @@ function Add-WHDJournal {
         _WHDWriteSessionMachine -SessionPath $script:WHDRestore
         _WHDAppendLine -File (Join-Path $script:WHDRestore 'journal.jsonl') -Line $line
     } catch {
-        Write-WHDLog ("journal write failed (change itself is done): {0}" -f $_.Exception.Message) 'WARN'
+        # WHD Next: a change without a journal record has no Undo / Verify - stop the run here.
+        $jf = ''; try { $jf = Join-Path $script:WHDRestore 'journal.jsonl' } catch {}
+        Set-WHDJournalStop -Description $Description -Reason $_.Exception.Message -File $jf -Line $line
     }
 }
 
@@ -809,7 +991,6 @@ function Get-WHDUndoMode {
         'tz'      { 'auto' }
         'deprov'  { 'auto' }
         'fwlog'   { 'auto' }
-        'fwoff'   { 'auto' }
         default   { 'manual' }
     }
 }
@@ -877,7 +1058,11 @@ function _WHDMarkUndone {
     try {
         $rec = [pscustomobject]@{ Id = "$($Entry.Id)"; Time = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss'); BySession = $script:WHDStamp }
         _WHDAppendLine -File (Join-Path $Entry.SessionPath 'undo.jsonl') -Line ($rec | ConvertTo-Json -Compress)
-    } catch { Write-WHDLog ("could not record undo mark: {0}" -f $_.Exception.Message) 'WARN' }
+    } catch {
+        # WHD Next: the undo WAS done but could not be marked in the history - stop the run here.
+        $uf = ''; try { $uf = Join-Path $Entry.SessionPath 'undo.jsonl' } catch {}
+        Set-WHDJournalStop -Description ("undo mark for: {0}" -f $Entry.Description) -Reason $_.Exception.Message -File $uf -Line ''
+    }
 }
 
 function _WHDUndoOne {
@@ -947,16 +1132,6 @@ function _WHDUndoOne {
                 Set-NetFirewallProfile -Name $flP -LogAllowed $flA -LogBlocked $flB -LogMaxSizeKilobytes $flS -EA Stop
             } | Out-Null
         }
-        'fwoff' {
-            # v1.5: a firewall rule not made by WHD that WHD switched off (or on) - put its switch back
-            $foRn = "$($Entry.RuleName)"; $foBack = ("$($Entry.OldEnabled)" -eq 'True')
-            $jr = @{ Kind = 'fwoff'; RuleName = $foRn; RuleDisplay = "$($Entry.RuleDisplay)"; Direction = "$($Entry.Direction)"; OldEnabled = "$($Entry.NewEnabled)"; NewEnabled = "$($Entry.OldEnabled)" }
-            Invoke-WHDChange -Description ("firewall rule {0} -> {1}" -f "$($Entry.RuleDisplay)", $(if ($foBack) { 'switched on' } else { 'switched OFF' })) -Force -Journal $jr -Action {
-                $foRule = @(Get-WHDFwRuleExact -Name $foRn)
-                if (-not $foRule.Count) { throw 'the rule is no longer there (removed since) - nothing to switch' }
-                $foRule | Set-NetFirewallRule -Enabled $(if ($foBack) { 'True' } else { 'False' }) -EA Stop
-            } | Out-Null
-        }
         'tz' {
             if (-not "$($Entry.OldId)") { Write-WHDLog 'old time zone unknown, cannot undo' 'ERR'; return }
             Set-WHDTimeZoneId -Id "$($Entry.OldId)"
@@ -1014,11 +1189,12 @@ function Get-WHDUndoHint {
 # Undo specific journal entries (newest first). ONE confirm for the batch.
 function Invoke-WHDUndo {
     param([Parameter(Mandatory)][object[]]$Entries)
+    if ($script:WHDSafeMode -and [int]$script:WHDSafeAllow -le 0) { $whdSafeArgs = $PSBoundParameters; Invoke-WHDSafeAllowed { Invoke-WHDUndo @whdSafeArgs }; return }   # WHD Next: allowed in SAFE mode
     $todo = @($Entries | Where-Object { -not $_.Undone } | Sort-Object @{e={"$($_.Session)"};Descending=$true}, @{e={[int]$_.Seq};Descending=$true})
     if (-not $todo.Count) { Write-WHDLog 'Nothing to undo (already undone or empty selection).' 'INFO'; return }
     $auto = @($todo | Where-Object { $_.UndoMode -eq 'auto' }).Count
     Write-WHDLog ("UNDO: {0} selected change(s), {1} can be undone automatically" -f $todo.Count, $auto) 'ACT'
-    Write-WHDRisk 'caution' 'Puts the previous values back. Each undo is recorded in the journal; registry undos can be undone again.'
+    Write-WHDRisk 'caution' 'Puts the previous values back. Each undo is itself journaled, so it can be undone again.'
     if (-not (Confirm-WHDProceed ("undo {0} change(s)" -f $todo.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
     # Entries written while undoing are marked ByUndo: they put Windows' own value back, so Verify and
     # re-apply must not treat them as a WHD setting to protect (bug seen 2026-09-29: re-apply wrote the
@@ -1034,96 +1210,23 @@ function Invoke-WHDUndoSession {
     Invoke-WHDUndo -Entries @(Get-WHDJournal -SessionPath $SessionPath)
 }
 
-# v1.5: journal entries of kind 'fwoff' (a firewall rule not made by WHD that WHD switched off) that still stand on
-# this PC: rule name (lower case) -> its entries, oldest first. Entries that were undone are left out.
-function Get-WHDFwOffEntries {
-    $foMap = @{}
-    try {
-        foreach ($foS in @(Get-WHDUndoSessions | Sort-Object Stamp)) {
-            foreach ($foE in @(Get-WHDJournal -SessionPath $foS.Path)) {
-                if ("$($foE.Kind)" -ne 'fwoff' -or $foE.Undone) { continue }
-                $foK = "$($foE.RuleName)".ToLower()
-                if (-not $foMap.ContainsKey($foK)) { $foMap[$foK] = New-Object System.Collections.Generic.List[object] }
-                $foMap[$foK].Add($foE)
-            }
-        }
-    } catch { }
-    return $foMap
-}
-# The rule names (lower case) WHD still holds switched OFF: the latest standing entry says "off" and was not
-# written by an undo. Verify and the update guard report such a rule when it is ON again.
-function Get-WHDFwOffLive {
-    $flOut = @{}
-    $flMap = Get-WHDFwOffEntries
-    foreach ($flE in $flMap.GetEnumerator()) {      # (not .Keys: a rule could be named "Keys")
-        $flList = $flE.Value
-        $flLast = $flList[$flList.Count - 1]
-        if (-not $flLast.ByUndo -and "$($flLast.NewEnabled)" -ne 'True') { $flOut["$($flE.Key)"] = $true }
-    }
-    return $flOut
-}
-# Rule names (lower case) of firewall rules not made by WHD that you REMOVED with WHD on this PC (answer r in
-# "Rules WHD did not make"; the journal entry carries RemovedRule).
-function Get-WHDFwRemovedNames {
-    $rnOut = @{}
-    try {
-        foreach ($rnS in @(Get-WHDUndoSessions)) {
-            foreach ($rnE in @(_WHDReadJsonl (Join-Path $rnS.Path 'journal.jsonl'))) {
-                if ("$($rnE.RemovedRule)") { $rnOut["$($rnE.RemovedRule)".ToLower()] = $true }
-            }
-        }
-    } catch { }
-    return $rnOut
-}
-# You keep these rules ON from now on: their standing "switched off" entries are marked as undone, so Verify, the
-# update guard and re-apply no longer hold them off. Returns the number of entries marked.
-function Clear-WHDFwOffEntries {
-    param([string[]]$Names)
-    $cfN = 0
-    $cfMap = Get-WHDFwOffEntries
-    foreach ($cfName in @($Names | Where-Object { $_ })) {
-        $cfK = "$cfName".ToLower()
-        if (-not $cfMap.ContainsKey($cfK)) { continue }
-        foreach ($cfE in $cfMap[$cfK].ToArray()) {
-            if ("$($cfE.NewEnabled)" -eq 'True') { continue }
-            _WHDMarkUndone $cfE
-            $cfN++
-        }
-    }
-    return $cfN
-}
-
-# Puts back the firewall saved at the start of a session (a whole-policy import).
-# v1.5: it is the same kind of change as the Firewall menu's .wfw import, so it tells the same things: what it does to
-# the update gate (before the question), the gate's record is put right afterwards, the inbound rules it brings back
-# count as kept, and - unless -NoRepairOffer (the window version asks that itself) - the gate's own question follows
-# when the gate was left without its rules.
 function Restore-WHDSessionFirewall {
-    param([Parameter(Mandatory)][string]$SessionPath, [switch]$NoRepairOffer)
-    $script:WHDFwToolStatus = 'skipped'
+    param([Parameter(Mandatory)][string]$SessionPath)
+    if ($script:WHDSafeMode -and [int]$script:WHDSafeAllow -le 0) { $whdSafeArgs = $PSBoundParameters; Invoke-WHDSafeAllowed { Restore-WHDSessionFirewall @whdSafeArgs }; return }   # WHD Next: allowed in SAFE mode
     $f = Join-Path $SessionPath 'firewall-before.wfw'
     if (-not (Test-Path -LiteralPath $f)) { Write-WHDLog 'This session has no firewall backup.' 'WARN'; return }
     Write-WHDLog ("RESTORE FIREWALL from {0}" -f $f) 'ACT'
-    Write-WHDRisk 'hard' 'Replaces the ENTIRE current firewall policy with the one saved at the start of that session (before its first firewall change). Every later firewall change is lost - rules, the outbound setting and what the update gate set.'
-    $rfNote = [pscustomobject]@{ Ask = ''; Before = $null; Pending = @() }
-    if (Get-Command Write-WHDCrossToolNote -EA SilentlyContinue) { try { $rfNote = Write-WHDCrossToolNote -Tool 'wfw' } catch { } }
-    if (-not (Confirm-WHDProceed ('replace the whole firewall policy with this backup' + "$($rfNote.Ask)"))) { Write-WHDLog 'skipped.' 'WARN'; return }
-    $rfRes = Invoke-WHDChange -Description ("netsh advfirewall import {0}" -f $f) -Force -Action {
-        # the firewall as it is now is saved first, like before every other firewall change of a session (once per session)
-        if (Get-Command Backup-WHDFirewallOnce -EA SilentlyContinue) { Backup-WHDFirewallOnce }
+    Write-WHDRisk 'hard' 'Replaces the ENTIRE current firewall policy with the one saved before that session. Later firewall changes are lost.'
+    if (-not (Confirm-WHDProceed 'replace the whole firewall policy with this backup')) { Write-WHDLog 'skipped.' 'WARN'; return }
+    Invoke-WHDChange -Description ("netsh advfirewall import {0}" -f $f) -Force -Action {
         $ni = Invoke-WHDNative -Exe 'netsh.exe' -ArgList @('advfirewall', 'import', "$f")
         if ($ni.Code -ne 0) { throw ("netsh exit {0}: {1}" -f $ni.Code, ($ni.Out -join ' ')) }
-    } | Select-Object -Last 1
-    $script:WHDFwToolStatus = "$($rfRes.Status)"
-    if ($script:WHDExecute -and "$($rfRes.Status)" -eq 'done') {
-        if (Get-Command Update-WHDGateAfterFirewallChange -EA SilentlyContinue) { Update-WHDGateAfterFirewallChange -Before $rfNote.Before -What 'the restore' }
-        if (Get-Command Set-WHDFwKnownFromNow -EA SilentlyContinue) { Set-WHDFwKnownFromNow -Why 'restore' -Pending @($rfNote.Pending) }
-        if (-not $NoRepairOffer -and (Get-Command Invoke-WHDGateRepairOffer -EA SilentlyContinue)) { Invoke-WHDGateRepairOffer -After 'the restore' }
-    }
+    } | Out-Null
 }
 
 function Restore-WHDSessionHosts {
     param([Parameter(Mandatory)][string]$SessionPath)
+    if ($script:WHDSafeMode -and [int]$script:WHDSafeAllow -le 0) { $whdSafeArgs = $PSBoundParameters; Invoke-WHDSafeAllowed { Restore-WHDSessionHosts @whdSafeArgs }; return }   # WHD Next: allowed in SAFE mode
     $f = Join-Path $SessionPath 'hosts.bak'
     if (-not (Test-Path -LiteralPath $f)) { Write-WHDLog 'This session has no hosts backup.' 'WARN'; return }
     $len = (Get-Item -LiteralPath $f).Length
@@ -1133,7 +1236,7 @@ function Restore-WHDSessionHosts {
     if (-not (Confirm-WHDProceed 'replace the hosts file with this backup')) { Write-WHDLog 'skipped.' 'WARN'; return }
     $hosts = Join-Path $env:SystemRoot 'System32\drivers\etc\hosts'
     Invoke-WHDChange -Description ("restore hosts file from {0}" -f $f) -Force -Action {
-        Copy-Item -LiteralPath $hosts -Destination (Join-Path $script:WHDRestore ("hosts.before-restore_{0}.bak" -f (Get-Date -Format 'HHmmss'))) -Force -EA SilentlyContinue
+        Copy-Item -LiteralPath $hosts -Destination (Join-Path $script:WHDRestore 'hosts.bak') -Force -EA SilentlyContinue
         Copy-Item -LiteralPath $f -Destination $hosts -Force -EA Stop
         & ipconfig.exe /flushdns | Out-Null
     } | Out-Null
@@ -1142,6 +1245,7 @@ function Restore-WHDSessionHosts {
 # Older sessions (before the journal existed) only have .reg exports.
 function Import-WHDLegacyRegBackups {
     param([Parameter(Mandatory)][string]$SessionPath)
+    if ($script:WHDSafeMode -and [int]$script:WHDSafeAllow -le 0) { $whdSafeArgs = $PSBoundParameters; Invoke-WHDSafeAllowed { Import-WHDLegacyRegBackups @whdSafeArgs }; return }   # WHD Next: allowed in SAFE mode
     $files = @(Get-ChildItem -LiteralPath $SessionPath -Filter '*.reg' -File -EA SilentlyContinue)
     if (-not $files.Count) { Write-WHDLog 'This session has no .reg backups.' 'WARN'; return }
     Write-WHDLog ("IMPORT {0} legacy .reg backup(s) from {1}" -f $files.Count, $SessionPath) 'ACT'
@@ -1220,7 +1324,7 @@ function Test-WHDJournalEntry {
         }
         'mppref' {
             $r.Target = "Defender $($Entry.Setting)"
-            try { $v = [int](Get-MpPreference -EA Stop).($Entry.Setting); $r.Now = "$v"; $r.Result = if ($v -eq [int]$Entry.NewValue) { 'PASS' } else { 'CHANGED' } }
+            try { $v = [int](Get-WHDMpPreference).($Entry.Setting); $r.Now = "$v"; $r.Result = if ($v -eq [int]$Entry.NewValue) { 'PASS' } else { 'CHANGED' } }
             catch { $r.Now = '(unreadable)'; $r.Result = 'n/a' }
         }
         'asr' {
@@ -1296,17 +1400,6 @@ function Test-WHDJournalEntry {
             $r.Now = if ($n) { 'present' } else { 'missing' }
             $r.Result = if ($n) { 'PASS' } else { 'CHANGED' }
         }
-        'fwoff' {
-            # v1.5: a rule not made by WHD that WHD switched off. Gone = fine (nothing left to be on).
-            $r.Target = "firewall rule '$($Entry.RuleDisplay)' ($($Entry.Direction)) switched $(if ("$($Entry.NewEnabled)" -eq 'True') { 'on' } else { 'off' }) by WHD"
-            $fx = @(); if (Get-Command Get-WHDFwRuleExact -EA SilentlyContinue) { $fx = @(Get-WHDFwRuleExact -Name "$($Entry.RuleName)") }
-            if (-not $fx.Count) { $r.Now = '(rule is gone)'; $r.Result = 'PASS' }
-            else {
-                $fxOn = "$($fx[0].Enabled)"
-                $r.Now = if ($fxOn -eq 'True') { 'ON' } else { 'off' }
-                $r.Result = if ($fxOn -eq "$($Entry.NewEnabled)") { 'PASS' } else { 'CHANGED' }
-            }
-        }
         'file' {
             $r.Target = "file $($Entry.Path)"
             if (-not (Test-Path -LiteralPath $Entry.Path)) { $r.Now = '(missing)'; $r.Result = 'CHANGED' }
@@ -1326,35 +1419,122 @@ function Test-WHDJournalEntry {
 # Undo center H: move history from other PCs / previous Windows installs out of
 # restore\ into archive\other-pcs\<date>\ (kept, never deleted), and tag this
 # PC's untagged sessions so later checks never need the date rule again.
+# WHD Next (user decision 2026-10-02, gap G13): inventory scans and the update-guard status that came along
+# from another PC / an earlier Windows install are found here and archived together with the journal sessions.
+# A scan is "this PC" when its os-info.json carries this MachineId; older scans without one are judged by
+# their scan time (UTC) against the Windows install date, then by the folder name.
+function Test-WHDScanIsThisPC {
+    param([Parameter(Mandatory)][string]$ScanDir)
+    $inst = Get-WHDWindowsInstallDate
+    $f = Join-Path $ScanDir 'os-info.json'
+    if (Test-Path -LiteralPath $f) {
+        $o = $null
+        try { $o = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $o = $null }
+        if ($o -and "$($o.MachineId)") { return ("$($o.MachineId)".ToLower() -eq (Get-WHDMachineId)) }
+        if ($o -and $o.ScannedUtc -and $inst) {
+            $u = $null
+            # PowerShell 7 hands the time back as a date, Windows PowerShell 5.1 as text.
+            if ($o.ScannedUtc -is [datetime]) { $u = $o.ScannedUtc }
+            else { try { $u = [datetime]::Parse("$($o.ScannedUtc)", [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind) } catch { $u = $null } }
+            if ($u) { return ($u.ToUniversalTime() -ge $inst.ToUniversalTime()) }
+        }
+    }
+    $stamp = $null
+    try { $stamp = [datetime]::ParseExact((Split-Path $ScanDir -Leaf), 'yyyy-MM-dd_HHmmss', $null) } catch { $stamp = $null }
+    if ($inst -and $stamp -and $stamp -lt $inst) { return $false }
+    return $true
+}
+function Get-WHDOtherPcScans {
+    $root = Join-Path $script:WHDRoot 'inventory'
+    if (-not (Test-Path -LiteralPath $root)) { return @() }
+    @(Get-ChildItem -LiteralPath $root -Directory -EA SilentlyContinue | Where-Object { -not (Test-WHDScanIsThisPC -ScanDir $_.FullName) } | Sort-Object Name)
+}
+# Update-guard files of another PC / an earlier install: state.json (when it is not this PC's) and
+# guard_<stamp>.txt reports older than this Windows install.
+function Test-WHDGuardStateIsThisPC {
+    param($State)
+    if (-not $State) { return $true }
+    if ("$($State.MachineId)") { return ("$($State.MachineId)".ToLower() -eq (Get-WHDMachineId)) }
+    $inst = Get-WHDWindowsInstallDate
+    $lc = $null
+    try { $lc = [datetime]::ParseExact("$($State.LastCheck)", 'yyyy-MM-dd HH:mm', $null) } catch { $lc = $null }
+    if ($inst -and $lc -and $lc -lt $inst) { return $false }
+    return $true
+}
+function Get-WHDOtherPcGuardFiles {
+    $dir = Join-Path $script:WHDRoot 'restore\update-guard'
+    if (-not (Test-Path -LiteralPath $dir)) { return @() }
+    $out = New-Object System.Collections.Generic.List[object]
+    $sf = Join-Path $dir 'state.json'
+    if (Test-Path -LiteralPath $sf) {
+        $st = $null
+        try { $st = Get-Content -LiteralPath $sf -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $st = $null }
+        if ($st -and -not (Test-WHDGuardStateIsThisPC -State $st)) { $out.Add((Get-Item -LiteralPath $sf)) }
+    }
+    $inst = Get-WHDWindowsInstallDate
+    foreach ($g in @(Get-ChildItem -LiteralPath $dir -Filter 'guard_*.txt' -File -EA SilentlyContinue)) {
+        $stamp = $null
+        try { $stamp = [datetime]::ParseExact(($g.BaseName -replace '^guard_', ''), 'yyyy-MM-dd_HHmmss', $null) } catch { $stamp = $null }
+        if ($inst -and $stamp -and $stamp -lt $inst) { $out.Add($g) }
+    }
+    return @($out.ToArray())
+}
+
 function Invoke-WHDArchiveOtherHistory {
+    if ($script:WHDSafeMode -and [int]$script:WHDSafeAllow -le 0) { Invoke-WHDSafeAllowed { Invoke-WHDArchiveOtherHistory }; return }   # WHD Next: allowed in SAFE mode (history housekeeping, project files only)
     $root = Get-WHDRestoreRoot
-    if (-not (Test-Path $root)) { Write-WHDLog 'No history yet.' 'INFO'; return }
+    $scans  = @(Get-WHDOtherPcScans)          # WHD Next: old inventory scans
+    $gfiles = @(Get-WHDOtherPcGuardFiles)     # WHD Next: old update-guard status + reports
+    if (-not (Test-Path $root) -and -not $scans.Count) { Write-WHDLog 'No history yet.' 'INFO'; return }
     $all = @(Get-WHDUndoSessions -IncludeOtherPCs)
     $other = @($all | Where-Object { $_.Owner -in @('other','legacy-other') })
     $claim = @($all | Where-Object { $_.Owner -eq 'legacy-this' })
     $inst = Get-WHDWindowsInstallDate
     Write-WHDLog 'HISTORY FROM OTHER PCs / PREVIOUS WINDOWS INSTALLS' 'ACT'
-    Write-WHDLog ("Current PC: {0}   (Windows installed {1})" -f $env:COMPUTERNAME, $(if ($inst) { $inst.ToString('yyyy-MM-dd HH:mm') } else { 'unknown' })) 'INFO'
+    Write-WHDLog ("This PC: {0}   (Windows installed {1})" -f $env:COMPUTERNAME, $(if ($inst) { $inst.ToString('yyyy-MM-dd HH:mm') } else { 'unknown' })) 'INFO'
     Write-WHDLog ("  {0} session(s) belong to another PC or an earlier install -> move to archive\other-pcs\" -f $other.Count) 'INFO'
     foreach ($o in $other) { Write-WHDLog ("     {0}" -f $o.Label) 'INFO' }
-    Write-WHDLog ("  {0} untagged session(s) from the current Windows install -> tag as the current PC" -f $claim.Count) 'INFO'
-    if (-not $other.Count -and -not $claim.Count) { Write-WHDLog 'Nothing to do - all history belongs to the current PC and is tagged.' 'OK'; return }
-    Write-WHDRisk 'reversible' 'Nothing is deleted: folders are moved to archive\other-pcs\ (move them back to restore\ to restore them). Verify, the update guard and CAME BACK flags then only use the current PC''s history.'
-    if (-not (Confirm-WHDProceed 'archive other-PC history and tag the current PC''s sessions')) { Write-WHDLog 'skipped.' 'WARN'; return }
+    Write-WHDLog ("  {0} untagged session(s) from this install -> tag as this PC" -f $claim.Count) 'INFO'
+    Write-WHDLog ("  {0} inventory scan(s) from another PC or an earlier install -> move to archive\other-pcs\...\inventory\" -f $scans.Count) 'INFO'
+    foreach ($sc in $scans) { Write-WHDLog ("     {0}" -f $sc.Name) 'INFO' }
+    Write-WHDLog ("  {0} update-guard file(s) from another PC or an earlier install -> move to archive\other-pcs\...\update-guard\" -f $gfiles.Count) 'INFO'
+    foreach ($gf in $gfiles) { Write-WHDLog ("     {0}" -f $gf.Name) 'INFO' }
+    if (-not $other.Count -and -not $claim.Count -and -not $scans.Count -and -not $gfiles.Count) { Write-WHDLog 'Nothing to do - all history belongs to this PC and is tagged.' 'OK'; return }
+    Write-WHDRisk 'reversible' 'Nothing is deleted: folders and files are moved to archive\other-pcs\ (move them back to restore them). Verify, the update guard, the inventory compare and CAME BACK flags then only use this PC''s history.'
+    if (-not (Confirm-WHDProceed 'archive other-PC history and tag this PC''s sessions')) { Write-WHDLog 'skipped.' 'WARN'; return }
     if (-not $script:WHDExecute) {
         foreach ($o in $other) { Write-WHDLog ("would: move {0} -> archive\other-pcs\" -f $o.Stamp) 'DRY' }
-        foreach ($c in $claim) { Write-WHDLog ("would: tag {0} as the current PC" -f $c.Stamp) 'DRY' }
+        foreach ($c in $claim) { Write-WHDLog ("would: tag {0} as this PC" -f $c.Stamp) 'DRY' }
+        foreach ($sc in $scans)  { Write-WHDLog ("would: move inventory\{0} -> archive\other-pcs\" -f $sc.Name) 'DRY' }
+        foreach ($gf in $gfiles) { Write-WHDLog ("would: move restore\update-guard\{0} -> archive\other-pcs\" -f $gf.Name) 'DRY' }
         return
     }
     $dest = Join-Path $script:WHDRoot ('archive\other-pcs\' + (Get-Date -Format 'yyyy-MM-dd_HHmmss'))
-    if ($other.Count) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
+    if ($other.Count -or $scans.Count -or $gfiles.Count) { New-Item -ItemType Directory -Path $dest -Force | Out-Null }
     $moved = 0
     foreach ($o in $other) {
         try { Move-Item -LiteralPath $o.Path -Destination (Join-Path $dest $o.Stamp) -EA Stop; $moved++ }
         catch { Write-WHDLog ("could not move {0}: {1}" -f $o.Stamp, $_.Exception.Message) 'ERR' }
     }
     foreach ($c in $claim) { try { _WHDWriteSessionMachine -SessionPath $c.Path } catch { Write-WHDLog ("could not tag {0}: {1}" -f $c.Stamp, $_.Exception.Message) 'ERR' } }
-    Write-WHDLog ("Done: {0} session(s) archived to {1}; {2} tagged as the current PC." -f $moved, $dest, $claim.Count) 'OK'
+    $movedScans = 0; $movedGuard = 0
+    if ($scans.Count) {
+        $destInv = Join-Path $dest 'inventory'
+        try { New-Item -ItemType Directory -Path $destInv -Force | Out-Null } catch {}
+        foreach ($sc in $scans) {
+            try { Move-Item -LiteralPath $sc.FullName -Destination (Join-Path $destInv $sc.Name) -EA Stop; $movedScans++ }
+            catch { Write-WHDLog ("could not move inventory\{0}: {1}" -f $sc.Name, $_.Exception.Message) 'ERR' }
+        }
+    }
+    if ($gfiles.Count) {
+        $destGuard = Join-Path $dest 'update-guard'
+        try { New-Item -ItemType Directory -Path $destGuard -Force | Out-Null } catch {}
+        foreach ($gf in $gfiles) {
+            try { Move-Item -LiteralPath $gf.FullName -Destination (Join-Path $destGuard $gf.Name) -EA Stop; $movedGuard++ }
+            catch { Write-WHDLog ("could not move update-guard\{0}: {1}" -f $gf.Name, $_.Exception.Message) 'ERR' }
+        }
+    }
+    Write-WHDLog ("Done: {0} session(s), {1} inventory scan(s) and {2} update-guard file(s) archived to {3}; {4} session(s) tagged as this PC." -f $moved, $movedScans, $movedGuard, $dest, $claim.Count) 'OK'
 }
 
 function Invoke-WHDVerify {
@@ -1406,7 +1586,7 @@ function Invoke-WHDVerify {
         $r
     })
     Write-WHDLog ("VERIFY: {0} - {1} item(s) checked" -f $label, $res.Count) 'ACT'
-    if (-not $res.Count) { Write-WHDLog 'No journaled changes to verify (sessions from before the change journal existed only have .reg backups).' 'INFO'; return @() }
+    if (-not $res.Count) { Write-WHDLog 'No journaled changes to verify (journal starts with Phase 5; older sessions only have .reg backups).' 'INFO'; return @() }
     foreach ($r in $res) {
         $lvl = switch ($r.Result) { 'PASS' { 'OK' } 'n/a' { 'INFO' } default { 'WARN' } }
         if (-not $Quiet -or $r.Result -ne 'PASS') {
@@ -1432,7 +1612,6 @@ function _WHDVerifyKey {
         'auditpol'    { "audit|$($e.Guid)".ToLower() }
         'eventlog'    { "evt|$($e.LogName)".ToLower() }
         'fwrule'      { "fw|$($e.RuleName)".ToLower() }
-        'fwoff'       { "fwoff|$($e.RuleName)".ToLower() }
         'mppref'      { "mp|$($e.Setting)".ToLower() }
         'asr'         { "asr|$($e.RuleId)".ToLower() }
         'netacct'     { "pw|$($e.Setting)".ToLower() }
@@ -1560,9 +1739,7 @@ function Show-WHDUndoEntries {
         $i++
         $flag  = if ($e.Undone) { 'undone' } elseif ($e.UndoMode -eq 'auto') { 'auto  ' } else { 'manual' }
         $color = if ($e.Undone) { 'DarkGray' } elseif ($e.UndoMode -eq 'auto') { 'Green' } else { 'Yellow' }
-        Write-Host ("  {0,3}. " -f $i) -NoNewline
-        Write-Host ("[{0}] " -f $flag) -NoNewline -ForegroundColor $color
-        Write-Host ("{0}  {1}" -f $e.Time, $e.Description)
+        Write-WHDParts @(("  {0,3}. " -f $i), @(("[{0}] " -f $flag), $color), ("{0}  {1}" -f $e.Time, $e.Description))
     }
 }
 

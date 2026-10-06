@@ -6,17 +6,10 @@ no internet required. Every change flows through the existing `Common.ps1` safet
 dry-run by default, per-session System Restore point, `.reg`/`.wfw`/hosts backups to `restore\`,
 transcript logging, structured `planned/done/failed/skipped` results.
 
-Load order in `WHD.ps1`: dot-sourced after `Common.ps1`. Menu entry: **9. Firewall**. GUI: `WHD-GUI.ps1`, Firewall tab.
-
-In EXECUTE mode every action that changes the system asks **y/N** first in the terminal menu (the GUI asks once per
-button; a profile run asks once up front). In DRY-RUN nothing is asked and nothing changes.
-
-**Block lists are not included.** WHD ships no IP or domain block list (they are other people's data). Menu **9** (Block
-IP list), **H** (Hosts sinkhole) and the baseline profile only do something once you put your own
-`profiles\blacklist-ip.txt` / `profiles\blacklist-hosts.txt` there (see "Offline blocklist refresh" below).
+Load order in `WHD.ps1`: dot-sourced after `Common.ps1`. Menu entry: **9. Firewall**.
 
 ## Decisions locked (2026-09-21)
-- **D1** Terminal module (menu 9); the GUI (`WHD-GUI.ps1`, Firewall tab) offers the same actions.
+- **D1** Terminal module now (menu 9); WPF GUI is a later phase.
 - **D2** IPv6 off via **adapter unbind + registry + firewall block rules**; loopback `::1` **kept** (blocking it is opt-in).
 - **D3** Offline deploy exports **both** an editable JSON ruleset **and** a `netsh` `.wfw` blob.
 - **D4** Module is **designed toward default-deny outbound**: the allow-list and the staged switch exist now; the flip stays OFF until you choose it.
@@ -29,19 +22,17 @@ IP list), **H** (Hosts sinkhole) and the baseline profile only do something once
 | `Invoke-WHDEnableIPv6` | Full undo of the above. | reversible |
 | `Show-WHDFirewallSummary` | Profile on/off + default actions, rule counts, WHD group counts. | read-only |
 | `Get-WHDFirewallRules [-Detail] [-CustomOnly] [-EnabledOnly] [-Direction] [-Action]` | Clean, filterable rule listing (joins port/address/program filters with `-Detail`). | read-only |
-| `Invoke-WHDFirewallReset [-ApplyBaseline]` | `netsh advfirewall reset` → enable all profiles, inbound Block / outbound Allow. Backs up first. Menu **R**. | hard |
-| `Invoke-WHDFirewallWipe [-ApplyBaseline]` | Deletes **every** rule, Windows' own included (empty slate). The firewall stays on; the default actions are not changed. Backs up first. Menu **W**. | hard |
+| `Invoke-WHDFirewallReset [-ApplyBaseline]` | `netsh advfirewall reset` → enable all profiles, inbound Block / outbound Allow. Backs up first. | hard |
 | `Export-WHDFirewallPolicy [-Path]` | Writes `<base>.wfw` (full policy) **and** `<base>.json` (WHD rules, editable). | reversible |
 | `Import-WHDFirewallPolicy -Path -Mode Json\|Wfw` | Re-applies a JSON ruleset or imports a `.wfw` blob. | caution |
 | `Invoke-WHDFirewallAllowList` | Outbound allow-list (DNS/DHCP/NTP/HTTP/S) — pre-stages default-deny. | reversible |
-| `Invoke-WHDSetDns -Mode Cloudflare\|Reset [-NoDoH]` | Menu **D**: system DNS → Cloudflare 1.1.1.2 / 1.0.0.2 with encrypted DNS (DoH). Menu **U**: back to automatic (DHCP), DoH registrations removed. | reversible |
-| `Enable-WHDDefaultDenyOutbound [-RollbackMinutes 10]` | Flips `DefaultOutboundAction=Block` **with an armed auto-rollback** scheduled task (1–720 min). Not enabled if the essential allow rules are missing or the task cannot be armed. | hard |
+| `Enable-WHDDefaultDenyOutbound [-RollbackMinutes 10]` | Flips `DefaultOutboundAction=Block` **with an armed auto-rollback** scheduled task. | hard |
 | `Confirm-WHDDefaultDenyKeep` / `Disable-WHDDefaultDenyOutbound` | Cancel the rollback (keep strict) / revert to permissive. | — |
-| `Block-WHDIPList -Path` | IP/CIDR block rules from your own offline list (chunked 1000/rule). | caution |
-| `Block-WHDHostsList -Path` / `Remove-WHDBlacklist` | Domain sinkhole via hosts file (marked block; only plain host names are written) / remove all blacklist. | caution |
+| `Block-WHDIPList -Path` | IP/CIDR block rules from an offline list (chunked 1000/rule). | caution |
+| `Block-WHDHostsList -Path` / `Remove-WHDBlacklist` | Domain sinkhole via hosts file (marked block) / remove all blacklist. | caution |
 | `Invoke-WHDApplyFirewallProfile -Path` | Drives all of the above from one JSON file (`profiles\firewall-baseline.json`). | per-profile |
 
-All created rules carry a group: `WinHardenDebloat-IPv6 / -AllowList / -Blacklist / -AppAllow` (and `-UpdateGate` from `modules\Updates.ps1`), so they list and remove as a set and never mix with Microsoft's built-ins.
+All created rules carry a group: `WinHardenDebloat-IPv6 / -AllowList / -Blacklist / -Baseline`, so they list and remove as a set and never mix with Microsoft's built-ins.
 
 ## Typical offline workflow on a fresh image
 ```
@@ -56,29 +47,15 @@ or apply the editable profile: menu **9 → A**.
 
 ## Going strict (long-term, deliberate)
 1. `profiles\firewall-baseline.json` → set `"defaultDenyOutbound": true`.
-2. Apply (or use menu **6** without editing the file). WHD first checks that the essential allow rules
-   (`WHD-Allow-DNS-UDP`, `WHD-Allow-DNS-TCP`, `WHD-Allow-DHCP-Out`) exist and are enabled. An empty
-   allow-list is built first; if rules exist but those three are missing or off, default-deny is refused and you apply
-   the allow-list yourself (Firewall **5**). Then it arms the auto-rollback: a one-time scheduled task `WHD-DefaultDenyRollback` that runs as SYSTEM
-   after `rollbackMinutes` (1–720) and sets outbound back to Allow. The task holds that one command itself (no script
-   file) and may start on battery or late if the PC was off or asleep at the time. **If the task cannot be armed,
-   default-deny is not enabled.** Only then does outbound flip to Block.
-3. Verify the machine still does what it must, then `Confirm-WHDDefaultDenyKeep` (menu **7**) removes the task.
-   If anything broke, wait for the rollback time (or use menu **8** to revert at once), then widen the allow-list and
-   retry. After the task has run, menu **7** reports that outbound is already Allow and removes the leftover task.
+2. Apply. Outbound flips to Block; an auto-rollback task reverts it in `rollbackMinutes`.
+3. Verify the machine still does what it must, then `Confirm-WHDDefaultDenyKeep`.
+   If anything broke, do nothing — it self-heals — then widen the allow-list and retry.
 
 ## Constraint to remember
 Windows Firewall rules match **IP addresses, never domain names**. Domain blacklists go to the
-hosts sinkhole; IP/CIDR blacklists go to firewall block rules. Domain filtering is otherwise done at the
-resolver: menu **D** points system DNS at Cloudflare 1.1.1.2 / 1.0.0.2 (malware filter) and registers native
-encrypted DNS (DoH) for it; menu **U** undoes both. Filtering at the router (pfSense / OpenWrt) is outside WHD.
-
-## If you lose the network
-- Firewall **8** — revert default-deny (outbound back to Allow).
-- Updates **O** — open the update gate (Firewall 8 refuses while the gate is closed).
-- Firewall **5** — re-apply the allow-list (needed after a wipe while outbound is Block).
-- Undo center **F** — restore the firewall saved before that session.
-- Or, in an administrator window: `netsh advfirewall reset`.
+hosts sinkhole; IP/CIDR blacklists go to firewall block rules. Closing the DoH-bypass gap on
+domains is the long-long-term encrypted-DNS + hardware-router phase (native DoH via
+`Set-DnsClientDohServerAddress`; gateway DoT/blocklists via pfSense/OpenWrt).
 
 ## Phase 6 additions (2026-09-23)
 
@@ -86,17 +63,15 @@ encrypted DNS (DoH) for it; menu **U** undoes both. Filtering at the router (pfS
 - **M** turns logging on (v1.3, 2026-09-28): Windows Firewall's own log, default file
   (%SystemRoot%\System32\LogFiles\Firewall\pfirewall.log), dropped + allowed, 32,767 KB (maximum). Journal kind `fwlog`.
   The older Security-log / event 5157 method is replaced; its old journal lines still undo.
-  **O** turns it off. The log has no program path; the viewer names the program from the logged pid (1.5: only when
-  that process started before the log line, or from the names WHD remembered - see "1.5 - blocked-connections view").
+  **O** turns it off. The log has no program path; the viewer names the program from the logged pid when that process
+  is still running.
 - **V** lists blocked connections (default last 24 h, outbound) grouped by program + protocol + port,
-  with a count, last-seen time and sample addresses.
-- One-click allow (**program + that port only**) creates
+  with a count, last-seen time and sample addresses. Device paths are translated to `C:\...` with `fltmc volumes`.
+- One-click allow (**user decision: program + that port only**) creates
   `WHD-App-<exe>-<proto>-<port>` in group **`WinHardenDebloat-AppAllow`**: outbound, that program,
   that protocol + remote port, any destination. Journaled as `fwrule` (undo = remove rule).
   Refused: inbound rows (would open the PC) and Windows service traffic (`svchost.exe`, `System`) —
   a program rule for svchost would open every service. **G** removes all program allows.
-  1.5: several rows can be allowed at once, and an allow made while the update gate is CLOSED is saved switched off
-  (see the two 1.5 sections below).
 
 ### Time sync — Option 1 (menu 9 → T / N / S)
 Windows' time service speaks NTP only (no NTS). **T** sets
@@ -105,8 +80,8 @@ Windows' time service speaks NTP only (no NTS). **T** sets
 allow rule `WHD-Allow-NTP` to Cloudflare's published NTP addresses **162.159.200.1, 162.159.200.123**
 (IPv6 omitted — IPv6 is suppressed). `0x8` = client mode on Windows' normal poll interval (~17 min–9 h)
 instead of `0x1`'s weekly interval. **N** goes back to `time.windows.com,0x9` and reopens UDP 123 to any.
-**T** also sets the **Windows Time service to Automatic (delayed start)** and starts it (on a non-domain PC the
-service is trigger-start and usually not running, so the clock would not sync);
+**T** also sets the **Windows Time service to Automatic (delayed start)** and starts it (user decision
+2026-09-23 after the live test showed it was trigger-start and not running, so the clock was never syncing);
 journaled as a `service` change, so the Undo center restores the previous start type.
 **S** shows the setting, the service state/start type, the source in use, last sync, a direct reachability
 test (`w32tm /stripchart /computer:time.cloudflare.com /samples:2`, works even if the service is stopped)
@@ -121,16 +96,15 @@ or smaller"). A bigger correction, e.g. a forged NTP reply, is thrown out and lo
 (`UtilizeSslTimeData`) is left on. **N** puts 54000 back and turns Secure Time Seeding on if it was off. All writes are
 journaled (auto undo + Verify). Summary and **S** show the limit, Secure Time Seeding and refused jumps (7 days).
 If the clock is ever really more than 1 h off, set it by hand once (Settings > Time & language > Date & time), then Sync now.
-NTS (authenticated time) is not included: the Windows Time service does not support it.
+Options 2 (router NTS via OpenWrt/chrony) and 3 (third-party NTS client) are planned, not built.
 
 ### Offline blocklist refresh (menu 9 → F, GUI "Refresh blocklist (incoming)")
-Block lists are not included: download the lists you want yourself (on any machine) and drop the files in
-**`profiles\incoming\`** (created on first use, with a README). Formats detected per line:
+Drop list files in **`profiles\incoming\`** (created on first use, with a README). Formats detected per line:
 plain IP/CIDR (FireHOL `.netset`/`.ipset`), Spamhaus DROP classic (`cidr ; SBL...`), Spamhaus DROP JSON
 (`drop_v4.json`), DShield `block.txt`. Every entry is normalized, de-duplicated (ranges inside bigger ranges are
 dropped) and passed through the same safety guard as `Block-WHDIPList`; IPv6 entries are skipped.
 1. A **preview** shows usable/skipped counts per file, what's new vs the current list, and the size after
-   MERGE and after REPLACE (changes are shown first; you choose each time).
+   MERGE and after REPLACE (**user decision: show changes, then choose each time**).
 2. Merge or replace → the old list is backed up to `restore\<session>\blacklist-ip.before.<time>.txt`,
    the new file is written (journaled `file`, undo restores the backup) and the processed files move to
    `incoming\done\<session>\`.
@@ -142,140 +116,47 @@ Safety: if the current list can't be read, the refresh aborts without changing a
 - `Close-WHDUpdateGate` / `Open-WHDUpdateGate`. The group `WinHardenDebloat-UpdateGate` holds the Defender + DoH allows.
   The state is kept in `restore\update-guard\update-gate.json`: MachineId, Closed, PrevOutbound, and DisabledRules (every
   outbound allow rule the gate switched off, put back on open).
-- "Closed" = the state file says closed for the current PC **and** outbound is Block.
+- "Closed" = the state file says closed on this PC **and** outbound is Block.
 - `Invoke-WHDApplyFirewallProfile` never lowers outbound Block to Allow.
 - `Invoke-WHDFirewallAllowList` and the profile allow-list keep `WHD-Allow-HTTPS` / `WHD-Allow-HTTP` off while the gate is
   closed. `Disable-WHDDefaultDenyOutbound` refuses while the gate is closed.
 
-### 1.5 - update gate position PROGRAMS, two more Defender rules, gate line on the firewall screen
-- **Update gate, three positions** (`restore\update-guard\update-gate.json` now also holds `Mode`; a file written by an
-  older version has no `Mode` and is read as closed):
-  - **OPEN** as before.
-  - **PROGRAMS** (`Close-WHDUpdateGate -Mode programs`, Updates menu **P**) = outbound default-deny; Defender + DoH + the
-    per-program allows (group `WinHardenDebloat-AppAllow`, made in Firewall menu **V**) stay on; the any-program web rules
-    and every other outbound allow rule are switched off and remembered. Windows Update and the Store stay off.
-  - **CLOSED** (`Close-WHDUpdateGate`, Updates menu **C**) as before: the per-program allows are switched off and
-    remembered too.
-- `Get-WHDGateState` returns `Mode` (`open` / `programs` / `closed`) and `Text` (`OPEN` / `PROGRAMS` / `CLOSED` + since
-  when). `Closed` and `Test-WHDGateClosed` are true for PROGRAMS and CLOSED. Reading the state creates no folder; the
-  folder is made when the state is saved.
-- CLOSED -> PROGRAMS switches on only the per-program allows the gate itself had switched off; an allow that was switched
-  off by hand stays off. PROGRAMS -> CLOSED switches them off and remembers them again.
-- **A program allowed in Firewall V while the gate is CLOSED is saved switched off** and added to the gate's remembered
-  list (`Add-WHDGateRemembered`); it comes on when the gate is set to PROGRAMS or OPEN. (Before 1.5 it was created
-  switched on and switched off at the next close.) With the gate on PROGRAMS a new allow works at once - WHD says so.
-- Everything the gate checked before still applies to both positions: the DNS-pin check (refuses when an adapter does
-  not use the pinned DNS servers; DRY-RUN only warns), the allow-list check, the state saved before the change, and the
-  roll-back when the change fails. A failed change of position (CLOSED <-> PROGRAMS) puts the per-program allows back and
-  records the old position again.
-- `Open-WHDUpdateGate`: the gate is recorded as open only when the change went through. If it fails, the rules it had
-  just switched on are switched off again and the saved state is not touched. "Nothing to open" is unchanged: a
-  default-deny that was turned on separately (Firewall **6**) is left alone.
-- **Two more gate rules** (created only when the program file exists in Defender's platform folder):
-  `WHD-Gate-NisSrv` (`NisSrv.exe`, Defender network inspection - a program rule next to the service rule) and
-  `WHD-Gate-MpCore` (`MpDefenderCoreService.exe`, the Defender core service). Microsoft Learn ("Microsoft Defender Core
-  service overview"): the core service delivers Defender fixes and configuration and also sends Defender telemetry; the
-  close-gate text says so.
-- The firewall screen (`Show-WHDFirewallSummary`) shows one line `Update gate   : OPEN / PROGRAMS / CLOSED since ...`.
-- `Invoke-WHDFirewallAllowList`, the profile allow-list and `Disable-WHDDefaultDenyOutbound` name the real position
-  (CLOSED or PROGRAMS) in their messages; their behaviour is unchanged.
-- Profile key `updates.gate` accepts `"closed"` or `"programs"` (`modules\Profiles.ps1`).
-- `Enable-WHDDefaultDenyOutbound` (Firewall **6**) does nothing while the gate is CLOSED or on PROGRAMS: outbound is already
-  default-deny, and arming the auto-rollback there would set outbound back to Allow when the minutes ran out.
-- `Import-WHDFirewallPolicy -Mode Json` keeps `WHD-Allow-HTTPS` / `WHD-Allow-HTTP` off while the gate is CLOSED or on PROGRAMS;
-  on CLOSED it also switches imported per-program allows off and adds them to the gate's remembered list.
 
-### 1.5 - blocked-connections view (menu 9 -> V), allow several at once
+### WHD Next, 2026-10-02 - the IP block list follows the firewall; update gate position PROGRAMS
+Windows Firewall order (Microsoft Learn): a block rule beats an allow rule; the default action applies only when no
+rule matches. So block rules only do work where something is wide open.
+- **Needed, outbound:** the outbound default is Allow, or an enabled outbound allow rule is open to any address (the two
+  any-program web rules, a per-program allow, Windows' own rules after a reset). Not counted: the gate's own rules
+  (Defender + DNS-over-HTTPS) and the DHCP request. Counting stops at 25 rules.
+- **Needed, inbound:** the inbound default is Allow, or an enabled inbound allow rule exists beyond the DHCP reply.
+- `Get-WHDBlocklistNeed` (read-only) reports it; `Sync-WHDBlocklist` creates the block rules for exactly the needed
+  direction(s) and removes them where nothing is wide open. It runs at the end of: allow-list, default-deny on / revert,
+  program allow added / removed, reset, wipe, import, firewall profile, and every gate change. DRY-RUN shows one line.
+- The firewall screen shows the result as `IP block list : ...` (also in the window version, the Updates status and the
+  update guard report).
+- By hand: menu **9** `Invoke-WHDBlocklistApply` = follow again + rebuild from the list file (another file can be given;
+  it is remembered). Menu **C** `Remove-WHDBlacklist` = remove and **stop following** until 9. Menu **F** as before; its
+  rebuild goes through the same apply. The setting is kept per PC in `restore\update-guard\blocklist.json`
+  (MachineId, Follow, ListFile).
+- No list file (`profiles\blacklist-ip.txt`): nothing is created; the status says "needed, but no list file".
+- **Update gate, three positions** (`update-gate.json` now also holds `Mode`): **OPEN** as before; **PROGRAMS**
+  (`Close-WHDUpdateGate -Mode programs`, Updates menu **P**) = outbound default-deny, Defender + DoH + the owner's
+  per-program allows (group `WinHardenDebloatNext-AppAllow`), any-program web rules off; **CLOSED** as before, the
+  per-program allows are switched off and remembered. A program allowed while CLOSED is stored switched off and comes on
+  with PROGRAMS or OPEN. `Test-WHDGateClosed` is true for PROGRAMS and CLOSED. Profile key `updates.gate` accepts
+  `"closed"` or `"programs"`.
+
+### WHD Next, 2026-10-02 (step 10) - blocked-connections view after the first real PROGRAMS test
 - The firewall log only has a process id. A running process is used for a log line only if it **started before** that
-  line, so a restart or a reused id no longer puts the wrong program name on old lines.
+  line (a restart or a reused id no longer puts the wrong program name on old lines).
 - Names WHD resolves are remembered per PC in `restore\update-guard\blocked-programs.json` (id, start time, path, last
   time seen running; 7 days, 400 entries), so lines of a program that has closed since keep their name and can still be
-  allowed. A remembered name is used only inside the time that program was known to run (not after a restart, not more
-  than 30 minutes after it was last seen). This file is WHD's own cache; the view writes it in DRY-RUN too. If it cannot
-  be written (folder protection, for example) the view still works and says so once.
-- Every row gets a `State`: `can` / `allowed` / `allowed-off` (an allow exists but is switched off, e.g. gate CLOSED) /
-  `covered` (the allow-list lets it out now) / `windows` (service, System, not TCP-UDP, or no process id) / `inbound` /
-  `ended` (program closed, name not known). `StateText` holds the same in words. Rows that can be allowed come first, one
-  program's rows together; only they get a number. Programs that closed without ever being seen are merged per
-  protocol + port.
-- Menu **V**: several rows at once (`1,3` or `1-3`). The lines are listed, then there is **one** question
-  (`Add-WHDProgramAllows -Items <rows>`); a single row still goes through `Add-WHDProgramAllow`. The refusals are
-  unchanged: inbound rows, Windows service traffic (`svchost.exe`, `System`) and rows that are not TCP/UDP.
-- `Get-WHDProgramAllowName` gives the rule name `WHD-App-<exe>-<proto>-<port>` in one place (the allow and the view).
-
-### 1.5 - wipe (menu 9 -> W) shows progress and an honest result
-- Rules are deleted one by one; the wipe shows a progress count (`Write-WHDProgressStep`, a log line every 50 rules).
-- It says how many rules could not be deleted and were left in place, in the log and in the final line.
-- After a DRY-RUN it says "preview only - nothing was deleted" (no "Wipe complete"); if the wipe did not run (the
-  firewall backup failed, for example) it says "Wipe NOT done".
-- Unchanged: the question before the wipe, the warning when outbound is Block, and the baseline option.
-- Small fixes: `Remove-WHDFwGroup` prints no result row; the firewall log size is read only when the log file exists.
-
-### 1.5 (2026-10-06) - rules WHD did not make; the gate and the firewall tools tell each other's changes
-- **What counts** (`Get-WHDForeignRules`): a rule that is ON, is an Allow rule and is in none of WHD's groups
-  (`Get-WHDFwOwnGroups`: IPv6, AllowList, Blacklist, Baseline, AppAllow, UpdateGate) - inbound always, outbound only while
-  outbound is Block. Names on the kept list are left out. `Get-WHDForeignAttention` gives the rows that raise an alert:
-  the outbound ones (the leak) always, the inbound ones only while the inbound watch is on.
-- **Kept list + inbound switch:** `restore\update-guard\firewall-known.json` - `Names` (kept by you, answer k), `Base`
-  (inbound rules counted as kept at a start), `Inbound` (are inbound rules watched). `Get-WHDFwKnown` -> Exists,
-  Unreadable, Inbound, Own, Base, Names (Own + Base); `Save-WHDFwKnown -Names [-Base] [-Inbound]` (machine-tagged, written
-  in EXECUTE only, through a second file that is moved over the old one). Looking at the list writes nothing. The inbound
-  watch starts on an explicit answer (`Start-WHDFwInboundWatch [-CountPresent]`: with the switch the inbound rules present
-  go to Base, without it they are all listed) or with a wipe / reset / `.wfw` import / firewall restore that was done
-  (`Set-WHDFwKnownFromNow [-Pending]`: Own and Base names that still exist + every inbound allow rule not made by WHD that
-  is on then). Never taken into Base: rules WHD still holds switched off (`Get-WHDFwOffLive`), rules you removed
-  (`Get-WHDFwRemovedNames`; the removal's journal entry carries `RemovedRule`), rules that were listed as not decided
-  before the tool ran (`-Pending`), and outbound rules. `Clear-WHDFwKnown` (F) empties Own only.
-- **Answers** (`Invoke-WHDForeignRuleBatch -Rows -Action off|remove|keep|port [-Port]`, one question for the list; the
-  console view `Invoke-WHDForeignRulesView` and the window tab both call it):
-  - `off`: `Set-NetFirewallRule -Enabled False`, journaled as kind **`fwoff`** (RuleName, RuleDisplay, Direction, Old/New
-    Enabled): auto undo, Verify (`CHANGED` when it is on again, `PASS` when the rule is gone), one-key re-apply. The name
-    comes off the gate's remembered list (`Remove-WHDGateRemembered`), so opening the gate does not switch it back on.
-  - `remove`: deleted after the session's firewall backup; journaled as an action with an undo hint.
-  - `keep`: the name goes on the kept list. The gate leaves a kept outbound rule on (`Get-WHDGateOffCandidates`); kept
-    outbound rules that are ON while outbound is Block are named in the head lines, Status and the guard report
-    (`Get-WHDFwKeptOutText`; not an alert). Standing `fwoff` entries of a kept rule are marked undone
-    (`Clear-WHDFwOffEntries`), so Verify and re-apply no longer hold it off.
-  - `port`: only for an outbound rule that names one program file (not `svchost.exe`, not a service): one
-    `Add-WHDProgramAllow` per program (TCP, that remote port), then the wide rule is switched off as in `off`. When a WHD
-    allow of that name exists for another program file (same file name, other folder), the program is refused.
-  - A rule made by another program is looked up by comparing its exact name (`Get-WHDFwRuleExact`), never as a pattern,
-    and changed through the rule object - in these answers, in undo / Verify / re-apply, in the gate
-    (`_WHDGateSwitchRule`) and in the wipe.
-- **Where it shows:** `Show-WHDFwAttentionLines [-AtStart]` (WHD's start, the firewall summary, the Updates menu),
-  `Invoke-WHDFwAttentionAsk` (opens the list when a rule is there that was not shown yet in this session),
-  `Show-WHDUpdatesStatus`, `Get-WHDFirewallGuardReport` (the guard's report section; an alert), the window's status boxes.
-- **Gate health** (`Get-WHDGateHealth`, Updates.ps1): recorded as closed but outbound is Allow (`Stale`); CLOSED /
-  PROGRAMS with its own rules missing or switched off, the DNS / DHCP allows missing, the any-program web rules on, or
-  (CLOSED) program allows on (`NeedsSet`); CLOSED / PROGRAMS with Windows Firewall switched off for a profile; or recorded
-  as OPEN while outbound is Block, the gate's rules are on and the any-program web rule is there but switched off
-  (`Unrecorded` - a policy saved while the gate was closed came in; `Close-WHDUpdateGate` then takes outbound Allow as the
-  setting to go back to and remembers the web rules and the program allows that are off).
-  `Get-WHDGateState` now also returns `Recorded` (what the saved file says).
-- **Tools that change what the gate set** call `Write-WHDCrossToolNote` (text from `Get-WHDCrossToolNote -Tool reset | wipe |
-  wfw | dnsreset | appclear`): the lines are logged before the question, and where the tool changes what the gate lets
-  through a short clause is added to the question itself. After a reset / wipe / `.wfw` import / firewall restore that
-  was done (`$script:WHDFwToolStatus -eq 'done'`; a netsh error makes it `failed` and nothing else is touched)
-  `Update-WHDGateAfterFirewallChange` puts the gate's record right (OPEN after a reset; names of deleted rules come off
-  its remembered list - WHD's two web rules stay on it, the allow-list brings them back switched off). After a wipe, an
-  import or a restore `Invoke-WHDGateRepairOffer` runs (called by the menu / window handler; the console restore calls it
-  itself): when the gate is left incomplete, the gate's own question follows (`Close-WHDUpdateGate -Mode <same> -Why ...`).
-  In a profile run the offer runs after the network steps (DNS is set by then) under the profile's one approval, not when
-  the profile sets the gate itself, and once more at the end of a run that wiped and stopped early. `Restore-WHDSessionFirewall`
-  saves the current firewall first when the session has no backup yet (`Backup-WHDFirewallOnce`, once per session).
-- **Gate set / open:** before its question the gate lists the rules it will switch off (`Show-WHDGateOffPreview`) and
-  after it was set names a rule that is still on; opening names remembered rules that no longer exist; O with nothing
-  left to switch on puts a stale record right.
-- **Known limits:** decisions are keyed on the rule name only (no record of the rule's ports or program; a rule Windows
-  writes again under a new name is a new rule); the allow rules in the Group Policy store are not looked at.
-
-## Safety behaviour of the firewall functions
-- The firewall backup (`restore\<session>\firewall-before.wfw`) is taken once per session, before the first firewall
-  change. If the export fails, the change that needed it is reported FAILED and is not made.
-- Rule names: a name that is empty or contains `*`, `?`, `[` or `]` is refused (in the JSON import and in firewall
-  profiles too), because a wildcard name would match — and replace — other rules.
-- Hosts file: the first `hosts.bak` of a session is kept (later runs do not overwrite it); a hosts file that cannot be
-  read is not rewritten; list lines that are not plain host names (and localhost-type names) are skipped and counted.
-- A firewall profile that names an IP or hosts list file that is not there logs a warning and applies no block list.
-- A wipe (**W**) while outbound is Block warns first: it also deletes WHD's allow rules, so there is no network until
-  the allow-list is applied again (Firewall **5**) or default-deny is reverted (Firewall **8**).
+  allowed. A remembered name is used only inside the time that program was known to run.
+- Every row gets a state: `can` / `allowed` / `allowed-off` (gate CLOSED) / `covered` (the allow-list lets it out now) /
+  `windows` (service, System, not TCP-UDP) / `inbound` / `ended`. Rows that can be allowed come first, one program's rows
+  together; only they get a number. Programs that closed without ever being seen are merged per protocol + port.
+- Menu **V**: several rows at once (`1,3` or `1-3`), one question (`Add-WHDProgramAllows`); the IP block list is
+  re-checked once at the end. With the gate on PROGRAMS the allow is live at once - WHD says so.
+- Gate: `WHDN-Gate-NisSrv` (Defender network inspection, program rule in the platform folder) added next to the
+  service rule, and `WHDN-Gate-MpCore` for the Defender core service (`MpDefenderCoreService.exe`: Defender
+  fixes/configuration + Defender telemetry) - allowed by the owner's decision 2026-10-02.

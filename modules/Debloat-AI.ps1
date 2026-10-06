@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  modules\Debloat-AI.ps1
+ WHD Next  -  modules\Debloat-AI.ps1
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -27,13 +27,8 @@ $script:WHDAiModules = @(
         FeatureOff=@(
             _reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot' 1
             _reg 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot' 1
-            # v1.5: on current Windows 11 the Copilot app is installed and updated by Microsoft Edge Update.
-            # Microsoft Learn, "Microsoft Copilot update policies for Windows": Install{app id} = 0 "installs
-            # disabled", Update{app id} = 0 "updates disabled" (Edge Update 1.3.253.25 or later).
-            _reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'Install{C50565E9-CCCF-44B4-BA15-5AC5C6569197}' 0
-            _reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'Update{C50565E9-CCCF-44B4-BA15-5AC5C6569197}' 0
         )
-        Note='Legacy TurnOffWindowsCopilot key (Microsoft is deprecating it, but it still works on Home and needs no AppLocker): targets the app + Win+C launch. Plus the two Edge Update policies for the Copilot app (install off, update off): on current Windows 11 Copilot comes with Microsoft Edge Update, so an Edge update could bring a removed Copilot back. Microsoft documents them as Edge Update policies; on Home they are TRIED - Verify and the update guard report it if Copilot returns.'
+        Note='Legacy TurnOffWindowsCopilot key (Microsoft is deprecating it, but it still works on Home and needs no AppLocker). Targets the app + Win+C launch.'
     }
     [ordered]@{
         Key='recall'; Name='Recall'; Packages=@()
@@ -41,7 +36,7 @@ $script:WHDAiModules = @(
         FeatureOff=@(
             _reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsAI' 'AllowRecallEnablement' 0
         )
-        Note='Policy AllowRecallEnablement=0 keeps Recall off. Turning Recall off this way also deletes existing Recall snapshots. Feature-off only: WHD does not remove the Recall optional feature itself.'
+        Note='On some PCs the Recall feature is already off with its payload removed (DisabledWithPayloadRemoved). The key is set anyway to keep it off; app-remove uses Disable-WindowsOptionalFeature.'
     }
     [ordered]@{
         Key='powerautomate'; Name='Power Automate'; Packages=@('Microsoft.PowerAutomateDesktop')
@@ -64,7 +59,7 @@ $script:WHDAiModules = @(
             _reg 'HKLM:\SOFTWARE\Policies\Microsoft\Dsh' 'AllowNewsAndInterests' 0
             _reg 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' 'TaskbarDa' 0
         )
-        Note='Feature-off disables Widgets. The HKLM Dsh policy is best-effort (often locked on Home); TaskbarDa hides the Widgets button where Windows allows the value to be written (newer builds protect it; it then shows as skipped). Removing the package disables Widgets entirely.'
+        Note='Feature-off disables Widgets. The HKLM Dsh policy is best-effort (often locked on Home); TaskbarDa reliably hides the Widgets button per-user. Removing the package disables Widgets entirely.'
     }
     [ordered]@{
         Key='notepad'; Name='Notepad (Rewrite AI)'; Packages=@('Microsoft.WindowsNotepad')
@@ -218,7 +213,7 @@ function Invoke-WHDStoreSuppression {
     Write-WHDLog 'Note: DisableWindowsConsumerFeatures is best-effort on Home; the CDM keys above are the reliable part.' 'INFO'
 }
 
-# ---- several AI items at once: one plan list, one y/N --------------------------
+# ---- WHD Next (user request 2026-10-02): several AI items at once -------------
 # "Recommended" (the * in the menu) = every item marked reversible (green) that has an action.
 # The yellow (caution) apps - Notepad, Paint, Photos - and the red OS platform item are never in it.
 function Test-WHDAiRecommended {
@@ -226,10 +221,9 @@ function Test-WHDAiRecommended {
     return ("$($Module.Risk)" -eq 'reversible' -and ([bool]$Module.CanRemove -or @($Module.FeatureOff).Count -gt 0))
 }
 # What a batch does with one item.
-#   remove: remove the app AND set its off-switch when it has one;
+#   remove: remove the app AND set its off-switch when it has one (user decision 2026-10-02 18:35);
 #           when the app cannot be removed, turn it OFF if an off-switch exists.
 #   off   : set the off-switch only.
-# Returns 'remove+off', 'remove', 'off' or 'none'.
 function Get-WHDAiBatchPlan {
     param($Module, [ValidateSet('remove','off')][string]$Action)
     if ($Action -eq 'remove') {
@@ -241,51 +235,41 @@ function Get-WHDAiBatchPlan {
     if (@($Module.FeatureOff).Count) { return 'off' }
     return 'none'
 }
-# One list with every item's own note, ONE y/N, then every step runs without further questions
-# (the per-item functions are the same ones a single item uses; only their question is answered once, up front).
+# One list, one y/N, then every step runs without further questions.
 function Invoke-WHDAiBatch {
     param([object[]]$Modules, [ValidateSet('remove','off')][string]$Action)
     $Modules = @($Modules | Where-Object { $_ })
     if (-not $Modules.Count) { Write-WHDLog 'Nothing selected.' 'WARN'; return }
-    $whdAiActText = if ($Action -eq 'remove') { 'remove + set the off-switch (turn OFF where it cannot be removed)' } else { 'feature-off' }
-    Write-WHDLog ("AI DEBLOAT - {0} selected item(s), action: {1}" -f $Modules.Count, $whdAiActText) 'ACT'
-    $whdAiPlan = @(foreach ($whdAiM in $Modules) { [pscustomobject]@{ Module = $whdAiM; Step = (Get-WHDAiBatchPlan -Module $whdAiM -Action $Action) } })
-    foreach ($whdAiP in $whdAiPlan) {
-        $whdAiPk = (@($whdAiP.Module.Packages) -join ', ')
-        $whdAiTxt = switch ($whdAiP.Step) {
-            'remove+off' { "remove the app ($whdAiPk) + set its off-switch" }
-            'remove'     { "remove the app ($whdAiPk) - it has no off-switch" }
-            'off'        { if ($Action -eq 'remove') { 'turn OFF (cannot be removed)' } else { 'turn OFF' } }
-            default      { if ($Action -eq 'remove') { 'skip - no action is offered for this item' } else { 'skip - this item has no off-switch' } }
+    $whdActText = if ($Action -eq 'remove') { 'remove (turn OFF where it cannot be removed)' } else { 'feature-off' }
+    Write-WHDLog ("AI DEBLOAT - {0} selected item(s), action: {1}" -f $Modules.Count, $whdActText) 'ACT'
+    $plan = @(foreach ($m in $Modules) { [pscustomobject]@{ Module = $m; Do = (Get-WHDAiBatchPlan -Module $m -Action $Action) } })
+    foreach ($p in $plan) {
+        $txt = switch ($p.Do) {
+            'remove+off' { 'remove the app + set its off-switch' }
+            'remove' { 'remove the app (it has no off-switch)' }
+            'off'    { if ($Action -eq 'remove') { 'turn OFF (cannot be removed)' } else { 'turn OFF' } }
+            default  { 'skip - no such action for this item' }
         }
-        Write-WHDLog ("   {0,-40} -> {1}" -f $whdAiP.Module.Name, $whdAiTxt) 'INFO'
-        Write-WHDRisk $whdAiP.Module.Risk $whdAiP.Module.Note
+        Write-WHDLog ("   {0,-42} -> {1}" -f $p.Module.Name, $txt) 'INFO'
     }
-    $whdAiTodo = @($whdAiPlan | Where-Object { $_.Step -ne 'none' })
-    if (-not $whdAiTodo.Count) { Write-WHDLog 'Nothing to do for this selection.' 'WARN'; return }
-    $whdAiTier = 'reversible'
-    if (@($whdAiTodo | Where-Object { "$($_.Module.Risk)" -ne 'reversible' }).Count) { $whdAiTier = 'caution' }
-    if (@($whdAiTodo | Where-Object { "$($_.Step)" -like 'remove*' }).Count) {
-        Write-WHDRisk $whdAiTier 'Apps are removed for ALL users of the PC and their local data is deleted (undo = reinstall from the Store). Off-switches are registry values (Undo center puts the old values back).'
-    } else {
-        Write-WHDRisk $whdAiTier 'No app is removed. Off-switches are registry values (Undo center puts the old values back).'
-    }
-    if (-not (Confirm-WHDProceed ("apply the {0} item(s) listed above" -f $whdAiTodo.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
-    $whdAiF0 = [int]$script:WHDCounts['failed']; $whdAiS0 = [int]$script:WHDCounts['skipped']
-    $whdAiPrevC = $script:WHDConfirm; $script:WHDConfirm = { param($m) $true }
+    $todo = @($plan | Where-Object { $_.Do -ne 'none' })
+    if (-not $todo.Count) { Write-WHDLog 'Nothing to do for this selection.' 'WARN'; return }
+    $whdTier = 'reversible'
+    if (@($todo | Where-Object { "$($_.Module.Risk)" -ne 'reversible' }).Count) { $whdTier = 'caution' }
+    Write-WHDRisk $whdTier 'Removed apps can be re-installed from the Microsoft Store; off-switches are registry values. Every step is journaled (Undo center).'
+    if (-not (Confirm-WHDProceed ("apply the {0} step(s) listed above" -f $todo.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $prevC = $script:WHDConfirm; $script:WHDConfirm = { param($m) $true }
     try {
-        foreach ($whdAiP in $whdAiTodo) {
-            switch ($whdAiP.Step) {
-                'remove+off' { Invoke-WHDAiRemove -Module $whdAiP.Module | Out-Null; Invoke-WHDAiFeatureOff -Module $whdAiP.Module | Out-Null }
-                'remove'     { Invoke-WHDAiRemove -Module $whdAiP.Module | Out-Null }
-                default      { Invoke-WHDAiFeatureOff -Module $whdAiP.Module | Out-Null }
+        foreach ($p in $todo) {
+            if (Test-WHDJournalStop) { break }
+            switch ($p.Do) {
+                'remove+off' { Invoke-WHDAiRemove -Module $p.Module; if (-not (Test-WHDJournalStop)) { Invoke-WHDAiFeatureOff -Module $p.Module } }
+                'remove'     { Invoke-WHDAiRemove -Module $p.Module }
+                default      { Invoke-WHDAiFeatureOff -Module $p.Module }
             }
         }
-    } finally { $script:WHDConfirm = $whdAiPrevC }
-    $whdAiBad = ([int]$script:WHDCounts['failed'] - $whdAiF0) + ([int]$script:WHDCounts['skipped'] - $whdAiS0)
-    if ($script:WHDExecute -and $whdAiBad -gt 0) { Write-WHDLog ("AI DEBLOAT - batch finished ({0} item(s)), but {1} step(s) FAILED or were blocked - see the lines above." -f $whdAiTodo.Count, $whdAiBad) 'WARN' }
-    elseif ($script:WHDExecute) { Write-WHDLog ("AI DEBLOAT - batch finished ({0} item(s))." -f $whdAiTodo.Count) 'OK' }
-    else                    { Write-WHDLog ("AI DEBLOAT - dry-run only: {0} item(s) previewed, nothing was changed." -f $whdAiTodo.Count) 'DRY' }
+    } finally { $script:WHDConfirm = $prevC }
+    Write-WHDLog ("AI DEBLOAT - batch finished ({0} step(s))." -f $todo.Count) 'OK'
 }
 
 function Show-WHDAiMenu {
@@ -306,14 +290,12 @@ function Show-WHDAiMenu {
         $rm = if ($m.CanRemove) { 'remove' } else { ' --   ' }
         $color = switch ($m.Risk) { 'reversible' {'Green'} 'caution' {'Yellow'} 'hard' {'Red'} }
         $rec = if (Test-WHDAiRecommended -Module $m) { '*' } else { ' ' }
-        Write-Host ("  {0,2}.{1} " -f $i, $rec) -NoNewline
-        Write-Host ("{0,-32}" -f $m.Name) -NoNewline -ForegroundColor $color
-        Write-Host ("  [{0}]  {1}  {2}" -f $state, $fo, $rm)
+        Write-WHDParts @(("  {0,2}.{1} " -f $i, $rec), @(("{0,-32}" -f $m.Name), $color), ("  [{0}]  {1}  {2}" -f $state, $fo, $rm))
     }
     Write-Host '  ----------------------------------------------------------------'
-    Write-Host '   * = recommended (green = reversible, and the item has an action)'
+    Write-Host '   * = recommended (green = reversible)'
     Write-Host '   One item   : its number, then f or r when asked (same meaning as below)'
-    Write-Host '   Several    : numbers + action, e.g.  1,3,5 r    2-6 f    * r    *,7 r     (one y/N for the whole list)'
+    Write-Host '   Several    : numbers + action, e.g.  1,3,5 r    2-6 f    * r    *,7 r'
     Write-Host '                r = remove the app AND set its off-switch (an item that cannot be removed is turned OFF)'
     Write-Host '                f = feature-off only (the app stays)'
     Write-Host '   Policy switches show on / partly / OFF(set). Documented for Pro+, best-effort on Home.' -ForegroundColor DarkGray

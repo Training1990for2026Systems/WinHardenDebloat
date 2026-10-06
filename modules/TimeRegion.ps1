@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  modules\TimeRegion.ps1   (Classic 1.4, 2026-09-30)
+ WHD Next  -  modules\TimeRegion.ps1   (Classic 1.4, 2026-09-30)
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -66,7 +66,7 @@ function _WHDPickFromZones {
 function Invoke-WHDPickTimeZone {
     Write-WHDLog 'TIME ZONE: pick by hand' 'ACT'
     $cur = Get-WHDTimeSnapshot
-    Write-Host ("  Now: {0}  ({1})" -f $cur.ZoneId, $cur.Local.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture))
+    Write-Host ("  Now: {0}  ({1:yyyy-MM-dd HH:mm})" -f $cur.ZoneId, $cur.Local)
     Write-Host ''
     $all = @(Get-TimeZone -ListAvailable)
     $short = @(foreach ($s in $script:WHDTzShort) {
@@ -84,8 +84,7 @@ function Invoke-WHDPickTimeZone {
     elseif ($a -match '^[Ss]$') {
         $q = (Read-Host '  Search text (e.g. Tokyo, London, Hawaii)').Trim()
         if (-not $q) { return }
-        $qe = [System.Management.Automation.WildcardPattern]::Escape($q)   # [ ] * ? in the search text are plain characters
-        $hits = @($all | Where-Object { $_.Id -like "*$qe*" -or $_.DisplayName -like "*$qe*" -or $_.StandardName -like "*$qe*" } |
+        $hits = @($all | Where-Object { $_.Id -like "*$q*" -or $_.DisplayName -like "*$q*" -or $_.StandardName -like "*$q*" } |
                   ForEach-Object { [pscustomobject]@{ Id = $_.Id; Label = $_.DisplayName } })
         $pick = _WHDPickFromZones -Zones $hits
     }
@@ -100,7 +99,7 @@ function Invoke-WHDPickTimeZone {
 function Invoke-WHDSetDateTimeManual {
     Write-WHDLog 'DATE / TIME: set by hand' 'ACT'
     $cur = Get-WHDTimeSnapshot
-    Write-Host ("  Now: {0}  ({1})" -f $cur.Local.ToString('yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture), $cur.ZoneId)
+    Write-Host ("  Now: {0:yyyy-MM-dd HH:mm:ss}  ({1})" -f $cur.Local, $cur.ZoneId)
     Write-Host '  Type the correct LOCAL date and time for this time zone.'
     $txt = (Read-Host '  New date/time as yyyy-MM-dd HH:mm (Enter = cancel)').Trim()
     if (-not $txt) { return }
@@ -125,11 +124,11 @@ function Set-WHDDateTimeManual {
         'Automatic time sync stays on: if the clock is set further from the real time than the correction Windows allows (1 hour after WHD''s time-sync option, Firewall T; otherwise the Windows default of 15 hours), sync will NOT move it back and the time you type stays - make sure it is right.'
     }
     Write-WHDRisk 'caution' ("Sets the PC clock. {0} To return to network time: Firewall S shows the source; 'w32tm /resync' or Settings > Date & time > Sync now." -f $note)
-    if (-not (Confirm-WHDProceed ("set the clock to {0}" -f $dt.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    if (-not (Confirm-WHDProceed ("set the clock to {0:yyyy-MM-dd HH:mm}" -f $dt))) { Write-WHDLog 'skipped.' 'WARN'; return }
     $sdNew = $dt; $sdOld = $cur.Local
     $jr = @{ Kind = 'action'; OldTime = $sdOld.ToString('yyyy-MM-dd HH:mm:ss'); NewTime = $sdNew.ToString('yyyy-MM-dd HH:mm:ss')
              Hint = 'the clock keeps running - set it again by hand, or Settings > Date & time > Sync now' }
-    Invoke-WHDChange -Description ("set date/time {0} -> {1}" -f $sdOld.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture), $sdNew.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)) -Force -Journal $jr -Action {
+    Invoke-WHDChange -Description ("set date/time {0:yyyy-MM-dd HH:mm} -> {1:yyyy-MM-dd HH:mm}" -f $sdOld, $sdNew) -Force -Journal $jr -Action {
         Set-Date -Date $sdNew -EA Stop | Out-Null
     } | Out-Null
     if ($script:WHDExecute) { Show-WHDTimeRegionStatus }

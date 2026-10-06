@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  WHD-GUI.ps1   (PowerShell + WPF front end)
+ WHD Next  -  WHD-GUI.ps1   (Phase 3 - PowerShell + WPF front end)
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -12,19 +12,15 @@
  Restore point is made before the first change. Everything is logged, both to
  the on-screen pane and to logs\.
 
-   powershell -ExecutionPolicy Bypass -File .\WHD-GUI.ps1
+   WHD Next: start it through the launcher, which picks the engine:
+   powershell -ExecutionPolicy Bypass -File .\Start-WHD.ps1 -Gui
+   FULL mode = PowerShell 7.6+.  SAFE mode (Windows PowerShell 5.1) = read-only screens,
+   Verify, Undo, re-apply and re-remove; new changes stay previews.
 ================================================================================
 #>
 [CmdletBinding()]
-param([switch]$NoElevate)
+param([switch]$NoElevate, [switch]$SafeMode)
 $ErrorActionPreference = 'Stop'
-
-# WHD Classic is written for Windows PowerShell 5.1 (powershell.exe), not PowerShell 7 (pwsh).
-if ($PSVersionTable.PSVersion.Major -ne 5) {
-    Write-Host 'WHD Classic needs Windows PowerShell 5.1. Start it with powershell.exe (not pwsh):' -ForegroundColor Red
-    Write-Host '  powershell -ExecutionPolicy Bypass -File .\WHD-GUI.ps1' -ForegroundColor Red
-    exit 1
-}
 
 function _isAdmin {
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -34,6 +30,7 @@ if (-not $NoElevate -and -not (_isAdmin)) {
     $psExe = (Get-Process -Id $PID).Path
     $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
     $argList = @('-ExecutionPolicy','Bypass','-NoProfile','-File', "`"$($MyInvocation.MyCommand.Path)`"", '-NoElevate')
+    if ($SafeMode) { $argList += '-SafeMode' }
     try { Start-Process -FilePath $psExe -Verb RunAs -ArgumentList $argList -WorkingDirectory $scriptDir; return }
     catch { Write-Host "Elevation declined: $($_.Exception.Message)" -ForegroundColor Red; return }
 }
@@ -43,6 +40,10 @@ $Root = $PSScriptRoot
 $script:WHDRoot    = $Root
 $script:WHDExecute = $false
 $script:WHDGuiMode = $true
+# ---- WHD Next: FULL mode needs PowerShell 7.6+; anything else is SAFE mode (see modules\Common.ps1) ----
+$whdEngineOk = ($PSVersionTable.PSEdition -eq 'Core' -and $PSVersionTable.PSVersion -ge [version]'7.6.0')
+$script:WHDSafeMode    = ([bool]$SafeMode -or -not $whdEngineOk)
+$script:WHDSafeExecute = $false
 . (Join-Path $Root 'modules\Common.ps1')
 . (Join-Path $Root 'modules\Debloat-AI.ps1')
 . (Join-Path $Root 'modules\Debloat-General.ps1')
@@ -55,14 +56,15 @@ $script:WHDGuiMode = $true
 . (Join-Path $Root 'modules\Devices.ps1')
 . (Join-Path $Root 'modules\TimeRegion.ps1')
 . (Join-Path $Root 'modules\Profiles.ps1')
-try { Start-WHDTranscript } catch { $startErr = $_; Write-WHDProtectedFolderWarning; throw $startErr }   # if the WHD folder cannot be written, say why first
+. (Join-Path $Root 'modules\Theme.ps1')
+Start-WHDTranscript
 
 Add-Type -AssemblyName PresentationFramework
 
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="WinHardenDebloat" Height="740" Width="1060" WindowStartupLocation="CenterScreen"
+        Title="WHD Next" Height="740" Width="1060" WindowStartupLocation="CenterScreen"
         Background="#0F1218">
   <Window.Resources>
     <Style TargetType="Button"><Setter Property="Margin" Value="4"/><Setter Property="Padding" Value="8,4"/></Style>
@@ -78,7 +80,7 @@ $xaml = @'
 
     <!-- top bar -->
     <DockPanel Grid.Row="0" LastChildFill="False" Margin="0,0,0,8">
-      <TextBlock Text="WinHardenDebloat" Foreground="#E8EBF2" FontSize="20" FontWeight="Bold" VerticalAlignment="Center"/>
+      <TextBlock Text="WHD Next" Foreground="#E8EBF2" FontSize="20" FontWeight="Bold" VerticalAlignment="Center"/>
       <TextBlock x:Name="ElevTxt" Margin="14,0,0,0" VerticalAlignment="Center" Foreground="#9AA6BF"/>
       <CheckBox x:Name="ModeChk" DockPanel.Dock="Right" Content="EXECUTE (apply changes)" Foreground="#E8735B"
                 FontWeight="Bold" VerticalAlignment="Center" Margin="10,0,0,0"/>
@@ -116,9 +118,9 @@ $xaml = @'
                 <Button x:Name="FwRevertBtn" DockPanel.Dock="Left" Content="Revert"/>
               </DockPanel>
               <TextBlock Text="Blacklist" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
-              <Button x:Name="FwBlockIpBtn" Content="Block IP list (your profiles\blacklist-ip.txt)"/>
+              <Button x:Name="FwBlockIpBtn" Content="Block IP list: apply / bring in line" ToolTip="The IP block list follows the firewall: block rules go in where something is wide open (outbound default Allow, any-program web rules, a program allow, inbound allow rules) and come out where nothing is. Uses profiles\blacklist-ip.txt."/>
               <Button x:Name="FwHostsBtn"   Content="Hosts sinkhole"/>
-              <Button x:Name="FwClearBlBtn" Content="Clear blacklist"/>
+              <Button x:Name="FwClearBlBtn" Content="Clear blacklist" ToolTip="Removes the IP block rules and the hosts sinkhole. The IP block list then stops following the firewall until you apply it again."/>
               <Button x:Name="FwRefreshBlBtn" Content="Refresh blocklist (incoming)"/>
               <TextBlock Text="Blocked connections" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
               <Button x:Name="FwLogOnBtn"    Content="Firewall log ON (dropped + allowed, max size)"/>
@@ -132,7 +134,7 @@ $xaml = @'
               <ComboBox x:Name="FwTzCombo" Margin="2" DisplayMemberPath="Label" ToolTip="* = common US zones; the rest is every Windows time zone"/>
               <Button x:Name="FwTzSetBtn" Content="Set time zone" ToolTip="Journaled; Verify / the update guard put it back if something changes it"/>
               <TextBox x:Name="FwDateBox" Margin="2" ToolTip="Local date and time as yyyy-MM-dd HH:mm"/>
-              <Button x:Name="FwDateSetBtn" Content="Set date/time" ToolTip="Automatic time sync stays on"/>
+              <Button x:Name="FwDateSetBtn" Content="Set date/time" ToolTip="Automatic sync stays on (1 h jump limit)"/>
               <TextBlock Text="Policy files" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
               <Button x:Name="FwApplyBtn"  Content="Apply baseline profile"/>
               <Button x:Name="FwExportBtn" Content="Export (json + .wfw)"/>
@@ -183,7 +185,7 @@ $xaml = @'
                     <Button   x:Name="FwBlkAllowBtn" Content="Allow selected rows (that program, that port, outbound)"/>
                   </DockPanel>
                   <TextBlock DockPanel.Dock="Top" Foreground="#9AA6BF" Margin="0,0,0,4" TextWrapping="Wrap"
-                             Text="Needs logging ON. Grouped by program + protocol + port; rows that can be allowed come first (column 'Can allow'). Select one or several rows (Ctrl or Shift + click) - one question for all of them. svchost/System (Windows services), inbound rows and programs that have closed cannot be allowed from here. With the update gate on PROGRAMS an allow works at once; with the gate CLOSED it is saved switched off until the gate is set to PROGRAMS or OPEN."/>
+                             Text="Needs logging ON. Grouped by program + protocol + port; rows that can be allowed come first (column 'Can allow'). Select one or several rows. Windows services / System, inbound rows and programs that have closed cannot be allowed from here. With the gate on PROGRAMS an allow is live at once."/>
                   <DataGrid x:Name="FwBlkGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
                             SelectionMode="Extended" Background="#0B0E13" Foreground="#C9D3E5" GridLinesVisibility="Horizontal"
                             HeadersVisibility="Column" FontSize="11" RowHeight="18" RowBackground="#0B0E13"
@@ -198,37 +200,6 @@ $xaml = @'
                       <DataGridTextColumn Header="Can allow" Binding="{Binding StateText}"  Width="150"/>
                       <DataGridTextColumn Header="Program"   Binding="{Binding Program}"    Width="*"/>
                       <DataGridTextColumn Header="Addresses" Binding="{Binding Addresses}"  Width="190"/>
-                    </DataGrid.Columns>
-                  </DataGrid>
-                </DockPanel>
-              </TabItem>
-              <TabItem Header="Rules from others">
-                <DockPanel Margin="2">
-                  <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4" LastChildFill="False">
-                    <Button   x:Name="FwForLoadBtn"   Content="Load" ToolTip="Reads the list again (with a few hundred rules this takes a while; progress is shown). Changes nothing."/>
-                    <Button   x:Name="FwForOffBtn"    Content="Switch OFF" ToolTip="The selected rules stay in Windows, switched off. The Undo tab switches them on again; Verify and the update guard report it when something switches one back on."/>
-                    <Button   x:Name="FwForRemoveBtn" Content="Remove" ToolTip="Deletes the selected rules. Windows or the program that made a rule may write it again - WHD then reports it again."/>
-                    <Button   x:Name="FwForKeepBtn"   Content="Keep" ToolTip="The selected rules stay ON and are not reported again. A kept outbound rule stays on through the update gate."/>
-                    <TextBlock Text="port:" Foreground="#9AA6BF" VerticalAlignment="Center" Margin="8,0,4,0"/>
-                    <TextBox  x:Name="FwForPort" Width="50" Text="443" VerticalContentAlignment="Center"/>
-                    <Button   x:Name="FwForPortBtn"   Content="One port only" ToolTip="For an outbound rule that names one program file: makes a WHD allow for that program on this TCP port and switches the wide rule off"/>
-                    <Button   x:Name="FwForForgetBtn" Content="Forget kept rules" ToolTip="Forgets the rules you kept with Keep. No firewall rule is changed; those rules are listed again. Inbound rules that were counted as kept when the watch started stay counted."/>
-                    <Button   x:Name="FwForWatchBtn"  Content="Watch inbound rules..." ToolTip="Inbound rules raise an alert only after you start this. WHD asks whether the inbound rules present now count as kept or are listed too."/>
-                  </DockPanel>
-                  <TextBlock DockPanel.Dock="Top" x:Name="FwForInfo" Foreground="#9AA6BF" Margin="0,0,0,4" TextWrapping="Wrap"
-                             Text="Allow rules that are ON and were not made by WHD. Press Load. (Each button has a tooltip.)"/>
-                  <DataGrid x:Name="FwForGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
-                            SelectionMode="Extended" Background="#0B0E13" Foreground="#C9D3E5" GridLinesVisibility="Horizontal"
-                            HeadersVisibility="Column" FontSize="11" RowHeight="18" RowBackground="#0B0E13"
-                            AlternatingRowBackground="#11151C" BorderBrush="#22303C">
-                    <DataGrid.Columns>
-                      <DataGridTextColumn Header="Dir"       Binding="{Binding Direction}"   Width="66"/>
-                      <DataGridTextColumn Header="Gets out"  Binding="{Binding Leak}"        Width="60"/>
-                      <DataGridTextColumn Header="Proto"     Binding="{Binding Protocol}"    Width="50"/>
-                      <DataGridTextColumn Header="LPort"     Binding="{Binding LocalPort}"   Width="54"/>
-                      <DataGridTextColumn Header="RPort"     Binding="{Binding RemotePort}"  Width="54"/>
-                      <DataGridTextColumn Header="Rule"      Binding="{Binding DisplayName}" Width="190"/>
-                      <DataGridTextColumn Header="Program / app" Binding="{Binding Who}"     Width="*"/>
                     </DataGrid.Columns>
                   </DataGrid>
                 </DockPanel>
@@ -249,8 +220,8 @@ $xaml = @'
               <Button x:Name="UpdStatusBtn" Content="Updates status (read-only)" FontWeight="Bold"/>
               <TextBlock Text="Update gate" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
               <Button x:Name="UpdGateCloseBtn" Content="CLOSE gate (Defender + DoH only)" ToolTip="Outbound default-deny; only Microsoft Defender and DNS-over-HTTPS may use HTTP/HTTPS. Windows Update, Store, drivers, app updaters, browsers, the programs you allowed and other apps are offline."/>
-              <Button x:Name="UpdGateProgBtn"  Content="PROGRAMS gate (+ programs you allowed)" ToolTip="Outbound default-deny; only Microsoft Defender, DNS-over-HTTPS and the programs you allowed (Firewall tab, Blocked connections) may go out. Windows Update, Store, drivers and app updaters stay offline."/>
-              <Button x:Name="UpdGateOpenBtn"  Content="OPEN gate (let updates in)" ToolTip="Puts back every rule the gate switched off; stays open until you change it."/>
+              <Button x:Name="UpdGateProgBtn"  Content="PROGRAMS gate (+ programs you allowed)" ToolTip="Outbound default-deny; only Microsoft Defender, DNS-over-HTTPS and the programs you allowed (Firewall tab, blocked connections) may go out. Windows Update and the Store stay off. Any program that must stay online has to be on your list."/>
+              <Button x:Name="UpdGateOpenBtn"  Content="OPEN gate (let updates in)" ToolTip="Puts back every rule the gate switched off; any program may use the web; stays open until you change it."/>
               <Button x:Name="UpdDefenderBtn"  Content="Defender: update definitions now"/>
               <TextBlock Text="Policies (Home: tried + verified)" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
               <Button x:Name="UpdWuBtn"      Content="Windows Update: no auto updates"/>
@@ -373,36 +344,40 @@ $xaml = @'
       <TabItem Header="AI">
         <DockPanel Margin="6">
           <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal">
-            <Button x:Name="AiSelRecBtn"  Content="Select recommended (*)" ToolTip="Selects every item marked * (reversible, and it has an action). Notepad, Paint, Photos and the OS AI platform are never in it."/>
-            <Button x:Name="AiFeatureBtn" Content="Feature-off selected" ToolTip="Sets the off-switch of each selected item; the apps stay. One question for the whole selection."/>
+            <Button x:Name="AiSelRecBtn"  Content="Select recommended (*)" ToolTip="Selects every item marked * (reversible). Notepad, Paint, Photos and the OS AI platform are never in it."/>
+            <Button x:Name="AiFeatureBtn" Content="Feature-off selected"/>
             <Button x:Name="AiRemoveBtn"  Content="Remove selected (+ off-switch)" ToolTip="Removes each selected app AND sets its off-switch; an item that cannot be removed is turned OFF. One question for the whole selection."/>
             <Button x:Name="AiStoreBtn"   Content="Store suppression"/>
           </StackPanel>
-          <TextBlock DockPanel.Dock="Top" Foreground="#9AA6BF" Margin="2,2,2,6" TextWrapping="Wrap"
-                     Text="Select one or more AI surfaces (Ctrl or Shift + click), then choose an action. * = recommended. Policy-only entries show their current state in brackets. One question for the whole selection."/>
+          <TextBlock DockPanel.Dock="Top" Foreground="#9AA6BF" Margin="2,2,2,6"
+                     Text="Select one or more AI surfaces (Ctrl or Shift + click), then choose an action. * = recommended. One question for the whole selection."/>
           <ListBox x:Name="AiList" SelectionMode="Extended" Background="#0F1218" Foreground="#E8EBF2"/>
         </DockPanel>
       </TabItem>
 
       <TabItem Header="General">
         <DockPanel Margin="6">
-          <DockPanel DockPanel.Dock="Bottom" Height="170" Margin="0,8,0,0">
-            <TextBlock DockPanel.Dock="Top" Text="More privacy settings  (select one or more, then Apply - state shown in brackets)" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,0,2,4"/>
-            <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal">
-              <Button x:Name="PrivAllBtn"     Content="Select all"/>
-              <Button x:Name="PrivApplyBtn"   Content="Apply selected privacy settings"/>
-              <Button x:Name="PrivRefreshBtn" Content="Refresh"/>
-            </StackPanel>
-            <ListBox x:Name="PrivList" SelectionMode="Extended" Background="#0F1218" Foreground="#E8EBF2"/>
-          </DockPanel>
           <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal">
             <Button x:Name="GenRemoveBtn"  Content="Remove selected"/>
-            <Button x:Name="GenRecBtn"     Content="Remove recommended (*)" ToolTip="Removes every app marked *. One question for all of them."/>
+            <Button x:Name="GenRecBtn"     Content="Remove recommended (*)"/>
             <Button x:Name="GenPrivBtn"    Content="Privacy hardening"/>
             <Button x:Name="GenDiagBtn"    Content="Disable DiagTrack"/>
+            <Button x:Name="GenPrivDiagBtn" Content="Privacy hardening + DiagTrack" ToolTip="Both together, one question."/>
           </StackPanel>
-          <TextBlock DockPanel.Dock="Top" Foreground="#9AA6BF" Margin="2,2,2,6" TextWrapping="Wrap" Text="Curated non-AI Store apps, plus the non-Microsoft apps found on this PC (not reviewed). Select one or more (Ctrl or Shift + click). * = recommended. One question for the whole selection."/>
+          <TextBlock DockPanel.Dock="Top" Foreground="#9AA6BF" Margin="2,2,2,6" Text="Curated non-AI Store apps, plus apps found on this PC. Select one or more (Ctrl or Shift + click). * = recommended. One question for the whole selection. More privacy settings: see the Privacy tab."/>
           <ListBox x:Name="GenList" SelectionMode="Extended" Background="#0F1218" Foreground="#E8EBF2"/>
+        </DockPanel>
+      </TabItem>
+
+      <TabItem Header="Privacy">
+        <DockPanel Margin="6">
+          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal">
+            <Button x:Name="PrivAllBtn"     Content="Select all"/>
+            <Button x:Name="PrivApplyBtn"   Content="Apply selected privacy settings"/>
+            <Button x:Name="PrivRefreshBtn" Content="Refresh"/>
+          </StackPanel>
+          <TextBlock DockPanel.Dock="Top" Foreground="#9AA6BF" Margin="2,2,2,6" Text="More privacy settings: select one or more (Ctrl or Shift + click), then Apply. The state is shown in brackets. One question for the whole selection."/>
+          <ListBox x:Name="PrivList" SelectionMode="Extended" Background="#0F1218" Foreground="#E8EBF2"/>
         </DockPanel>
       </TabItem>
 
@@ -507,6 +482,48 @@ $xaml = @'
         </StackPanel>
       </TabItem>
 
+      <TabItem Header="Theme">
+        <DockPanel Margin="6">
+          <TextBlock DockPanel.Dock="Top" Foreground="#9AA6BF" Margin="2,2,2,6" TextWrapping="Wrap"
+                     Text="Optional: an old ship, held together by its crew and its AI. Not part of any profile, and Verify does not watch it. Everything here is set for the user WHD Next runs as. In EXECUTE mode each button asks first and notes what was there before; the look needs one click on the theme in Windows' Settings - a message says when."/>
+          <StackPanel DockPanel.Dock="Top">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Everything" Width="230" Foreground="#7CC4FF" FontWeight="Bold" VerticalAlignment="Center" Margin="2,0,0,0"/>
+              <Button x:Name="ThemeAllOnBtn"   Content="Everything on" ToolTip="One question, then: sound files if missing, sound scheme, lock-screen pictures, sounds at sign-in / lock / unlock / sign-out / shut-down, and last the look (with its click in Settings)."/>
+              <Button x:Name="ThemeAllBackBtn" Content="Everything put back" ToolTip="One question, then: those sounds off, the lock-screen picture, the sound scheme and the theme used before (with its click in Settings). Nothing is deleted."/>
+              <Button x:Name="ThemeRefreshBtn" Content="Refresh the state"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Sounds" Width="230" Foreground="#7CC4FF" FontWeight="Bold" VerticalAlignment="Center" Margin="2,0,0,0"/>
+              <Button x:Name="ThemeMakeBtn" Content="Make the sound files" ToolTip="Writes 20 .wav files into C:\ProgramData\WinHardenDebloatNext\theme\sounds. No Windows setting is changed."/>
+              <ComboBox x:Name="ThemeSoundCombo" Width="130" Margin="4" VerticalContentAlignment="Center"/>
+              <Button x:Name="ThemePlayBtn" Content="Play" ToolTip="Plays the chosen sound. Changes nothing."/>
+              <Button x:Name="ThemeSchemeOnBtn"   Content="Use the scheme &quot;WHD Next&quot;" ToolTip="Makes the WHD sounds the Windows sound scheme &quot;WHD Next&quot; for this user."/>
+              <Button x:Name="ThemeSchemeBackBtn" Content="Put back the scheme used before"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Look: pictures, dark mode, accent colour" Width="230" Foreground="#7CC4FF" FontWeight="Bold" VerticalAlignment="Center" Margin="2,0,0,0" TextWrapping="Wrap"/>
+              <Button x:Name="ThemeLookBtn"     Content="Use the look - sky blue" ToolTip="Theme &quot;WHD Next&quot;. Windows lists it in Settings &gt; Personalization &gt; Themes and waits for your click there."/>
+              <Button x:Name="ThemeLookRedBtn"  Content="Use the look - hot rod red" ToolTip="Theme &quot;WHD Next (red)&quot;: the same look with the other accent colour. A click on it in Settings changes the colour too; WHD never changes it by itself."/>
+              <Button x:Name="ThemeLookBackBtn" Content="Put back the theme used before"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Lock screen and sign-in screen" Width="230" Foreground="#7CC4FF" FontWeight="Bold" VerticalAlignment="Center" Margin="2,0,0,0" TextWrapping="Wrap"/>
+              <Button x:Name="ThemeLockOnBtn"   Content="Use the WHD pictures there" ToolTip="The screen with the clock at power-on, restart and lock, and the picture behind the sign-in box: a new WHD picture at every sign-in and unlock."/>
+              <Button x:Name="ThemeLockBackBtn" Content="Put back the picture used before"/>
+            </StackPanel>
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Text="Sounds at sign-in, lock, unlock, sign-out and shut-down" Width="230" Foreground="#7CC4FF" FontWeight="Bold" VerticalAlignment="Center" Margin="2,0,0,0" TextWrapping="Wrap"/>
+              <Button x:Name="ThemeEvOnBtn"  Content="Switch them on" ToolTip="Sign-out and shut-down may not always play: Windows is closing programs at that moment."/>
+              <Button x:Name="ThemeEvOffBtn" Content="Switch them off"/>
+            </StackPanel>
+            <TextBlock Text="State now" Foreground="#9AA6BF" Margin="2,6,2,2"/>
+          </StackPanel>
+          <TextBox x:Name="ThemeStatus" IsReadOnly="True" FontFamily="Consolas" FontSize="12" Background="#0B0E13" Foreground="#C9D3E5"
+                   BorderBrush="#22303C" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto"/>
+        </DockPanel>
+      </TabItem>
+
       <TabItem Header="Inventory / Undo">
         <DockPanel Margin="6">
           <StackPanel DockPanel.Dock="Top">
@@ -522,7 +539,7 @@ $xaml = @'
             </StackPanel>
             <TextBlock Text="Undo center" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,10,2,2"/>
             <TextBlock Foreground="#9AA6BF" Margin="2,0,2,4" TextWrapping="Wrap"
-                       Text="auto = put back automatically (exact previous value)   manual = see hint in the log   Older sessions (from before the change journal) only have .reg / firewall / hosts backups."/>
+                       Text="auto = put back automatically (exact previous value)   manual = see hint in the log   Sessions from before the change journal existed only have .reg / firewall / hosts backups."/>
             <DockPanel Margin="0,2,0,4">
               <TextBlock DockPanel.Dock="Left" Text="Session:" Foreground="#9AA6BF" VerticalAlignment="Center" Margin="2,0,6,0"/>
               <Button   DockPanel.Dock="Right" x:Name="UndoRefreshBtn" Content="Refresh"/>
@@ -569,16 +586,10 @@ $xaml = @'
 
 $reader = New-Object System.Xml.XmlNodeReader ([xml]$xaml)
 $win = [Windows.Markup.XamlReader]::Load($reader)
-# Small or scaled screens (1366x768, full HD at 150 %): never larger than the work area.
-try {
-    $whdWorkArea = [System.Windows.SystemParameters]::WorkArea
-    if ($win.Height -gt $whdWorkArea.Height) { $win.Height = $whdWorkArea.Height }
-    if ($win.Width  -gt $whdWorkArea.Width)  { $win.Width  = $whdWorkArea.Width }
-} catch { }
 
 # ---- grab controls ----------------------------------------------------------
 foreach ($n in 'ElevTxt','ModeChk','RpBtn','GuardRefreshBtn','ReRemoveBtn','ReApplyBtn','AiList','AiFeatureBtn','AiRemoveBtn','AiStoreBtn',
-                'GenList','GenRemoveBtn','GenRecBtn','GenPrivBtn','GenDiagBtn','AiSelRecBtn','PrivAllBtn','BusyBar',
+                'GenList','GenRemoveBtn','GenRecBtn','GenPrivBtn','GenDiagBtn','GenPrivDiagBtn','AiSelRecBtn','PrivAllBtn','BusyBar',
                 'PermPolicyLockBtn','PermLockBtn','PermBalBtn','PermOpenBtn','SecSvcFileBtn','SecSvcSmbBtn','SecSvcDialBtn','SecSvcIpsecBtn','SecSvcProxyBtn','SecSvcFaxBtn','SecSvcAllBtn','SecSvcProxySvcBtn','DevBtBtn','DevWfdBtn','DevWanBtn','DevStatusBtn',
                 'W32List','W32UninstBtn','W32RefreshBtn','W32Name','W32FindBtn','W32RemAllBtn','W32BlockBtn',
                 'CsAnalyzeBtn','CsCleanBtn','CsResetBtn',
@@ -589,7 +600,6 @@ foreach ($n in 'ElevTxt','ModeChk','RpBtn','GuardRefreshBtn','ReRemoveBtn','ReAp
                 'FwStatus','FwRulesBtn','FwCustomChk','FwFilter','FwGrid',
                 'FwRefreshBlBtn','FwLogOnBtn','FwLogOffBtn','FwAppClearBtn','FwTimeCfBtn','FwTimeWinBtn','FwTimeStatBtn','FwTzCombo','FwTzSetBtn','FwDateBox','FwDateSetBtn',
                 'FwBlkHours','FwBlkInChk','FwBlkLoadBtn','FwBlkAllowBtn','FwBlkGrid',
-                'Tabs','FwSubTabs','FwForLoadBtn','FwForOffBtn','FwForRemoveBtn','FwForKeepBtn','FwForPort','FwForPortBtn','FwForForgetBtn','FwForWatchBtn','FwForInfo','FwForGrid',
                 'SecReportBtn','SecPuaBtn','SecNetAuditBtn','SecNetBlockBtn','SecCfaAuditBtn','SecCfaBlockBtn',
                 'SecAsrStdBtn','SecAsrScrBtn','SecAsrOffBtn','SecAsrPromoteBtn','SecLlmnrBtn','SecNetbiosBtn','SecWpadBtn',
                 'SecRaBtn','SecProtoAllBtn','SecUacBtn','SecPwBtn','SecGuardInstBtn','SecGuardRunBtn','SecGuardOpenBtn','SecGuardDelBtn','SecStatus','SecAsrLoadBtn','SecAsrGrid','SecEvLoadBtn','SecEvGrid',
@@ -597,7 +607,9 @@ foreach ($n in 'ElevTxt','ModeChk','RpBtn','GuardRefreshBtn','ReRemoveBtn','ReAp
                 'PrivApplyBtn','PrivRefreshBtn','PrivList','UsageLoadBtn','UsageGrid',
                 'PerAppCap','PerAppGlobal','PerAppAllowBtn','PerAppDenyBtn','PerAppGrid',
                 'InvDiffBtn','VerAllBtn','UndoArchiveBtn','UndoSession','UndoRefreshBtn','UndoGrid',
-                'UndoSelBtn','UndoAllBtn','UndoFwBtn','UndoHostsBtn','UndoRegBtn','VerSessBtn') {
+                'UndoSelBtn','UndoAllBtn','UndoFwBtn','UndoHostsBtn','UndoRegBtn','VerSessBtn',
+                'ThemeAllOnBtn','ThemeAllBackBtn','ThemeRefreshBtn','ThemeMakeBtn','ThemeSoundCombo','ThemePlayBtn','ThemeSchemeOnBtn','ThemeSchemeBackBtn',
+                'ThemeLookBtn','ThemeLookRedBtn','ThemeLookBackBtn','ThemeLockOnBtn','ThemeLockBackBtn','ThemeEvOnBtn','ThemeEvOffBtn','ThemeStatus') {
     Set-Variable -Name $n -Value $win.FindName($n) -Scope Script
 }
 
@@ -611,32 +623,20 @@ $script:WHDLogSink = {
 # ---- confirm strategy -> a Yes/No dialog ------------------------------------
 $script:WHDConfirm = {
     param($msg)
-    ([System.Windows.MessageBox]::Show($win, ($msg + "`n`nProceed?"), 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
+    ([System.Windows.MessageBox]::Show(($msg + "`n`nProceed?"), 'WHD Next - confirm', 'YesNo', 'Warning')) -eq 'Yes'
 }
 
 function Set-WHDStatus { param($t) $StatusTxt.Text = $t }
-# ---- progress bar beside the status line (slow loops, e.g. the firewall wipe) -
-# The engine calls this through Write-WHDProgressStep. It never throws and does nothing when the bar is not
-# there or the call does not come from the window's own thread; the bar hides itself at the last step, and
-# every action hides it again when it ends (Reset-WHDBusyBar), also after an error.
+# WHD Next (user request 2026-10-02): slow loops (the firewall wipe) show a progress bar next to the status
+# line, so the window is seen working. The engine calls this through Write-WHDProgressStep.
 $script:WHDProgressHook = {
     param($Activity, $Done, $Total)
-    try {
-        if (-not $BusyBar -or -not $BusyBar.Dispatcher.CheckAccess()) { return }
-        $BusyBar.Visibility = [System.Windows.Visibility]::Visible
-        $BusyBar.Value = Get-GuiProgressPercent -Done $Done -Total $Total
-        $StatusTxt.Text = ('{0}: {1} of {2}' -f $Activity, $Done, $Total)
-        if ([int]$Done -ge [int]$Total) { $BusyBar.Visibility = [System.Windows.Visibility]::Collapsed; $BusyBar.Value = 0 }
-        $BusyBar.Dispatcher.Invoke([action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
-    } catch { }
+    $BusyBar.Visibility = 'Visible'
+    $BusyBar.Value = [math]::Min(100, [int](100 * $Done / [math]::Max(1, $Total)))
+    $StatusTxt.Text = ('{0}: {1} of {2}' -f $Activity, $Done, $Total)
+    if ($Done -ge $Total) { $BusyBar.Visibility = 'Collapsed'; $BusyBar.Value = 0 }
+    $BusyBar.Dispatcher.Invoke([action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
 }
-function Get-GuiProgressPercent {
-    param($Done, $Total)
-    $whdPcD = 0; $whdPcT = 0
-    try { $whdPcD = [int]$Done; $whdPcT = [int]$Total } catch { return 0 }
-    return [int][math]::Max(0, [math]::Min(100, [math]::Floor(100 * $whdPcD / [math]::Max(1, $whdPcT))))
-}
-function Reset-WHDBusyBar { try { if ($BusyBar) { $BusyBar.Visibility = [System.Windows.Visibility]::Collapsed; $BusyBar.Value = 0 } } catch { } }
 
 # run an action with a header, busy-guard and error catch
 function Invoke-GuiAction {
@@ -644,119 +644,25 @@ function Invoke-GuiAction {
     Set-WHDStatus ("Working: " + $Title + " ...")
     Write-WHDLog ("=== " + $Title + " (" + $(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'}) + ") ===") 'ACT'
     try { & $Body } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
-    Reset-WHDBusyBar
     Set-WHDStatus ("Ready. " + $Title + " finished.")
-}
-
-# ---- several items at once: ONE question, with the plan IN the question -------
-# The engine's batch functions (Invoke-WHDAiBatch, Invoke-WHDGeneralBatch, Add-WHDProgramAllows) write their
-# plan to the log and then ask ONCE through Confirm-WHDProceed. The log box cannot be scrolled while a dialog
-# is open, so for these actions the dialog itself lists what will be done: for the one action the confirm
-# strategy is a dialog that shows the plan above the engine's question. Nothing is asked twice - this dialog IS
-# the batch's own single question (after it the batch runs its items without asking), in DRY-RUN nothing is
-# asked, and when the batch finds nothing to do no dialog appears at all.
-# $script:WHDGuiPlanYes tells the caller afterwards whether the question was answered Yes (= something may
-# have changed); after a preview or a No the lists are left as they are, so the selection is kept.
-$script:WHDGuiPlan = ''
-$script:WHDGuiPlanYes = $false
-function Invoke-GuiPlanAction {
-    param([string]$Title, [string]$PlanText, [scriptblock]$Body)
-    $whdGpPrev = $script:WHDConfirm
-    $script:WHDGuiPlan = "$PlanText"
-    $script:WHDGuiPlanYes = $false
-    $script:WHDConfirm = {
-        param($msg)
-        $whdGpYes = ([System.Windows.MessageBox]::Show($win, ($script:WHDGuiPlan + "`n`n" + $msg + "`n`nProceed?"), 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
-        if ($whdGpYes) { $script:WHDGuiPlanYes = $true }
-        return $whdGpYes
-    }
-    try { Invoke-GuiAction $Title $Body }
-    finally { $script:WHDConfirm = $whdGpPrev; $script:WHDGuiPlan = '' }
-}
-# The text of such a plan: a head line, one line per item (at most $Max; the rest follows in one run-on line, so every item is named), closing lines.
-# -RestInLog: for lists that can hold hundreds of long lines - the rest is only counted (the engine writes every item to the log).
-function Get-GuiPlanText {
-    param([string]$Head, [string[]]$Lines, [string[]]$Foot = @(), [int]$Max = 16, [switch]$RestInLog, [int]$Total = 0)
-    $whdPtAll = @($Lines | Where-Object { $_ })
-    $whdPtOut = New-Object System.Collections.Generic.List[string]
-    $whdPtOut.Add($Head); $whdPtOut.Add('')
-    foreach ($whdPtL in @($whdPtAll | Select-Object -First $Max)) { $whdPtOut.Add('   ' + $whdPtL) }
-    $whdPtCount = $whdPtAll.Count; if ($Total -gt $whdPtCount) { $whdPtCount = $Total }      # -Total: the caller passed only the first lines
-    if ($whdPtCount -gt $Max -and $RestInLog) { $whdPtOut.Add(('   ... and {0} more (every one is written to the log below)' -f ($whdPtCount - $Max))) }
-    elseif ($whdPtAll.Count -gt $Max) { $whdPtOut.Add(('   and {0} more:  {1}' -f ($whdPtAll.Count - $Max), ((@($whdPtAll | Select-Object -Skip $Max) | ForEach-Object { "$_".Trim() }) -join ';  '))) }
-    foreach ($whdPtF in @($Foot | Where-Object { $_ })) { $whdPtOut.Add(''); $whdPtOut.Add($whdPtF) }
-    return ($whdPtOut.ToArray() -join "`n")
-}
-# AI items: what the batch will do with each one (the same rule the engine uses: Get-WHDAiBatchPlan).
-function Get-GuiAiPlanText {
-    param([object[]]$Modules, [ValidateSet('remove','off')][string]$Action)
-    $whdApLines = @(foreach ($whdApM in @($Modules | Where-Object { $_ })) {
-        $whdApTxt = switch (Get-WHDAiBatchPlan -Module $whdApM -Action $Action) {
-            'remove+off' { 'remove the app + set its off-switch' }
-            'remove'     { 'remove the app (it has no off-switch)' }
-            'off'        { if ($Action -eq 'remove') { 'turn OFF (cannot be removed)' } else { 'turn OFF' } }
-            default      { if ($Action -eq 'remove') { 'skip - no action is offered for this item' } else { 'skip - this item has no off-switch' } }
-        }
-        ('{0}  ->  {1}' -f $whdApM.Name, $whdApTxt)
-    })
-    if ($Action -eq 'remove') {
-        return (Get-GuiPlanText -Head 'AI items - remove + set the off-switch (an item that cannot be removed is turned OFF):' -Lines $whdApLines -Foot @(
-            'Apps are removed for ALL users of the PC and their local data is deleted (undo = reinstall from the Store). Off-switches are registry values (the Undo center puts the old values back).',
-            'The note of each item is in the log.'))
-    }
-    return (Get-GuiPlanText -Head 'AI items - feature-off (the apps stay):' -Lines $whdApLines -Foot @(
-        'Off-switches are registry values (the Undo center puts the old values back).', 'The note of each item is in the log.'))
-}
-# General apps: the names, as the list shows them.
-function Get-GuiGeneralPlanText {
-    param([object[]]$Entries)
-    $whdGpLines = @(foreach ($whdGpE in @($Entries | Where-Object { $_ })) {
-        $whdGpName = "$($whdGpE.Name)"; if ($whdGpE.Found) { $whdGpName = '[found on this PC] ' + $whdGpName }
-        if ("$($whdGpE.Risk)" -ne 'reversible') { $whdGpName += '   (caution)' }
-        $whdGpName
-    })
-    return (Get-GuiPlanText -Head 'Remove these Store apps:' -Lines $whdGpLines -Foot @(
-        "Store apps are removed for ALL users of the PC and the app's local data is deleted; undo = reinstall from the Store.",
-        'The note of each app is in the log.'))
-}
-# Blocked connections: the lines that will get an allow rule.
-function Get-GuiAllowPlanText {
-    param([object[]]$Items, [string]$GateMode = '')
-    $whdAlLines = @(foreach ($whdAlI in @($Items | Where-Object { $_ })) { ('{0}   {1} {2}   {3}' -f $whdAlI.Exe, $whdAlI.Protocol, $whdAlI.RemotePort, $whdAlI.Program) })
-    $whdAlFoot = @('Each line allows only that program, only that protocol + remote port, to any destination, outbound. Removable in the Undo center or with "Remove all program allows".')
-    if ("$GateMode" -eq 'closed') { $whdAlFoot += 'The update gate is CLOSED: a new allow is saved switched OFF until the gate is set to PROGRAMS or OPEN (Updates tab).' }
-    return (Get-GuiPlanText -Head 'Allow these blocked programs out:' -Lines $whdAlLines -Foot $whdAlFoot)
-}
-# The engine items behind the selected rows of the AI / General list, in the order the list shows them
-# (SelectedItems is in click order). Each list row is {Name, Obj, Pos}.
-function Get-GuiSelectedObjs {
-    param([object[]]$Rows)
-    @(@($Rows | Where-Object { $_ }) | Sort-Object { [int]$_.Pos } | ForEach-Object { $_.Obj })
-}
-# Of the selected blocked-connection rows, the ones that can be allowed from here (State 'can').
-function Select-GuiAllowable {
-    param([object[]]$Rows)
-    @($Rows | Where-Object { $_ -and "$($_.State)" -eq 'can' })
 }
 
 # ---- populate lists ---------------------------------------------------------
 # AI/General modules are ordered-dictionaries; WPF DisplayMemberPath needs real
 # properties, so wrap each as {Name, Obj}. Win32 apps are already objects.
 function Update-AiList {
-    $whdAiPos = 0
     $AiList.ItemsSource = @(foreach ($m in $script:WHDAiModules) {
         $lbl = $m.Name
         if ($m.PolicyOnly) { $lbl = "{0}   [{1}]" -f $m.Name, $(switch (Get-WHDRegOpsState -Ops @($m.FeatureOff)) { 'set' { 'OFF - set' } 'partly' { 'partly set' } default { 'on' } }) }
-        # * marks the recommended (reversible) items, as in the console menu
+        # WHD Next: * marks the recommended (reversible) items, as in the console menu.
         $lbl = $(if (Test-WHDAiRecommended -Module $m) { '* ' } else { '   ' }) + $lbl
-        $whdAiPos++
-        [pscustomobject]@{ Name = $lbl; Obj = $m; Pos = $whdAiPos }
+        [pscustomobject]@{ Name = $lbl; Obj = $m }
     })
     $AiList.DisplayMemberPath = 'Name'
 }
 Update-AiList
 # Classic 1.4: fixed list + non-Microsoft apps found on THIS PC (marked "found:")
-function Update-GenList { $whdGenPos = 0; $GenList.ItemsSource = @(foreach ($e in @(Get-WHDGeneralCatalog)) { $whdGenPos++; [pscustomobject]@{ Name = ($(if ($e.Rec) { '* ' } else { '   ' }) + $(if ($e.Found) { "[found on this PC] " + $e.Name } else { $e.Name })); Obj = $e; Pos = $whdGenPos } }) }
+function Update-GenList { $GenList.ItemsSource = @(foreach ($e in @(Get-WHDGeneralCatalog)) { [pscustomobject]@{ Name = ($(if ($e.Rec) { '* ' } else { '   ' }) + $(if ($e.Found) { "[found on this PC] " + $e.Name } else { $e.Name })); Obj = $e } }) }
 Update-GenList
 $GenList.DisplayMemberPath = 'Name'
 function Update-W32List { $W32List.ItemsSource = @(Get-WHDWin32Apps); $W32List.DisplayMemberPath = 'DisplayName' }
@@ -782,46 +688,62 @@ function Update-PerApp {
 
 # ---- mode toggle ------------------------------------------------------------
 $ElevTxt.Text = if (_isAdmin) { 'elevated' } else { 'NOT elevated - changes will fail' }
-$ModeChk.Add_Checked({   $script:WHDExecute = $true;  Set-WHDStatus 'EXECUTE mode - actions will change the system (with confirm).' })
-$ModeChk.Add_Unchecked({ $script:WHDExecute = $false; Set-WHDStatus 'DRY-RUN mode - actions only preview.' })
+# WHD Next: in SAFE mode the real switch stays off; the box only arms Undo / re-apply / re-remove.
+$ModeChk.Add_Checked({
+    # WHD Next, journal stop: after a failed journal write EXECUTE cannot be switched on again in this run.
+    if (Test-WHDJournalStop) {
+        $ModeChk.IsChecked = $false
+        Set-WHDStatus 'STOPPED - the change journal could not be written. Close and start WHD Next again after fixing it (see the log).'
+        return
+    }
+    if ($script:WHDSafeMode) { $script:WHDSafeExecute = $true; Set-WHDStatus 'SAFE MODE + EXECUTE - only Undo, re-apply and re-remove change the system. New changes need PowerShell 7.6.' }
+    else                     { $script:WHDExecute = $true;  Set-WHDStatus 'EXECUTE mode - actions will change the system (with confirm).' }
+})
+$ModeChk.Add_Unchecked({
+    $script:WHDExecute = $false; $script:WHDSafeExecute = $false
+    if (Test-WHDJournalStop) { Set-WHDStatus 'STOPPED - the change journal could not be written. No changes until WHD Next is started again (see the log).'; return }
+    if ($script:WHDSafeMode) { Set-WHDStatus 'SAFE MODE, DRY-RUN - actions only preview.' } else { Set-WHDStatus 'DRY-RUN mode - actions only preview.' }
+})
+# WHD Next, journal stop: when the engine stops the run, untick the EXECUTE box so the window shows the truth.
+$script:WHDJournalStopHook = { $ModeChk.IsChecked = $false }
 
 # ---- handlers ---------------------------------------------------------------
 $RpBtn.Add_Click({ Invoke-GuiAction 'Create restore point' { New-WHDCheckpointNow } })
 $InvBtn.Add_Click({ Invoke-GuiAction 'Inventory' { & (Join-Path $script:WHDRoot 'Inventory.ps1') -NoElevate } })
 
-# The whole selection is ONE batch with ONE question (the same engine function as the console menu: Invoke-WHDAiBatch).
-# "Remove" also sets the off-switch, and turns an item OFF when it cannot be removed.
+# WHD Next (user request 2026-10-02): the whole selection is one batch with one question; "Remove" turns an
+# item OFF when it cannot be removed (same engine function as the console menu: Invoke-WHDAiBatch).
 $AiSelRecBtn.Add_Click({
     $AiList.SelectedItems.Clear()
-    foreach ($whdAiIt in @($AiList.Items)) { if (Test-WHDAiRecommended -Module $whdAiIt.Obj) { [void]$AiList.SelectedItems.Add($whdAiIt) } }
+    foreach ($whdIt in @($AiList.Items)) { if (Test-WHDAiRecommended -Module $whdIt.Obj) { [void]$AiList.SelectedItems.Add($whdIt) } }
     Set-WHDStatus ('{0} recommended item(s) selected - now choose Feature-off or Remove.' -f $AiList.SelectedItems.Count)
 })
 $AiFeatureBtn.Add_Click({
-    $whdAiSel = @(Get-GuiSelectedObjs -Rows @($AiList.SelectedItems))
-    if (-not $whdAiSel.Count) { Set-WHDStatus 'Select one or more AI items first.'; return }
-    Invoke-GuiPlanAction 'AI feature-off' (Get-GuiAiPlanText -Modules $whdAiSel -Action off) { Invoke-WHDAiBatch -Modules $whdAiSel -Action off }
-    if ($script:WHDGuiPlanYes) { Update-AiList }
+    $whdSel = @($AiList.SelectedItems)
+    if (-not $whdSel.Count) { Set-WHDStatus 'Select one or more AI items first.'; return }
+    Invoke-GuiAction 'AI feature-off' { Invoke-WHDAiBatch -Modules @($whdSel | ForEach-Object { $_.Obj }) -Action off }
+    Update-AiList
 })
 $AiRemoveBtn.Add_Click({
-    $whdAiSel = @(Get-GuiSelectedObjs -Rows @($AiList.SelectedItems))
-    if (-not $whdAiSel.Count) { Set-WHDStatus 'Select one or more AI items first.'; return }
-    Invoke-GuiPlanAction 'AI remove + off-switch' (Get-GuiAiPlanText -Modules $whdAiSel -Action remove) { Invoke-WHDAiBatch -Modules $whdAiSel -Action remove }
-    if ($script:WHDGuiPlanYes) { Update-AiList }
+    $whdSel = @($AiList.SelectedItems)
+    if (-not $whdSel.Count) { Set-WHDStatus 'Select one or more AI items first.'; return }
+    Invoke-GuiAction 'AI remove + off-switch' { Invoke-WHDAiBatch -Modules @($whdSel | ForEach-Object { $_.Obj }) -Action remove }
+    Update-AiList
 })
 $AiStoreBtn.Add_Click({   Invoke-GuiAction 'Store suppression' { Invoke-WHDStoreSuppression } })
 
-# General apps: the selection (or every recommended app) is ONE batch with ONE question (Invoke-WHDGeneralBatch).
 $GenRemoveBtn.Add_Click({
-    $whdGenSel = @(Get-GuiSelectedObjs -Rows @($GenList.SelectedItems))
-    if (-not $whdGenSel.Count) { Set-WHDStatus 'Select one or more apps first.'; return }
-    Invoke-GuiPlanAction 'General remove' (Get-GuiGeneralPlanText -Entries $whdGenSel) { Invoke-WHDGeneralBatch -Entries $whdGenSel }
-    if ($script:WHDGuiPlanYes) { Update-GenList }
+    $whdSel = @($GenList.SelectedItems)
+    if (-not $whdSel.Count) { Set-WHDStatus 'Select one or more apps first.'; return }
+    Invoke-GuiAction 'General remove' { Invoke-WHDGeneralBatch -Entries @($whdSel | ForEach-Object { $_.Obj }) }
+    Update-GenList
 })
 $GenRecBtn.Add_Click({
-    $whdGenSel = @($script:WHDGeneralApps | Where-Object { $_.Rec })
-    Invoke-GuiPlanAction 'General remove recommended' (Get-GuiGeneralPlanText -Entries $whdGenSel) { Invoke-WHDGeneralBatch -Entries $whdGenSel }
-    if ($script:WHDGuiPlanYes) { Update-GenList }
+    Invoke-GuiAction 'General remove recommended' { Invoke-WHDGeneralBatch -Entries @($script:WHDGeneralApps | Where-Object { $_.Rec }) }
+    Update-GenList
 })
+$GenPrivDiagBtn.Add_Click({ Invoke-GuiAction 'Privacy hardening + DiagTrack' { Invoke-WHDPrivacyAndDiagTrack } })
+$PrivAllBtn.Add_Click({ $PrivList.SelectAll(); Set-WHDStatus ('{0} privacy setting(s) selected - now choose Apply.' -f $PrivList.SelectedItems.Count) })
 $GenPrivBtn.Add_Click({   Invoke-GuiAction 'Privacy hardening' { Invoke-WHDPrivacyHardening } })
 $GenDiagBtn.Add_Click({   Invoke-GuiAction 'Disable DiagTrack' { Invoke-WHDDisableDiagTrack } })
 
@@ -852,20 +774,6 @@ $ProfPickBtn.Add_Click({
 # ---- Firewall tab -----------------------------------------------------------
 $FwProfilesPath = Join-Path $script:WHDRoot 'profiles'
 
-# v1.5: the lines both status boxes end with - the update gate is not what its record says, or an allow rule
-# that WHD did not make is ON. '' when there is nothing to say. Read-only; never throws.
-function Get-GuiAttentionText {
-    $whdAtOut = ''
-    try { foreach ($whdAtP in @((Get-WHDGateHealth).Problems)) { $whdAtOut += ("`n!! UPDATE GATE: {0}" -f $whdAtP) } } catch { }
-    try {
-        $whdAtS = Get-WHDForeignSummary
-        if ($whdAtS.Alert) { $whdAtOut += ("`n!! {0}  -> Firewall tab, 'Rules from others'" -f $whdAtS.Text) }
-        elseif ([int]$whdAtS.Unwatched -gt 0) { $whdAtOut += ("`n{0} inbound allow rule(s) were not made by WHD. Inbound rules are not watched (Firewall tab, 'Rules from others': Watch inbound rules)." -f [int]$whdAtS.Unwatched) }
-        if ("$($whdAtS.KeptOut)") { $whdAtOut += ("`nkept by you: {0}" -f $whdAtS.KeptOut) }
-        if ("$($whdAtS.FileProblem)") { $whdAtOut += ("`n!! {0}" -f $whdAtS.FileProblem) }
-    } catch { }
-    return $whdAtOut
-}
 function Refresh-FwStatus {
     try {
         $p   = Get-WHDFwProfiles
@@ -889,10 +797,11 @@ function Refresh-FwStatus {
         $ntp = Get-WHDRegValueState -Path $script:WHDW32TimeKey -Name 'NtpServer'
         $ntpTxt = if ($ntp.Exists) { "$($ntp.Value)" } else { '(default)' }
         $lgTxt = if ((Get-WHDConnectionLoggingState).On) { 'ON (dropped + allowed)' } else { 'off' }
-        $gateTxt = '?'; try { $gateTxt = "$((Get-WHDGateState).Text)" } catch { }      # update gate position (OPEN / PROGRAMS / CLOSED)
-        $gg = 0; try { $gg = @(Get-NetFirewallRule -Group $script:WHDFwGroupGate -EA SilentlyContinue).Count } catch { }      # v1.5: the gate's own rules
-        $FwStatus.Text = ("Profiles in/out:  {0}`nRules: {1} total   |   WHD - IPv6 {2}, Allow-list {3}, Blacklist {4}, Program allows {5}, Gate {11}`nDNS: {6}    DoH: {7}`nTime: {8}    Firewall log: {9}`nUpdate gate: {10}" -f `
-            $prof, $all.Count, $gi, $ga, $gb, $gp, $dnsTxt, $dohTxt, $ntpTxt, $lgTxt, $gateTxt, $gg) + (Get-GuiAttentionText)
+        # WHD Next (2026-10-02): update gate position + why the IP block list is in or out
+        $gateTxt = '?'; try { $gateTxt = "$((Get-WHDGateState).Text)" } catch { }
+        $blTxt   = '?'; try { $blTxt   = "$((Get-WHDBlocklistNeed).Text)" } catch { }
+        $FwStatus.Text = ("Profiles in/out:  {0}`nRules: {1} total   |   WHD - IPv6 {2}, Allow-list {3}, Blacklist {4}, Program allows {5}`nDNS: {6}    DoH: {7}`nTime: {8}    Firewall log: {9}`nUpdate gate: {10}`nIP block list: {11}" -f `
+            $prof, $all.Count, $gi, $ga, $gb, $gp, $dnsTxt, $dohTxt, $ntpTxt, $lgTxt, $gateTxt, $blTxt)
     } catch { $FwStatus.Text = "status error: $($_.Exception.Message)" }
 }
 function Set-FwGrid {
@@ -912,42 +821,28 @@ function Refresh-FwGrid {
     Set-WHDStatus ("Firewall rules loaded: {0}" -f @($script:FwAllRules).Count)
 }
 # One upfront confirm in EXECUTE, then auto-approve the batch (no dialog spam).
-# v1.5: -Tool names a tool that can change what the update gate set (reset | wipe | wfw | dnsreset | appclear).
-# What it will change is then said IN the one question (the log box cannot be read while a dialog is open), and
-# after a wipe / .wfw import the gate's own question follows when the gate was left without its rules.
 function Invoke-FwAction {
-    param([string]$Title, [scriptblock]$Body, [switch]$Reload, [string]$Tool = '')
-    $script:WHDFwToolStatus = ''      # (set by a reset / wipe / import in $Body; an older value must not count)
+    param([string]$Title, [scriptblock]$Body, [switch]$Reload)
     Set-WHDStatus ("Working: $Title ...")
     Write-WHDLog ("=== $Title ($(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'})) ===") 'ACT'
     $prev = $script:WHDConfirm
     if ($script:WHDExecute) {
-        $fwNote = ''
-        if ($Tool) { try { $fwNoteObj = Get-WHDCrossToolNote -Tool $Tool; if (@($fwNoteObj.Lines).Count) { $fwNote = "`n`n" + (@($fwNoteObj.Lines) -join "`n`n") } } catch { $fwNote = '' } }
-        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title`n`nThis changes Windows firewall, DNS or time settings.$fwNote`n`nProceed?", 'WinHardenDebloat - firewall', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
+        $ok = ([System.Windows.MessageBox]::Show("About to: $Title`n`nThis changes the Windows firewall / DNS. Proceed?", 'WHD Next - firewall', 'YesNo', 'Warning')) -eq 'Yes'
         if (-not $ok) { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
         $script:WHDConfirm = { param($m) $true }
     }
     try { & $Body } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
     finally { $script:WHDConfirm = $prev }
-    # the gate lost its rules (wipe / import): its own question, asked for real (the confirm strategy is back)
-    # (only when the wipe / import was really done - not after a failed or refused one)
-    if ($script:WHDExecute -and ($Tool -eq 'wipe' -or $Tool -eq 'wfw') -and "$($script:WHDFwToolStatus)" -eq 'done') {
-        try { Invoke-WHDGateRepairOffer -After $(if ($Tool -eq 'wipe') { 'the wipe' } else { 'the import' }) } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
-    }
-    Reset-WHDBusyBar
-    if ($Reload) { Refresh-FwGrid } else { Refresh-FwStatus }      # (Refresh-FwGrid refreshes the status box itself)
-    try { Update-UpdStatus } catch { }
-    Sync-FwForeign
+    Refresh-FwStatus
+    if ($Reload) { Refresh-FwGrid }
     Set-WHDStatus ("Ready. $Title finished.")
-    Show-GuiForeignAlert
 }
 
 $FwIpv6Btn.Add_Click({   Invoke-FwAction 'Suppress IPv6 (keep ::1)' { Invoke-WHDDisableIPv6 } -Reload })
 $FwIpv6LoBtn.Add_Click({ Invoke-FwAction 'Suppress IPv6 + block ::1 loopback' { Invoke-WHDDisableIPv6 -BlockLoopback } -Reload })
 $FwIpv6OnBtn.Add_Click({ Invoke-FwAction 'Re-enable IPv6' { Invoke-WHDEnableIPv6 } -Reload })
 $FwDnsBtn.Add_Click({    Invoke-FwAction 'Set Cloudflare 1.1.1.2 + DoH' { Invoke-WHDSetDns -Mode Cloudflare } })
-$FwDnsOffBtn.Add_Click({ Invoke-FwAction 'Reset DNS to automatic' { Invoke-WHDSetDns -Mode Reset } -Tool 'dnsreset' })
+$FwDnsOffBtn.Add_Click({ Invoke-FwAction 'Reset DNS to automatic' { Invoke-WHDSetDns -Mode Reset } })
 $FwAllowBtn.Add_Click({  Invoke-FwAction 'Apply outbound allow-list' { Invoke-WHDFirewallAllowList } -Reload })
 $FwDenyBtn.Add_Click({
     $m = 10; $tmp = 0
@@ -956,178 +851,23 @@ $FwDenyBtn.Add_Click({
 })
 $FwKeepBtn.Add_Click({   Invoke-FwAction 'Confirm keep default-deny' { Confirm-WHDDefaultDenyKeep } })
 $FwRevertBtn.Add_Click({ Invoke-FwAction 'Revert default-deny' { Disable-WHDDefaultDenyOutbound } })
-$FwBlockIpBtn.Add_Click({ Invoke-FwAction 'Block IP list (your profiles\blacklist-ip.txt)' { Block-WHDIPList -Path (Join-Path $FwProfilesPath 'blacklist-ip.txt') } -Reload })
+$FwBlockIpBtn.Add_Click({ Invoke-FwAction 'Block IP list: apply / bring in line' { Invoke-WHDBlocklistApply -Path (Join-Path $FwProfilesPath 'blacklist-ip.txt') } -Reload })
 $FwHostsBtn.Add_Click({   Invoke-FwAction 'Hosts sinkhole' { Block-WHDHostsList -Path (Join-Path $FwProfilesPath 'blacklist-hosts.txt') } })
 $FwClearBlBtn.Add_Click({ Invoke-FwAction 'Clear blacklist' { Remove-WHDBlacklist } -Reload })
 $FwApplyBtn.Add_Click({   Invoke-FwAction 'Apply baseline profile' { Invoke-WHDApplyFirewallProfile -Path (Join-Path $FwProfilesPath 'firewall-baseline.json') } -Reload })
 $FwExportBtn.Add_Click({  Invoke-FwAction 'Export policy (json + .wfw)' { Export-WHDFirewallPolicy } })
-$FwResetBtn.Add_Click({   Invoke-FwAction 'Reset to Windows defaults' { Invoke-WHDFirewallReset } -Reload -Tool 'reset' })
-$FwWipeBtn.Add_Click({    Invoke-FwAction 'Wipe ALL firewall rules' { Invoke-WHDFirewallWipe } -Reload -Tool 'wipe' })
+$FwResetBtn.Add_Click({   Invoke-FwAction 'Reset to Windows defaults' { Invoke-WHDFirewallReset } -Reload })
+$FwWipeBtn.Add_Click({    Invoke-FwAction 'Wipe ALL firewall rules' { Invoke-WHDFirewallWipe } -Reload })
 $FwImportBtn.Add_Click({
     $dlg = New-Object Microsoft.Win32.OpenFileDialog
     $dlg.InitialDirectory = $FwProfilesPath
     $dlg.Filter = 'Firewall policy (*.json;*.wfw)|*.json;*.wfw'
     if ($dlg.ShowDialog()) {
         $mode = if ($dlg.FileName -match '\.wfw$') { 'Wfw' } else { 'Json' }
-        # No code built from the file name: the block reads these handler variables when it runs.
-        $fwImpFile = $dlg.FileName; $fwImpMode = $mode
-        Invoke-FwAction ('Import ' + (Split-Path $fwImpFile -Leaf)) { Import-WHDFirewallPolicy -Path $fwImpFile -Mode $fwImpMode } -Reload -Tool $(if ($fwImpMode -eq 'Wfw') { 'wfw' } else { '' })
+        Invoke-FwAction ('Import ' + (Split-Path $dlg.FileName -Leaf)) ([scriptblock]::Create("Import-WHDFirewallPolicy -Path '$($dlg.FileName)' -Mode $mode")) -Reload
     }
 })
 $FwRulesBtn.Add_Click({ Refresh-FwGrid })
-
-# ---- v1.5: rules WHD did not make (the same engine as K in the console menus) ----------
-$script:WHDGuiForLoaded = $false      # the grid of the 'Rules from others' tab was filled at least once
-$script:WHDGuiForAuto   = 60          # WHD fills the grid by itself only up to this many rows (reading the details of a few hundred rules takes a while); above it: the Load button
-function Set-FwForInfo {
-    param([int]$Count)
-    try {
-        $whdFiKn = Get-WHDFwKnown
-        $whdFiTxt = ("{0} allow rule(s) that are ON were not made by WHD and are not kept by you (kept by you: {1}; inbound counted as kept at a start: {2}). 'Gets out' True = outbound: its program gets out although outbound is Block. False = inbound: its program can be reached from outside. Select rows (Ctrl / Shift + click), then a button - each has a tooltip." -f $Count, @($whdFiKn.Own).Count, @($whdFiKn.Base).Count)
-        if ($whdFiKn.Inbound) { $whdFiTxt += ' Inbound rules: watched.' }
-        else { $whdFiTxt += " Inbound rules: NOT watched - only outbound ones raise an alert ('Watch inbound rules...' starts that)." }
-        $FwForInfo.Text = $whdFiTxt
-    } catch { }
-}
-# Loads the allow rules that are ON and were not made by WHD into the grid of the 'Rules from others' tab.
-# Read-only: looking at the list starts nothing. Protocol, ports and program are read per rule (progress is shown).
-function Refresh-FwForeign {
-    try {
-        Set-WHDStatus 'Reading the rules WHD did not make ...'
-        $whdFoRows = @(Get-WHDForeignRules)
-        $whdFoI = 0
-        foreach ($whdFoR in $whdFoRows) {
-            $whdFoI++
-            [void](Add-WHDFwRuleDetail -Row $whdFoR)
-            $script:WHDFwForeignSeen["$($whdFoR.Name)".ToLower()] = $true
-            if ($whdFoRows.Count -gt 40) { try { Write-WHDProgressStep -Activity 'Reading rule details' -Done $whdFoI -Total $whdFoRows.Count -Every 20 } catch { } }
-        }
-        Reset-WHDBusyBar
-        $FwForGrid.ItemsSource = $whdFoRows
-        $script:WHDGuiForLoaded = $true
-        Set-FwForInfo -Count $whdFoRows.Count
-        Set-WHDStatus ("Rules WHD did not make: {0} are ON." -f $whdFoRows.Count)
-    } catch { Reset-WHDBusyBar; Write-WHDLog ("rules WHD did not make: " + $_.Exception.Message) 'ERR' }
-}
-# After any action that may have changed firewall rules: bring a grid that was loaded before in step, without
-# reading every rule's details again - rows that are gone or off leave, rows already shown keep their details,
-# new rows get theirs (up to $script:WHDGuiForAuto of them; the rest on Load). Does nothing before the first load.
-function Sync-FwForeign {
-    if (-not $script:WHDGuiForLoaded) { return }
-    try {
-        $whdSyOld = @{}
-        foreach ($whdSyR in @($FwForGrid.ItemsSource)) { if ($whdSyR) { $whdSyOld["$($whdSyR.Name)".ToLower()] = $whdSyR } }
-        $whdSyNew = 0
-        $whdSyRows = @(foreach ($whdSyN in @(Get-WHDForeignRules)) {
-            $whdSyK = "$($whdSyN.Name)".ToLower()
-            if ($whdSyOld.ContainsKey($whdSyK) -and $whdSyOld[$whdSyK].Detail) { $whdSyO = $whdSyOld[$whdSyK]; $whdSyO.Rule = $whdSyN.Rule; $whdSyO }
-            else { $whdSyNew++; if ($whdSyNew -le [int]$script:WHDGuiForAuto) { [void](Add-WHDFwRuleDetail -Row $whdSyN) }; $whdSyN }
-        })
-        $FwForGrid.ItemsSource = $whdSyRows
-        Set-FwForInfo -Count $whdSyRows.Count
-    } catch { }
-}
-function Get-GuiForeignPlanText {
-    param([object[]]$Rows, [string]$Action, [int]$Port = 443, [string[]]$LeftOut = @())
-    $whdFpAll = @($Rows | Where-Object { $_ })
-    $whdFpLines = @(foreach ($whdFpR in @($whdFpAll | Select-Object -First 16)) { Get-WHDForeignRowText -Row $whdFpR })      # (details are read for the rows that are shown only)
-    $whdFpN = $whdFpAll.Count
-    switch ($Action) {
-        'off'    { return (Get-GuiPlanText -RestInLog -Total $whdFpN -Head 'Switch OFF these firewall rules (not made by WHD):' -Lines $whdFpLines -Foot @("Each rule stays in Windows' rule list, switched off. The Undo tab switches it on again; Verify and the update guard report it if something switches it back on.")) }
-        'remove' { return (Get-GuiPlanText -RestInLog -Total $whdFpN -Head 'REMOVE these firewall rules (not made by WHD):' -Lines $whdFpLines -Foot @("WHD saves the firewall once per session, before that session's first firewall change (Inventory / Undo tab: Restore firewall backup puts the WHOLE firewall back as it was then - later firewall changes of that session are reverted with it). Windows or the program that made a rule may write it again - WHD then reports it again.")) }
-        'keep'   { return (Get-GuiPlanText -RestInLog -Total $whdFpN -Head 'KEEP these firewall rules ON as they are:' -Lines $whdFpLines -Foot @('They are not reported again. A kept OUTBOUND rule keeps its program online through the update gate (CLOSED / PROGRAMS); the status boxes name such rules. WHD keeps a rule by its name. "Forget kept rules" forgets the rules you kept again.')) }
-        default  {
-            $whdFpFoot = @('For each program file: a WHD allow - TCP, that remote port only, outbound (with the update gate CLOSED it is saved switched off until PROGRAMS or OPEN). The wide rule is then switched OFF, not deleted.')
-            $whdFpOut = @($LeftOut | Where-Object { $_ })
-            if ($whdFpOut.Count) { $whdFpFoot += ("NOT included - {0} selected row(s) are not an outbound rule of one program file (use Switch OFF, Remove or Keep for them): {1}{2}" -f $whdFpOut.Count, ((@($whdFpOut | Select-Object -First 6)) -join ', '), $(if ($whdFpOut.Count -gt 6) { ' ...' } else { '' })) }
-            return (Get-GuiPlanText -RestInLog -Total $whdFpN -Head ("Replace these rules by a WHD allow on TCP port {0} only:" -f $Port) -Lines $whdFpLines -Foot $whdFpFoot)
-        }
-    }
-}
-function Invoke-GuiForeignAction {
-    param([ValidateSet('off','remove','keep','port')][string]$Action)
-    $whdFaPick = @($FwForGrid.SelectedItems)
-    if (-not $whdFaPick.Count) { Set-WHDStatus 'Select one or more rows first (press Load if the list is empty).'; return }
-    $whdFaPort = 443
-    if ($Action -eq 'port') {
-        $whdFaTxt = "$($FwForPort.Text)".Trim(); $whdFaTmp = 0
-        if ($whdFaTxt -notmatch '^[0-9]{1,5}$' -or -not [int]::TryParse($whdFaTxt, [ref]$whdFaTmp) -or $whdFaTmp -lt 1 -or $whdFaTmp -gt 65535) { Set-WHDStatus 'Port: a number from 1 to 65535.'; return }
-        $whdFaPort = $whdFaTmp
-    }
-    # The grid may be older than the firewall (another button, Windows or a program changed rules since Load):
-    # act only on rows that are still ON and not kept NOW, and on the rule as it is now.
-    $whdFaNow = @{}
-    foreach ($whdFaN in @(Get-WHDForeignRules)) { $whdFaNow["$($whdFaN.Name)".ToLower()] = $whdFaN }
-    $whdFaSel = @(foreach ($whdFaP in $whdFaPick) { $whdFaK = "$($whdFaP.Name)".ToLower(); if ($whdFaNow.ContainsKey($whdFaK)) { $whdFaNow[$whdFaK] } })
-    $whdFaGone = $whdFaPick.Count - $whdFaSel.Count
-    if ($whdFaGone) { Write-WHDLog ("{0} selected row(s) are no longer ON, or no longer there, or kept meanwhile - left out; the list is refreshed." -f $whdFaGone) 'WARN' }
-    if (-not $whdFaSel.Count) { Sync-FwForeign; Refresh-FwStatus; try { Update-UpdStatus } catch { }; Set-WHDStatus 'The selected rows changed since the list was loaded - nothing to do. The list was refreshed.'; return }
-    $whdFaLeft = @()
-    if ($Action -eq 'port') {
-        foreach ($whdFaR in $whdFaSel) { [void](Add-WHDFwRuleDetail -Row $whdFaR) }
-        $whdFaLeft = @($whdFaSel | Where-Object { -not $_.CanPort } | ForEach-Object { "$($_.DisplayName)" })
-        $whdFaSel  = @($whdFaSel | Where-Object { $_.CanPort })
-        if (-not $whdFaSel.Count) { Set-WHDStatus "One port only: none of the selected rows is an outbound rule of one program file. Use Switch OFF, Remove or Keep."; return }
-    }
-    $whdFaTitle = switch ($Action) { 'off' { 'switch OFF' } 'remove' { 'remove' } 'keep' { 'keep' } default { ("one port only (TCP {0})" -f $whdFaPort) } }
-    Invoke-GuiPlanAction ("Rules WHD did not make: {0} - {1} rule(s)" -f $whdFaTitle, $whdFaSel.Count) (Get-GuiForeignPlanText -Rows $whdFaSel -Action $Action -Port $whdFaPort -LeftOut $whdFaLeft) { Invoke-WHDForeignRuleBatch -Rows $whdFaSel -Action $Action -Port $whdFaPort }
-    if ($script:WHDGuiPlanYes -or $whdFaGone) { Sync-FwForeign }
-    if ($script:WHDGuiPlanYes) { Refresh-FwGrid } else { Refresh-FwStatus }
-    try { Update-UpdStatus } catch { }
-}
-# A rule that neither WHD nor you put in and that was not shown yet in this session: one message, and its tab is opened.
-# The message comes first (it needs the details of 12 rows only); the grid is filled afterwards - by itself only for a
-# short list, so the window never hangs on a few hundred rules right after its start or after a button.
-$script:WHDGuiShown = $false
-function Show-GuiForeignAlert {
-    if (-not $script:WHDGuiShown) { return }
-    try {
-        $whdGaAll = @(Get-WHDForeignRules)
-        $whdGaNew = @(Get-WHDForeignAttention -Rows $whdGaAll | Where-Object { -not $script:WHDFwForeignSeen.ContainsKey("$($_.Name)".ToLower()) })
-        if (-not $whdGaNew.Count) { return }
-        $whdGaLines = @(foreach ($whdGaR in @($whdGaNew | Select-Object -First 12)) { '   ' + (Get-WHDForeignRowText -Row $whdGaR) })
-        if ($whdGaNew.Count -gt 12) { $whdGaLines += ('   ... and {0} more' -f ($whdGaNew.Count - 12)) }
-        foreach ($whdGaR in $whdGaNew) { $script:WHDFwForeignSeen["$($whdGaR.Name)".ToLower()] = $true }
-        Write-WHDLog ("ALERT: {0} allow rule(s) that WHD did not make are ON and were not shown before in this session." -f $whdGaNew.Count) 'WARN'
-        try { $Tabs.SelectedIndex = 0; $FwSubTabs.SelectedIndex = 2 } catch { }
-        [void][System.Windows.MessageBox]::Show($win, (("{0} allow rule(s) are ON that neither WHD nor you put in:`n`n{1}`n`nAn outbound rule lets its program out although outbound is Block; an inbound rule lets its program be reached from outside.`n`nFirewall tab, 'Rules from others' (press Load if the list is not filled): select rows, then Switch OFF, Remove, Keep or One port only." -f $whdGaNew.Count, ($whdGaLines -join "`n"))), 'WinHardenDebloat - alert', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
-        if ($whdGaAll.Count -le [int]$script:WHDGuiForAuto) { Refresh-FwForeign }
-        elseif ($script:WHDGuiForLoaded) { Sync-FwForeign }
-        else { $FwForInfo.Text = ("{0} allow rule(s) that are ON were not made by WHD. Press Load to list them (reading their details takes a while; progress is shown)." -f $whdGaAll.Count) }
-    } catch { try { Write-WHDLog ("alert (rules WHD did not make): " + $_.Exception.Message) 'WARN' } catch { } }
-}
-$FwForLoadBtn.Add_Click({   Refresh-FwForeign; Refresh-FwStatus; try { Update-UpdStatus } catch { } })
-$FwForOffBtn.Add_Click({    Invoke-GuiForeignAction -Action off })
-$FwForRemoveBtn.Add_Click({ Invoke-GuiForeignAction -Action remove })
-$FwForKeepBtn.Add_Click({   Invoke-GuiForeignAction -Action keep })
-$FwForPortBtn.Add_Click({   Invoke-GuiForeignAction -Action port })
-$FwForForgetBtn.Add_Click({
-    if (-not @((Get-WHDFwKnown).Own).Count) { Set-WHDStatus 'You have not kept any rule - nothing to forget.'; return }
-    Invoke-GuiAction 'Forget the firewall rules you kept' { Clear-WHDFwKnown }
-    Sync-FwForeign; Refresh-FwStatus; try { Update-UpdStatus } catch { }
-    Show-GuiForeignAlert
-})
-# Inbound rules raise an alert only after this was started - by you, never by looking at the list.
-$FwForWatchBtn.Add_Click({
-    if ((Get-WHDFwKnown).Inbound) { Set-WHDStatus 'The inbound rules are watched already.'; return }
-    if (-not $script:WHDExecute) { Set-WHDStatus 'Watch inbound rules: tick EXECUTE first - this choice is saved (no firewall rule is changed).'; return }
-    $whdWaN = @(Get-WHDForeignRules | Where-Object { -not $_.Leak }).Count
-    $whdWaMsg = ("Watch the inbound rules too?`n`n{0} inbound allow rule(s) that WHD did not make are ON now.`n`nYes  =  report only rules that appear from NOW on (the inbound rules present now count as kept - except one you had switched off or removed with WHD that is on again).`n`nNo  =  list ALL {0} too, until you keep, switch off or remove each one. Until then WHD and the update guard (after every sign-in) report them. On a Windows install with its own rules still in place that is a few hundred rules.`n`n(WHD asks once more before it starts this.)`n`nCancel  =  do not start.`n`nNo firewall rule is changed either way." -f $whdWaN)
-    $whdWaAns = [System.Windows.MessageBox]::Show($win, $whdWaMsg, 'WinHardenDebloat - watch inbound rules', [System.Windows.MessageBoxButton]::YesNoCancel, [System.Windows.MessageBoxImage]::Question, [System.Windows.MessageBoxResult]::Cancel)
-    if ("$whdWaAns" -ne 'Yes' -and "$whdWaAns" -ne 'No') { Set-WHDStatus 'Watch inbound rules: not started.'; return }
-    if ("$whdWaAns" -eq 'Yes') {
-        # the dialog above was the question: the engine's own one is not asked a second time
-        $whdWaPrev = $script:WHDConfirm
-        $script:WHDConfirm = { param($m) $true }
-        try { Invoke-GuiAction 'Watch the inbound firewall rules' { Start-WHDFwInboundWatch -CountPresent } }
-        finally { $script:WHDConfirm = $whdWaPrev }
-    } else {
-        # "list ALL": the engine asks its own question (with the number of rules; default No) before anything is saved
-        Invoke-GuiAction 'Watch the inbound firewall rules (list all)' { Start-WHDFwInboundWatch }
-    }
-    Sync-FwForeign; Refresh-FwStatus; try { Update-UpdStatus } catch { }
-    Show-GuiForeignAlert
-})
 
 # ---- Phase 6: blocked connections, time sync, blocklist refresh ------------
 function Refresh-FwBlocked {
@@ -1137,28 +877,22 @@ function Refresh-FwBlocked {
     Set-WHDStatus ("Reading blocked connections (last {0} h)..." -f $h)
     $rows = @(Get-WHDBlockedConnections -Hours $h -Direction $dir)
     $FwBlkGrid.ItemsSource = $rows
-    Set-WHDStatus ("Blocked connections: {0} group(s) in the last {1} h - {2} can be allowed." -f $rows.Count, $h, @(Select-GuiAllowable -Rows $rows).Count)
+    Set-WHDStatus ("Blocked connections: {0} group(s) in the last {1} h - {2} can be allowed." -f $rows.Count, $h, @($rows | Where-Object { $_.State -eq 'can' }).Count)
     if (-not $rows.Count) { Write-WHDLog 'No blocked connections found in that window. Is logging ON? (Firewall tab -> Logging ON)' 'INFO' }
 }
 $FwBlkLoadBtn.Add_Click({ Refresh-FwBlocked })
 $FwBlkAllowBtn.Add_Click({
-    $whdBlkAll = @($FwBlkGrid.SelectedItems)
-    if (-not $whdBlkAll.Count) { Set-WHDStatus 'Select one or more rows first.'; return }
-    # only the rows marked "yes" in the column 'Can allow'; one question for all of them (Add-WHDProgramAllows)
-    $whdBlkCan = @(Select-GuiAllowable -Rows $whdBlkAll)
-    if (-not $whdBlkCan.Count) {
-        Write-WHDLog ("None of the {0} selected row(s) can be allowed from here - see the column 'Can allow' for the reason." -f $whdBlkAll.Count) 'WARN'
-        Set-WHDStatus "None of the selected rows can be allowed from here (see the column 'Can allow')."
-        return
-    }
-    if ($whdBlkCan.Count -lt $whdBlkAll.Count) { Write-WHDLog ("{0} selected row(s) left out - they cannot be allowed from here (see the column 'Can allow')." -f ($whdBlkAll.Count - $whdBlkCan.Count)) 'INFO' }
-    $whdBlkGate = ''; try { $whdBlkGate = "$((Get-WHDGateState).Mode)" } catch { }
-    Invoke-GuiPlanAction ("Allow {0} blocked program line(s) (outbound)" -f $whdBlkCan.Count) (Get-GuiAllowPlanText -Items $whdBlkCan -GateMode $whdBlkGate) { Add-WHDProgramAllows -Items $whdBlkCan }
-    if ($script:WHDGuiPlanYes) { Refresh-FwGrid; Refresh-FwBlocked }      # rules were made: show them, and the new 'Can allow' texts
+    $all = @($FwBlkGrid.SelectedItems)
+    if (-not $all.Count) { Set-WHDStatus 'Select one or more rows first.'; return }
+    $sel = @($all | Where-Object { $_.State -eq 'can' })
+    if (-not $sel.Count) { Set-WHDStatus "None of the selected rows can be allowed from here (see the column 'Can allow')."; return }
+    if ($sel.Count -lt $all.Count) { Write-WHDLog ("{0} selected row(s) left out - they cannot be allowed from here (see the column 'Can allow')." -f ($all.Count - $sel.Count)) 'INFO' }
+    Invoke-FwAction ("Allow {0} blocked program line(s) (outbound)" -f $sel.Count) { Add-WHDProgramAllows -Items $sel } -Reload
+    Refresh-FwBlocked
 })
 $FwLogOnBtn.Add_Click({    Invoke-FwAction 'Turn ON the Windows Firewall log (default file, dropped + allowed, 32,767 KB)' { Enable-WHDConnectionLogging } })
 $FwLogOffBtn.Add_Click({   Invoke-FwAction 'Turn OFF the Windows Firewall log' { Disable-WHDConnectionLogging } })
-$FwAppClearBtn.Add_Click({ Invoke-FwAction 'Remove all per-program allow rules' { Remove-WHDProgramAllows } -Reload -Tool 'appclear' })
+$FwAppClearBtn.Add_Click({ Invoke-FwAction 'Remove all per-program allow rules' { Remove-WHDProgramAllows } -Reload })
 $FwTimeCfBtn.Add_Click({   Invoke-FwAction 'Time sync -> time.cloudflare.com (UDP 123 pinned, 1 h jump limit)' { Invoke-WHDSetTimeSync -Mode Cloudflare } -Reload })
 $FwTimeWinBtn.Add_Click({  Invoke-FwAction 'Time sync -> Windows default (time.windows.com)' { Invoke-WHDSetTimeSync -Mode Windows } -Reload })
 $FwTimeStatBtn.Add_Click({ Invoke-GuiAction 'Time + logging status' { Show-WHDTimeStatus; Show-WHDConnectionLoggingState; Show-WHDTimeRegionStatus } })
@@ -1168,7 +902,7 @@ function Update-TzControls {
         $FwTzCombo.ItemsSource = @(Get-WHDTimeZoneChoices)
         $curTz = "$((Get-TimeZone).Id)"
         $FwTzCombo.SelectedItem = @($FwTzCombo.ItemsSource | Where-Object { $_.Id -eq $curTz -and $_.Label -notlike '[*]*' })[0]
-        $FwDateBox.Text = (Get-Date).ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)
+        $FwDateBox.Text = (Get-Date).ToString('yyyy-MM-dd HH:mm')
     } catch { Write-WHDLog ("time zone list: " + $_.Exception.Message) 'WARN' }
 }
 Update-TzControls
@@ -1189,7 +923,7 @@ $FwDateSetBtn.Add_Click({
     if (-not [datetime]::TryParseExact($dtTxt, 'yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::None, [ref]$dtVal)) {
         Write-WHDLog 'Date/time not understood - use e.g. 2026-09-30 17:45' 'WARN'; return
     }
-    Invoke-GuiAction ("Set date/time -> " + $dtVal.ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture)) { Set-WHDDateTimeManual -Date $dtVal }
+    Invoke-GuiAction ("Set date/time -> " + $dtTxt) { Set-WHDDateTimeManual -Date $dtVal }
     Update-TzControls
 })
 $FwRefreshBlBtn.Add_Click({
@@ -1201,13 +935,13 @@ $FwRefreshBlBtn.Add_Click({
     if (-not $script:WHDExecute) { Write-WHDLog 'DRY-RUN: preview only. Tick EXECUTE to merge or replace.' 'DRY'; Set-WHDStatus 'Preview done (DRY-RUN).'; return }
     $msg = ("Current list: {0} ranges. Incoming: {1} ranges.`n`nMERGE   -> {2} ranges (keep all, add {3} new)`nREPLACE -> {4} ranges (drops {5} not in the new files)`n`nYes = MERGE     No = REPLACE     Cancel = do nothing" -f `
         $sum.Current, $sum.Incoming, $sum.MergeTotal, $sum.Added, $sum.ReplaceTotal, $sum.Removed)
-    $ans = [System.Windows.MessageBox]::Show($win, $msg, 'WinHardenDebloat - blocklist refresh', [System.Windows.MessageBoxButton]::YesNoCancel, [System.Windows.MessageBoxImage]::Question, [System.Windows.MessageBoxResult]::Cancel)
+    $ans = [System.Windows.MessageBox]::Show($msg, 'WHD Next - blocklist refresh', 'YesNoCancel', 'Question')
     if ("$ans" -eq 'Cancel') { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
     $mode = if ("$ans" -eq 'Yes') { 'Merge' } else { 'Replace' }
     $prev = $script:WHDConfirm; $script:WHDConfirm = { param($m) $true }
     try {
         Invoke-WHDBlocklistRefresh -Mode $mode | Out-Null
-        $rb = [System.Windows.MessageBox]::Show($win, 'Blocklist file updated. Rebuild the firewall block rules from it now?', 'WinHardenDebloat - blocklist refresh', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question, [System.Windows.MessageBoxResult]::No)
+        $rb = [System.Windows.MessageBox]::Show('Blocklist file updated. Rebuild the firewall block rules from it now?', 'WHD Next - blocklist refresh', 'YesNo', 'Question')
         if ("$rb" -eq 'Yes') { Update-WHDBlocklistRules }
     } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
     finally { $script:WHDConfirm = $prev }
@@ -1221,7 +955,6 @@ Refresh-FwStatus
 
 # ---- General / Permissions handlers (Phase 7) --------------------------------
 $PrivRefreshBtn.Add_Click({ Update-PrivList })
-$PrivAllBtn.Add_Click({ $PrivList.SelectAll(); Set-WHDStatus ('{0} privacy setting(s) selected - now choose Apply.' -f $PrivList.SelectedItems.Count) })
 $PrivApplyBtn.Add_Click({
     $sel = @($PrivList.SelectedItems)
     if (-not $sel.Count) { Set-WHDStatus 'Select one or more privacy settings first.'; return }
@@ -1256,15 +989,14 @@ function Invoke-SecAction {
 }
 
 # ---- Updates tab (v1.1: stop auto-installs) ----------------------------------
-function Update-UpdStatus { try { $g = Get-WHDGateState; $UpdStatus.Text = ("Update gate: {0}   (outbound {1})" -f $g.Text, $g.Outbound) + (Get-GuiAttentionText) } catch { $UpdStatus.Text = 'Update gate: ?' } }
+function Update-UpdStatus { try { $g = Get-WHDGateState; $UpdStatus.Text = ("Update gate: {0}   (outbound {1})" -f $g.Text, $g.Outbound) } catch { $UpdStatus.Text = 'Update gate: ?' } }
 function Update-UpdList   { try { $UpdList.ItemsSource = @(Find-WHDAppUpdaters); $UpdList.DisplayMemberPath = 'Label' } catch { $UpdList.ItemsSource = @() } }
-# -Fw: the action changes the firewall (the gate buttons) - the Firewall tab's status box is refreshed too, before the alert.
-function Invoke-UpdAction { param([string]$Title, [scriptblock]$Body, [switch]$Fw) Invoke-GuiAction $Title $Body; Update-UpdStatus; if ($Fw) { Refresh-FwStatus }; Sync-FwForeign; Show-GuiForeignAlert }
+function Invoke-UpdAction { param([string]$Title, [scriptblock]$Body) Invoke-GuiAction $Title $Body; Update-UpdStatus }
 $UpdStatusBtn.Add_Click({    Invoke-UpdAction 'Updates status' { Show-WHDUpdatesStatus } })
-# (the Firewall tab's status shows the gate position too, so it is refreshed as well)
-$UpdGateCloseBtn.Add_Click({ Invoke-UpdAction 'Update gate: CLOSE' { Close-WHDUpdateGate } -Fw })
-$UpdGateProgBtn.Add_Click({  Invoke-UpdAction 'Update gate: PROGRAMS' { Close-WHDUpdateGate -Mode programs } -Fw })
-$UpdGateOpenBtn.Add_Click({  Invoke-UpdAction 'Update gate: OPEN'  { Open-WHDUpdateGate } -Fw })
+# (the Firewall tab's status shows the gate position and the IP block list, so it is refreshed too)
+$UpdGateCloseBtn.Add_Click({ Invoke-UpdAction 'Update gate: CLOSE' { Close-WHDUpdateGate }; Refresh-FwStatus })
+$UpdGateProgBtn.Add_Click({  Invoke-UpdAction 'Update gate: PROGRAMS' { Close-WHDUpdateGate -Mode programs }; Refresh-FwStatus })
+$UpdGateOpenBtn.Add_Click({  Invoke-UpdAction 'Update gate: OPEN'  { Open-WHDUpdateGate }; Refresh-FwStatus })
 $UpdDefenderBtn.Add_Click({  Invoke-UpdAction 'Defender: update definitions' { Invoke-WHDDefenderUpdateTest } })
 $UpdWuBtn.Add_Click({        Invoke-UpdAction $script:WHDUpdatePolicies[0].Name { Invoke-WHDUpdatePolicy -Item $script:WHDUpdatePolicies[0] } })
 $UpdDrvBtn.Add_Click({       Invoke-UpdAction $script:WHDUpdatePolicies[1].Name { Invoke-WHDUpdatePolicy -Item $script:WHDUpdatePolicies[1] } })
@@ -1285,17 +1017,7 @@ $SecPuaBtn.Add_Click({      Invoke-SecAction 'Defender: block unwanted apps (PUA
 $SecNetAuditBtn.Add_Click({ Invoke-SecAction 'Defender: network protection AUDIT' { Invoke-WHDDefenderProtection -Which Network -Mode Audit } })
 $SecNetBlockBtn.Add_Click({ Invoke-SecAction 'Defender: network protection BLOCK' { Invoke-WHDDefenderProtection -Which Network -Mode On } })
 $SecCfaAuditBtn.Add_Click({ Invoke-SecAction 'Defender: ransomware folder protection AUDIT' { Invoke-WHDDefenderProtection -Which Folders -Mode Audit } })
-$SecCfaBlockBtn.Add_Click({
-    # WHD folder inside a protected folder: ask first, because the warning in the log would come after the confirm.
-    $cfaDir = ''
-    try { $cfaDir = Get-WHDProtectedFolderOfRoot } catch {}
-    if ($cfaDir -and $script:WHDExecute) {
-        $cfaMsg = ("WHD runs from inside the protected folder:`n{0}`n`nIn BLOCK mode Windows does not treat PowerShell as a trusted app there. WHD's log may stop and later changes may not be recorded for undo.`n`nBetter: answer No, move the WHD folder outside the protected folders (for example C:\WHD) and start it from there.`n`nSwitch it on anyway?" -f $cfaDir)
-        $cfaOk = ([System.Windows.MessageBox]::Show($win, $cfaMsg, 'WinHardenDebloat - warning', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
-        if (-not $cfaOk) { Write-WHDLog 'Ransomware folder protection BLOCK: cancelled (WHD folder is inside a protected folder).' 'INFO'; return }
-    }
-    Invoke-SecAction 'Defender: ransomware folder protection BLOCK' { Invoke-WHDDefenderProtection -Which Folders -Mode On }
-})
+$SecCfaBlockBtn.Add_Click({ Invoke-SecAction 'Defender: ransomware folder protection BLOCK' { Invoke-WHDDefenderProtection -Which Folders -Mode On } })
 $SecAsrStdBtn.Add_Click({   Invoke-SecAction 'ASR: Microsoft standard 3 (AUDIT)' { Invoke-WHDAsrGroups -Groups standard -Mode Audit } })
 $SecAsrScrBtn.Add_Click({   Invoke-SecAction 'ASR: script + download rules (AUDIT)' { Invoke-WHDAsrGroups -Groups scripts -Mode Audit } })
 $SecAsrOffBtn.Add_Click({   Invoke-SecAction 'ASR: Office / Adobe / email rules (AUDIT)' { Invoke-WHDAsrGroups -Groups office -Mode Audit } })
@@ -1351,26 +1073,20 @@ function Refresh-UndoGrid {
     $UndoGrid.ItemsSource = @(Get-WHDJournal -SessionPath $s.Path)
 }
 # One upfront Yes/No in EXECUTE, then auto-approve inside (same pattern as the firewall tab).
-# -Note: lines shown in the one question (what the action changes besides the obvious).
-# -Fw: the action can switch firewall rules (undo, re-apply, restore) - the status boxes and a loaded 'Rules from others' list follow.
 function Invoke-UndoAction {
-    param([string]$Title, [scriptblock]$Body, [string]$Note = '', [switch]$Fw, [switch]$NoAlert)
+    param([string]$Title, [scriptblock]$Body)
     Set-WHDStatus ("Working: $Title ...")
-    Write-WHDLog ("=== $Title ($(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'})) ===") 'ACT'
+    Write-WHDLog ("=== $Title ($(if(Test-WHDExecuteWanted){'EXECUTE'}else{'DRY-RUN'})) ===") 'ACT'
     $prev = $script:WHDConfirm
-    if ($script:WHDExecute) {
-        $whdUaNote = ''; if ("$Note") { $whdUaNote = "`n`n$Note" }
-        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title$whdUaNote`n`nProceed?", 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
+    if (Test-WHDExecuteWanted) {   # WHD Next: also true in SAFE mode when the EXECUTE box is ticked (Undo / re-apply / re-remove are allowed there)
+        $ok = ([System.Windows.MessageBox]::Show("About to: $Title`n`nProceed?", 'WHD Next - undo', 'YesNo', 'Warning')) -eq 'Yes'
         if (-not $ok) { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
         $script:WHDConfirm = { param($m) $true }
     }
     try { & $Body } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
     finally { $script:WHDConfirm = $prev }
-    Reset-WHDBusyBar
     Refresh-UndoSessions; Refresh-UndoGrid
-    if ($Fw) { try { Refresh-FwStatus; Update-UpdStatus; Sync-FwForeign } catch { } }
     Set-WHDStatus ("Ready. $Title finished.")
-    if ($Fw -and -not $NoAlert) { Show-GuiForeignAlert }      # (-NoAlert: the caller shows it after its own follow-up question)
 }
 $InvDiffBtn.Add_Click({
     Invoke-GuiAction 'Compare last two scans' {
@@ -1378,7 +1094,7 @@ $InvDiffBtn.Add_Click({
     }
 })
 $GuardRefreshBtn.Add_Click({ Invoke-GuiAction 'Refresh update guard' { Install-WHDUpdateGuard } })
-$ReApplyBtn.Add_Click({ Invoke-UndoAction 'Re-apply settings that changed back' { Invoke-WHDReApplyChanged } -Fw })
+$ReApplyBtn.Add_Click({ Invoke-UndoAction 'Re-apply settings that changed back' { Invoke-WHDReApplyChanged } })
 $ReRemoveBtn.Add_Click({ Invoke-UndoAction 'Re-remove apps that came back' { Invoke-WHDReRemoveReturned } })
 $VerAllBtn.Add_Click({  Invoke-GuiAction 'Verify all changes' { Invoke-WHDVerify -All | Out-Null } })
 $VerSessBtn.Add_Click({ $s = $UndoSession.SelectedItem; if ($s) { Invoke-GuiAction ('Verify session ' + $s.Stamp) { Invoke-WHDVerify -SessionPath $s.Path | Out-Null } } })
@@ -1388,35 +1104,58 @@ $UndoSession.Add_SelectionChanged({ Refresh-UndoGrid })
 $UndoSelBtn.Add_Click({
     $sel = @($UndoGrid.SelectedItems)
     if (-not $sel.Count) { Set-WHDStatus 'Select one or more rows first.'; return }
-    Invoke-UndoAction ("Undo {0} selected change(s)" -f $sel.Count) { Invoke-WHDUndo -Entries $sel } -Fw
+    Invoke-UndoAction ("Undo {0} selected change(s)" -f $sel.Count) { Invoke-WHDUndo -Entries $sel }
 })
-$UndoAllBtn.Add_Click({   $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoAction ('Undo session ' + $s.Stamp) { Invoke-WHDUndoSession -SessionPath $s.Path } -Fw } })
-$UndoFwBtn.Add_Click({
-    $s = $UndoSession.SelectedItem
-    if (-not $s) { return }
-    # v1.5: a whole-policy import, like the Firewall tab's .wfw import - the question says what it does to the update gate,
-    # and when the gate was left without its rules its own question follows (asked for real, after this action).
-    $whdUfNote = ''
-    try { $whdUfN = Get-WHDCrossToolNote -Tool 'wfw'; if (@($whdUfN.Lines).Count) { $whdUfNote = (@($whdUfN.Lines) -join "`n`n") } } catch { $whdUfNote = '' }
-    $script:WHDFwToolStatus = ''
-    Invoke-UndoAction ('Restore firewall from ' + $s.Stamp + ' (replaces the WHOLE firewall policy)') { Restore-WHDSessionFirewall -SessionPath $s.Path -NoRepairOffer } -Note $whdUfNote -Fw -NoAlert
-    if ($script:WHDExecute -and "$($script:WHDFwToolStatus)" -eq 'done') {
-        try { Invoke-WHDGateRepairOffer -After 'the restore' } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
-        try { Refresh-FwStatus; Update-UpdStatus; Sync-FwForeign } catch { }
-    }
-    Show-GuiForeignAlert
-})
+$UndoAllBtn.Add_Click({   $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoAction ('Undo session ' + $s.Stamp) { Invoke-WHDUndoSession -SessionPath $s.Path } } })
+$UndoFwBtn.Add_Click({    $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoAction ('Restore firewall from ' + $s.Stamp + ' (replaces the WHOLE firewall policy)') { Restore-WHDSessionFirewall -SessionPath $s.Path } } })
 $UndoHostsBtn.Add_Click({ $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoAction ('Restore hosts file from ' + $s.Stamp) { Restore-WHDSessionHosts -SessionPath $s.Path } } })
 $UndoRegBtn.Add_Click({   $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoAction ('Import .reg backups from ' + $s.Stamp) { Import-WHDLegacyRegBackups -SessionPath $s.Path } } })
 Refresh-UndoSessions
+
+# ---- Theme tab (build step 12f; user decision 2026-10-05) ---------------------------------------------------
+# Same engine functions as the console menu X (modules\Theme.ps1). Where the console waits for Enter, the theme asks
+# through this message window instead (see Read-WHDThemeAnswer): 'y' / 'n' for a yes / no question, '' after OK.
+$script:WHDThemeAsk = {
+    param([string]$Text, [bool]$YesNo)
+    if ($YesNo) {
+        if (([System.Windows.MessageBox]::Show($win, $Text, 'WHD Next - theme', 'YesNo', 'Question')) -eq 'Yes') { return 'y' }
+        return 'n'
+    }
+    [void][System.Windows.MessageBox]::Show($win, $Text, 'WHD Next - theme', 'OK', 'Information')
+    return ''
+}
+function Update-ThemeStatus {
+    try { $ThemeStatus.Text = ((Get-WHDThemeOverview).Lines -join "`r`n") }
+    catch { $ThemeStatus.Text = ('The state of the theme could not be read: ' + $_.Exception.Message) }
+}
+function Invoke-ThemeAction { param([string]$Title, [scriptblock]$Body) Invoke-GuiAction $Title $Body; Update-ThemeStatus }
+$ThemeSoundCombo.ItemsSource = @($script:WHDThemeSoundNames); $ThemeSoundCombo.SelectedIndex = 0
+$ThemeAllOnBtn.Add_Click({      Invoke-ThemeAction 'Theme: everything on' { Invoke-WHDThemeEverythingOn } })
+$ThemeAllBackBtn.Add_Click({    Invoke-ThemeAction 'Theme: everything put back' { Invoke-WHDThemeEverythingBack } })
+$ThemeRefreshBtn.Add_Click({    Update-ThemeStatus; Set-WHDStatus 'Theme: state refreshed.' })
+$ThemeMakeBtn.Add_Click({       Invoke-ThemeAction 'Theme: make the sound files' { Invoke-WHDThemeMakeSounds } })
+$ThemePlayBtn.Add_Click({
+    $whdThemeSound = "$($ThemeSoundCombo.SelectedItem)"
+    if (-not $whdThemeSound) { return }
+    if (@((Get-WHDThemeSoundFiles).Have) -notcontains $whdThemeSound) { Write-WHDLog ('Theme: the sound file for "{0}" is not made yet - choose "Make the sound files" first.' -f $whdThemeSound) 'WARN'; return }
+    Invoke-GuiAction ('Theme: play "' + $whdThemeSound + '" (changes nothing)') { Invoke-WHDThemeListen -Names @($whdThemeSound) }
+})
+$ThemeSchemeOnBtn.Add_Click({   Invoke-ThemeAction 'Theme: sound scheme "WHD Next"' { Invoke-WHDThemeSoundSchemeApply } })
+$ThemeSchemeBackBtn.Add_Click({ Invoke-ThemeAction 'Theme: put back the sound scheme used before' { Invoke-WHDThemeSoundSchemeRemove } })
+$ThemeLookBtn.Add_Click({       Invoke-ThemeAction 'Theme: use the look - sky blue' { Invoke-WHDThemeLookApply } })
+$ThemeLookRedBtn.Add_Click({    Invoke-ThemeAction 'Theme: use the look - hot rod red' { Invoke-WHDThemeLookApply -Red } })
+$ThemeLookBackBtn.Add_Click({   Invoke-ThemeAction 'Theme: put back the theme used before' { Invoke-WHDThemeLookRemove } })
+$ThemeLockOnBtn.Add_Click({     Invoke-ThemeAction 'Theme: WHD pictures on the lock screen and sign-in screen' { Invoke-WHDThemeLockApply } })
+$ThemeLockBackBtn.Add_Click({   Invoke-ThemeAction 'Theme: put back the lock-screen picture used before' { Invoke-WHDThemeLockRemove } })
+$ThemeEvOnBtn.Add_Click({       Invoke-ThemeAction 'Theme: sounds at sign-in, lock, unlock, sign-out and shut-down on' { Invoke-WHDThemeEventSoundsApply } })
+$ThemeEvOffBtn.Add_Click({      Invoke-ThemeAction 'Theme: sounds at sign-in, lock, unlock, sign-out and shut-down off' { Invoke-WHDThemeEventSoundsRemove } })
+Update-ThemeStatus
 
 Write-WHDLog 'GUI ready. DRY-RUN mode (tick EXECUTE to make changes).' 'INFO'
 Write-WHDLog 'Provided as is, with no warranty (MIT License) - use at your own risk.' 'INFO'
 Set-WHDStatus 'DRY-RUN mode - actions only preview.'
 try { Update-WHDGuardIfStale } catch { }
-try { Write-WHDAccountWarning } catch { }
-try { Write-WHDProtectedFolderWarning } catch { }
-# v1.5: once the window is on screen, say when an allow rule is ON that neither WHD nor you put in (one message)
-$win.Add_ContentRendered({ if (-not $script:WHDGuiShown) { $script:WHDGuiShown = $true; Show-GuiForeignAlert } })
+try { $win.Title = ('WHD Next - {0}' -f (Get-WHDModeText)) } catch { }
+if ($script:WHDSafeMode) { try { Set-WHDStatus ('{0}. New changes need PowerShell 7.6 (FULL mode).' -f (Get-WHDModeText)) } catch { } }
 $win.ShowDialog() | Out-Null
 Stop-WHDTranscript

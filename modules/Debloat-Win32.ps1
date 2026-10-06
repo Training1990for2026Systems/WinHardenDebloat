@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  modules\Debloat-Win32.ps1
+ WHD Next  -  modules\Debloat-Win32.ps1
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -10,8 +10,8 @@
 
  Because Win32 apps have no "provisioning", "prevent reinstall" here means:
    * uninstall via the app's own (quiet) uninstaller,
-   * remove its Run/RunOnce autostart entries,
-   * remove its scheduled tasks (the task definition is saved to restore\ first),
+   * remove its Run/RunOnce autostart entries and Startup-folder shortcuts,
+   * remove/disable its scheduled tasks,
    * optionally BLOCK a named .exe from launching via Image File Execution
      Options (reversible) - this stops a helper/updater from bringing it back.
 
@@ -49,29 +49,11 @@ function Get-WHDWin32Apps {
                     QuietUninstall  = $_.QuietUninstallString
                     InstallLocation = $_.InstallLocation
                     Hive            = ($r -split ':')[0]
-                    KeyPath         = "$($_.PSPath)"
                     Protected       = (Test-WHDWin32Protected $_.DisplayName)
                 }
             }
     }
     @($apps | Sort-Object DisplayName -Unique)
-}
-
-# True while Windows still lists the program as installed (its uninstall registry entry exists).
-# Some uninstallers remove that entry a moment after they exit, so this can wait a few seconds.
-# If the check itself fails, the answer is "still installed" (the careful answer).
-function Test-WHDWin32StillInstalled {
-    param($App, [int]$WaitSeconds = 0)
-    for ($siTry = 0; $siTry -le $WaitSeconds; $siTry++) {
-        $siStill = $true
-        try {
-            if ("$($App.KeyPath)") { $siStill = [bool](Test-Path -LiteralPath "$($App.KeyPath)" -EA Stop) }
-            else { $siStill = [bool](@(Get-WHDWin32Apps | Where-Object { $_.DisplayName -eq $App.DisplayName -and $_.Hive -eq $App.Hive }).Count) }
-        } catch { $siStill = $true }
-        if (-not $siStill) { return $false }
-        if ($siTry -lt $WaitSeconds) { Start-Sleep -Seconds 1 }
-    }
-    return $true
 }
 
 function Invoke-WHDWin32Uninstall {
@@ -85,38 +67,16 @@ function Invoke-WHDWin32Uninstall {
     if (-not $cmd) { Write-WHDLog 'No uninstall string registered for this app.' 'WARN'; return }
     # Normalize an MSI uninstall to a silent one.
     if ($cmd -match 'msiexec') {
-        $cmd = $cmd -replace '(?i)/I(?=\s*\{)', '/X'
+        $cmd = $cmd -replace '/I','/X'
         if ($cmd -notmatch '/quiet') { $cmd = "$cmd /quiet /norestart" }
-    }
-    # An unquoted program path with spaces cannot be started - quote it when that file exists.
-    if ($cmd -notmatch '^"' -and $cmd -match '^(.+?\.exe)(\s.*)?$') {
-        $exePath = "$($Matches[1])"; $exeRest = "$($Matches[2])"; $exeFound = $false
-        try { $exeFound = [bool](Test-Path -LiteralPath $exePath -PathType Leaf -EA Stop) } catch {}
-        if ($exeFound) { $cmd = '"' + $exePath + '"' + $exeRest }
     }
     Write-WHDRisk 'caution' ("runs the vendor uninstaller: {0}" -f $cmd)
     if (-not $App.QuietUninstall -and $cmd -notmatch 'msiexec') {
         Write-WHDLog 'No silent uninstaller registered - the vendor UI may appear; complete it manually.' 'INFO'
     }
     if (-not (Confirm-WHDProceed ("uninstall {0}" -f $App.DisplayName))) { Write-WHDLog 'skipped.' 'WARN'; return }
-    $uninstWasListed = Test-WHDWin32StillInstalled -App $App
     Invoke-WHDChange -Description ("run uninstaller for {0}" -f $App.DisplayName) -Force -Action {
-        # /s + one extra pair of quotes: cmd removes exactly that outer pair and keeps the inner quotes.
-        $uninstProc = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\cmd.exe') -ArgumentList ('/d /s /c "' + $cmd + '"') -Wait -PassThru -WindowStyle Hidden -EA Stop
-        $uninstCode = $uninstProc.ExitCode
-        if ($uninstCode -eq 3010 -or $uninstCode -eq 1641) { Write-WHDLog ("uninstaller exit code {0} - restart needed to finish the uninstall" -f $uninstCode) 'INFO' }
-        elseif ($uninstCode -ne 0) {
-            # Some uninstallers (OneDrive, for example) end with their own exit code although they removed the program.
-            # So: the program was listed before and is no longer listed now = done. Otherwise it is a failure.
-            if ($uninstWasListed) { Write-WHDLog ("uninstaller exit code {0} - checking whether '{1}' is still installed (up to 10 s) ..." -f $uninstCode, $App.DisplayName) 'INFO' }
-            if ($uninstWasListed -and -not (Test-WHDWin32StillInstalled -App $App -WaitSeconds 10)) {
-                Write-WHDLog ("uninstaller exit code {0}, but '{1}' is no longer listed as installed - counted as done" -f $uninstCode, $App.DisplayName) 'INFO'
-            } elseif ($uninstWasListed) {
-                throw ("uninstaller exit code {0} (the program is still listed as installed)" -f $uninstCode)
-            } else {
-                throw ("uninstaller exit code {0}" -f $uninstCode)
-            }
-        }
+        Start-Process -FilePath 'cmd.exe' -ArgumentList '/c', $cmd -Wait -WindowStyle Hidden
     }
 }
 
@@ -162,7 +122,6 @@ function Get-WHDUserTasks {
     try {
         @(Get-ScheduledTask -EA Stop | Where-Object {
             $_.TaskPath -notlike '\Microsoft\*' -and $_.TaskPath -ne '\Microsoft\' -and
-            $_.TaskPath -notlike '\WinHardenDebloat\*' -and $_.TaskName -notmatch '^MicrosoftEdgeUpdateTask' -and
             (($_.TaskName -like "*$Match*") -or ($_.TaskPath -like "*$Match*"))
         } | Select-Object TaskName, TaskPath, State)
     } catch { @() }
@@ -170,23 +129,9 @@ function Get-WHDUserTasks {
 
 function Remove-WHDTask {
     param($Task)
-    # Never WHD's own tasks or the Edge update tasks.
-    if ("$($Task.TaskPath)" -like '\WinHardenDebloat\*' -or "$($Task.TaskName)" -match '^MicrosoftEdgeUpdateTask') {
-        Write-WHDLog ("Refused - task '{0}{1}' is protected (WinHardenDebloat / Edge update). Not removing it." -f $Task.TaskPath, $Task.TaskName) 'WARN'
-        return
-    }
     Invoke-WHDChange -Description ("unregister scheduled task: {0}{1}" -f $Task.TaskPath, $Task.TaskName) -Force -Action {
         $still = Get-ScheduledTask -TaskName $Task.TaskName -TaskPath $Task.TaskPath -EA SilentlyContinue
         if (-not $still) { Write-WHDLog ("task '{0}' already gone" -f $Task.TaskName) 'INFO'; return }
-        # Save the task definition first so it can be put back by hand (Task Scheduler > Import Task).
-        Initialize-WHDPaths
-        $taskXmlFile = Join-Path $script:WHDRestore ("task_{0}.xml" -f ("$($Task.TaskName)" -replace '[^A-Za-z0-9._-]', '_'))
-        try {
-            $taskXml = Export-ScheduledTask -TaskName $Task.TaskName -TaskPath $Task.TaskPath -EA Stop
-            if (-not "$taskXml".Trim()) { throw 'the export is empty' }
-            Set-Content -LiteralPath $taskXmlFile -Value $taskXml -Encoding Unicode -EA Stop
-        } catch { throw ("could not save the task definition, task not removed: {0}" -f $_.Exception.Message) }
-        Write-WHDLog ("task definition saved: {0}" -f $taskXmlFile) 'INFO'
         Unregister-ScheduledTask -TaskName $Task.TaskName -TaskPath $Task.TaskPath -Confirm:$false -EA Stop
     }
 }
@@ -195,20 +140,6 @@ function Remove-WHDTask {
 function Block-WHDExecutable {
     param([string]$ExeName)   # e.g. LogiDownloadAssistant.exe
     if ($ExeName -notmatch '\.exe$') { $ExeName = "$ExeName.exe" }
-    # The name becomes a registry key name: accept a plain file name only.
-    if ($ExeName -match '[\\/:\*\?"<>\|\[\]]' -or $ExeName -match '^[. ]*\.exe$') {
-        Write-WHDLog ("'{0}' is not a plain .exe file name (no path, no \ / : * ? [ ] "" < > |). Nothing blocked." -f $ExeName) 'ERR'
-        return
-    }
-    # Programs Windows itself needs - blocking one can stop sign-in or the desktop.
-    $critical = @('svchost.exe','explorer.exe','winlogon.exe','csrss.exe','smss.exe','wininit.exe','services.exe','lsass.exe',
-        'dwm.exe','userinit.exe','logonui.exe','taskhostw.exe','sihost.exe','fontdrvhost.exe','conhost.exe','cmd.exe',
-        'powershell.exe','rundll32.exe','msiexec.exe','taskmgr.exe','regedit.exe','mmc.exe','consent.exe','systray.exe',
-        'RuntimeBroker.exe','SearchHost.exe','StartMenuExperienceHost.exe','ShellExperienceHost.exe','MsMpEng.exe','spoolsv.exe')
-    if ($critical -contains $ExeName) {
-        Write-WHDLog ("Refused - {0} is a critical Windows program. Nothing blocked." -f $ExeName) 'ERR'
-        return
-    }
     $key = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\$ExeName"
     Write-WHDRisk 'caution' ("blocks {0} from launching (Image File Execution Options). Reversible: delete the key." -f $ExeName)
     if (-not (Confirm-WHDProceed ("block execution of {0}" -f $ExeName))) { Write-WHDLog 'skipped.' 'WARN'; return }
@@ -220,8 +151,8 @@ function Find-WHDApp {
     param([Parameter(Mandatory)][string]$Name)
     Write-WHDLog ("SEARCH for '{0}' across uninstall / startup / tasks / Program Files" -f $Name) 'ACT'
     $apps  = @(Get-WHDWin32Apps | Where-Object { $_.DisplayName -like "*$Name*" })
-    $starts= @(Get-WHDStartupEntries -Match $Name)
-    $tasks = @(Get-WHDUserTasks -Match $Name)
+    $starts= Get-WHDStartupEntries -Match $Name
+    $tasks = Get-WHDUserTasks -Match $Name
     $dirs  = @()
     foreach ($base in @($env:ProgramFiles, ${env:ProgramFiles(x86)}, "$env:LOCALAPPDATA\Programs")) {
         if ($base -and (Test-Path $base)) {
@@ -243,17 +174,9 @@ function Remove-WHDAppEverywhere {
     param([Parameter(Mandatory)][string]$Name)
     $found = Find-WHDApp -Name $Name
     if (-not (Confirm-WHDProceed ("remove EVERYTHING matching '{0}' (uninstall + startup + tasks)" -f $Name))) { Write-WHDLog 'skipped.' 'WARN'; return }
-    $uninstFailed = $false
-    foreach ($a in $found.Apps) {
-        $uninstRes = @(Invoke-WHDWin32Uninstall -App $a)
-        if (@($uninstRes | Where-Object { $_ -and $_.Status -eq 'failed' }).Count) { $uninstFailed = $true }
-    }
-    if ($uninstFailed) {
-        Write-WHDLog ("An uninstall failed - startup entries and scheduled tasks matching '{0}' are left in place. Sort out the uninstall, then run this again." -f $Name) 'WARN'
-        return
-    }
-    foreach ($s in $found.Startups) { Remove-WHDStartupEntry -Entry $s | Out-Null }
-    foreach ($t in $found.Tasks)    { Remove-WHDTask -Task $t | Out-Null }
+    foreach ($a in $found.Apps)     { Invoke-WHDWin32Uninstall -App $a }
+    foreach ($s in $found.Startups) { Remove-WHDStartupEntry -Entry $s }
+    foreach ($t in $found.Tasks)    { Remove-WHDTask -Task $t }
     Write-WHDLog ("Done. If a helper still relaunches it, use the IFEO block on its .exe (menu X)." -f $Name) 'INFO'
 }
 
@@ -261,15 +184,13 @@ function Show-WHDWin32Menu {
     Write-Host ''
     Write-Host '  WIN32 / INSTALLED PROGRAMS' -ForegroundColor White
     Write-Host '  ----------------------------------------------------------------'
-    $script:WHDWin32Cache = @(Get-WHDWin32Apps)
+    $script:WHDWin32Cache = Get-WHDWin32Apps
     $i = 0
     foreach ($a in $script:WHDWin32Cache) {
         $i++
         $tag = if ($a.Protected) { ' (protected)' } else { '' }
         $col = if ($a.Protected) { 'DarkGray' } else { 'Green' }
-        Write-Host ("  {0,2}. " -f $i) -NoNewline
-        Write-Host ("{0}{1}" -f $a.DisplayName, $tag) -ForegroundColor $col -NoNewline
-        Write-Host ("   {0}" -f $a.Publisher)
+        Write-WHDParts @(("  {0,2}. " -f $i), @(("{0}{1}" -f $a.DisplayName, $tag), $col), ("   {0}" -f $a.Publisher))
     }
     Write-Host '  ----------------------------------------------------------------'
     Write-Host '   F. Find an app by name (uninstall + startup + tasks + folders)'

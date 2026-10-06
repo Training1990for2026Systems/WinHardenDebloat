@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  Inventory.ps1
+ WHD Next  -  Inventory.ps1   (Phase 1, Module 1)
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -18,7 +18,7 @@
    * Flags every "AI"-related surface (Copilot, Cortana, Power Automate,
      Recall, Web Experience/Widgets, and integrated AI apps).
 
- Target:  Windows 11 (tested on 25H2 and 26H2).  Windows PowerShell 5.1 (powershell.exe).
+ Target:  Windows 11 24H2 / 25H2.  Windows PowerShell 5.1 recommended.
  Elevation: run as Administrator for the FULL picture. Without admin, the
             provisioned-package and effective-AppLocker scans are skipped
             (clearly marked in the report), everything else still runs.
@@ -27,7 +27,7 @@
    powershell -ExecutionPolicy Bypass -File .\Inventory.ps1
    powershell -ExecutionPolicy Bypass -File .\Inventory.ps1 -OutputRoot "D:\WHD"
    powershell -ExecutionPolicy Bypass -File .\Inventory.ps1 -Compare
-       Compare the two newest scans - what appeared, disappeared or
+       (Phase 5) compare the two newest scans - what appeared, disappeared or
        changed. Add -Old / -New <folder name> to pick specific scans.
    Every normal scan also compares itself with the previous scan and adds a
    "CHANGES SINCE LAST SCAN" section to REPORT.txt (+ DIFF-vs-*.txt/.csv).
@@ -40,20 +40,14 @@ param(
     [string]$OutputRoot,
     # Skip self-elevation (used when a launcher already elevated us).
     [switch]$NoElevate,
-    # Compare two existing scans instead of scanning (read-only, no admin).
+    # Phase 5: compare two existing scans instead of scanning (read-only, no admin).
     [switch]$Compare,
     [string]$Old,
     [string]$New,
-    # Project folder whose restore\ journals mark "CAME BACK" items
+    # Phase 9: project folder whose restore\ journals mark "CAME BACK" items
     # (the update guard runs this script from its protected copy).
     [string]$ProjectRoot
 )
-
-# Windows PowerShell 5.1 only - the Appx / DISM cmdlets used here do not behave the same in PowerShell 7.
-if ($PSVersionTable.PSVersion.Major -ne 5) {
-    Write-Host 'The inventory needs Windows PowerShell 5.1 - start it with powershell.exe, not pwsh.' -ForegroundColor Red
-    exit 1
-}
 
 $ErrorActionPreference = 'Stop'
 # NOTE: StrictMode is intentionally NOT enabled. Admin inventory cmdlets often
@@ -92,10 +86,37 @@ if (-not $ProjectRoot) { $ProjectRoot = $ScriptDir }
 # ===================================== PHASE 5 (A3): SNAPSHOT COMPARISON =======
 # Read-only. Compares two inventory folders surface by surface and flags any
 # package that WHD removed earlier (from restore\*\journal.jsonl) but is back.
+# WHD Next (user decision 2026-10-02, gap G13): only scans made on THIS PC / this Windows install count as
+# "the previous scan". A scan is this PC's when its os-info.json carries this MachineId; older scans
+# without one are judged by their scan time (UTC) against the Windows install date, then by the folder name.
+function Test-WHDInvScanIsThisPC([string]$ScanDir) {
+    $mid = "$((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -EA SilentlyContinue).MachineGuid)".ToLower()
+    if (-not $mid) { $mid = "name:$env:COMPUTERNAME".ToLower() }
+    $inst = $null
+    $instRaw = (Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' -Name InstallDate -EA SilentlyContinue).InstallDate
+    if ($instRaw) { $inst = ([datetime]'1970-01-01').AddSeconds([int64]$instRaw) }      # UTC
+    $f = Join-Path $ScanDir 'os-info.json'
+    if (Test-Path -LiteralPath $f) {
+        $o = $null
+        try { $o = Get-Content -LiteralPath $f -Raw -Encoding UTF8 | ConvertFrom-Json } catch { $o = $null }
+        if ($o -and "$($o.MachineId)") { return ("$($o.MachineId)".ToLower() -eq $mid) }
+        if ($o -and $o.ScannedUtc -and $inst) {
+            $u = $null
+            if ($o.ScannedUtc -is [datetime]) { $u = $o.ScannedUtc.ToUniversalTime() }      # PowerShell 7 returns a date, 5.1 text
+            else { try { $u = [datetime]::Parse("$($o.ScannedUtc)", [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind).ToUniversalTime() } catch { $u = $null } }
+            if ($u) { return ($u -ge $inst) }
+        }
+    }
+    $stamp = $null
+    try { $stamp = [datetime]::ParseExact((Split-Path $ScanDir -Leaf), 'yyyy-MM-dd_HHmmss', $null) } catch { $stamp = $null }
+    if ($inst -and $stamp -and $stamp -lt $inst.ToLocalTime()) { return $false }
+    return $true
+}
 function Get-WHDSnapshots([string]$Root) {
     @(Get-ChildItem -LiteralPath $Root -Directory -EA SilentlyContinue |
         Where-Object { (Test-Path -LiteralPath (Join-Path $_.FullName 'appx-packages.csv')) -and
-                       (Test-Path -LiteralPath (Join-Path $_.FullName 'REPORT.txt')) } |
+                       (Test-Path -LiteralPath (Join-Path $_.FullName 'REPORT.txt')) -and
+                       (Test-WHDInvScanIsThisPC $_.FullName) } |
         Sort-Object Name)
 }
 function Import-WHDCsvSafe([string]$Dir, [string]$File) {
@@ -180,13 +201,6 @@ function Invoke-WHDInventoryDiff {
     $lines = New-Object System.Collections.Generic.List[string]
     $oldName = Split-Path $OldDir -Leaf; $newName = Split-Path $NewDir -Leaf
     $lines.Add(('  Compared: {0}  ->  {1}' -f $oldName, $newName))
-    # A scan made without administrator rights has no optional features / capabilities / provisioned packages.
-    $elev = @(foreach ($sd in @($OldDir, $NewDir)) {
-        try { "$((Get-Content -LiteralPath (Join-Path $sd 'os-info.json') -Raw -EA Stop | ConvertFrom-Json).Elevated)" } catch { '' }
-    })
-    if ($elev[0] -and $elev[1] -and $elev[0] -ne $elev[1]) {
-        $lines.Add('  WARN: One scan was made without administrator rights - Appx packages of other users, optional features and capabilities are missing from it, so differences in those sections are not real.')
-    }
     foreach ($sf in $surfaces) {
         $rm = if ($sf.S -eq 'Appx packages') { $removed } else { $null }
         $rows = @(Compare-WHDSurface (Import-WHDCsvSafe $OldDir $sf.F) (Import-WHDCsvSafe $NewDir $sf.F) $sf.S $sf.K $sf.X $rm)
@@ -298,7 +312,7 @@ function Get-AiTag([string]$name) {
     return $null
 }
 
-Say ("WinHardenDebloat inventory  |  admin={0}  |  out={1}" -f $IsAdmin, $OutDir)
+Say ("WHD Next inventory  |  admin={0}  |  out={1}" -f $IsAdmin, $OutDir)
 Say ("Host: {0}  PS {1}" -f $env:COMPUTERNAME, $PSVersionTable.PSVersion.ToString())
 if (-not $IsAdmin) {
     Say 'Not elevated: provisioned-package and effective-AppLocker scans will be SKIPPED.' 'WARN'
@@ -315,6 +329,9 @@ $osInfo = [pscustomobject]@{
     Architecture = $os.OSArchitecture
     Elevated     = $IsAdmin
     ScannedUtc   = (Get-Date).ToUniversalTime().ToString('o')
+    # WHD Next (gap G13): tag the scan with this PC, so a copied folder is recognised on another install.
+    MachineId    = $(try { "$((Get-ItemProperty -LiteralPath 'HKLM:\SOFTWARE\Microsoft\Cryptography' -Name MachineGuid -EA SilentlyContinue).MachineGuid)".ToLower() } catch { '' })
+    Computer     = "$env:COMPUTERNAME"
 }
 $osInfo | ConvertTo-Json | Set-Content (Join-Path $OutDir 'os-info.json')
 Say ("OS: {0}  {1} (build {2}.{3})" -f $osInfo.Caption, $osInfo.DisplayVer, $osInfo.BuildNumber, $osInfo.UBR)
@@ -465,7 +482,7 @@ if (Test-Path $applockerDir) {
 }
 $appLockerCacheFiles | Export-Csv (Join-Path $OutDir 'applocker-cache-files.csv') -NoTypeInformation -Encoding UTF8
 
-# Application Identity service (AppIDSvc) drives enforcement - report its state,
+# Application Identity service (AppIDSvc) drives enforcement — report its state,
 # because AppLocker rules are silently ignored when it is not running.
 $appId = $null
 try { $appId = Get-Service AppIDSvc -EA Stop } catch {}
@@ -519,7 +536,7 @@ Say ("Win32 apps: {0} entries" -f $win32.Count)
 # ================================================= HUMAN-READABLE REPORT =======
 $report = New-Object System.Collections.Generic.List[string]
 $report.Add('================================================================')
-$report.Add(' WinHardenDebloat  -  INVENTORY REPORT (read-only)')
+$report.Add(' WHD Next  -  INVENTORY REPORT (read-only)')
 $report.Add('================================================================')
 $report.Add(('Scanned : {0}  (UTC {1})' -f $env:COMPUTERNAME, $osInfo.ScannedUtc))
 $report.Add(('OS      : {0}  {1}  build {2}.{3}  {4}' -f $osInfo.Caption,$osInfo.DisplayVer,$osInfo.BuildNumber,$osInfo.UBR,$osInfo.Architecture))

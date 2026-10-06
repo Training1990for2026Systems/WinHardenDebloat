@@ -82,7 +82,7 @@ function Get-Snapshot {
     foreach ($d in @(Get-PnpDevice -EA SilentlyContinue | Where-Object { $_.Class -in @('Bluetooth', 'Net') } | Sort-Object Class, FriendlyName)) {
         $s.Add(("  [{0}] {1} | {2} | {3} | {4}" -f $d.Class, $d.FriendlyName, $d.Status, $d.ConfigManagerErrorCode, $d.Present))
     }
-    $s.Add('[Bluetooth-looking devices, any class - incl. Intel Bluetooth (USB VID_8087), if present  class | name | status | problem | present]')
+    $s.Add('[Bluetooth-looking devices, any class  class | name | status | problem | present]')
     foreach ($d in @(Get-PnpDevice -EA SilentlyContinue | Where-Object { "$($_.FriendlyName) $($_.InstanceId) $($_.Class)" -match 'Bluetooth|^BTH|\\BTH|VID_8087' } | Sort-Object Class, FriendlyName)) {
         $s.Add(("  [{0}] {1} | {2} | {3} | {4}" -f $d.Class, $d.FriendlyName, $d.Status, $d.ConfigManagerErrorCode, $d.Present))
     }
@@ -112,9 +112,7 @@ Write-Host (' Waiting {0} s so the problem can happen - leave it running (type X
 try { while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) } } catch { }   # drop keys typed before the wait
 $end = (Get-Date).AddSeconds($WaitSeconds)
 while ((Get-Date) -lt $end) {
-    $keyHit = $false
-    try { $keyHit = [Console]::KeyAvailable } catch { }   # no console (ISE, redirected input) = no key
-    if ($keyHit) { $k = [Console]::ReadKey($true); if ($k.Key -eq 'X') { break } }
+    if ([Console]::KeyAvailable) { $k = [Console]::ReadKey($true); if ($k.Key -eq 'X') { break } }
     Write-Host ("`r  {0,4} s left " -f [int](($end - (Get-Date)).TotalSeconds)) -NoNewline
     Start-Sleep -Milliseconds 500
 }

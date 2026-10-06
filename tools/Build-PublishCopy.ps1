@@ -1,17 +1,18 @@
 <#
 ================================================================================
- WinHardenDebloat  -  tools\Build-PublishCopy.ps1   (Classic 1.4, 2026-09-30)
+ WHD Next  -  tools\Build-PublishCopy.ps1   (from Classic 1.4; brought in line with Classic 1.4.2 on 2026-10-05)
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
- Builds a CLEAN copy of WHD for publishing, with this PC's personal details removed.
+ Builds a CLEAN copy of WHD Next for publishing, with this PC's personal details removed.
  The working project folder is only READ - nothing in it is changed.
 
  User decisions 2026-09-30:
    - a separate publish copy (the working folder stays untouched)
-   - contents: code + profiles, README + general guides, the test write-ups.
+   - contents: code + profiles, the theme pictures, README + general guides, the test write-ups.
      NOT included: logs, inventory scans, restore journals/backups, archive, planning docs
-     (roadmap, release plan, NTS plan, architecture notes), private working notes.
+     (roadmap, release plan, NTS plan, architecture notes), private working notes,
+     block lists (other people's data), PowerShell installer files in installers\.
 
  What is removed / replaced (found live on THIS PC, so it works on any PC):
    computer name            -> <PC-NAME>
@@ -28,7 +29,8 @@
  Run (no admin needed) in the project folder:
    powershell -ExecutionPolicy Bypass -File .\tools\Build-PublishCopy.ps1
    optional: -ExtraTerms 'word1','word2'    -Dest <folder>
- Output: <project>\publish\WinHardenDebloat_<date_time>\ + PUBLISH-REPORT.txt
+ Output: <project>\publish\WHD-Next_<date_time>\ + PUBLISH-REPORT_<date_time>.txt
+ The theme pictures are copied byte for byte (they are not text); everything else is read as text.
 ================================================================================
 #>
 [CmdletBinding()]
@@ -42,18 +44,24 @@ $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $PSScriptRoot
 $stamp = Get-Date -Format 'yyyy-MM-dd_HHmm'
-if (-not $Dest) { $Dest = Join-Path $root ("publish\WinHardenDebloat_{0}" -f $stamp) }
+if (-not $Dest) { $Dest = Join-Path $root ("publish\WHD-Next_{0}" -f $stamp) }
 if (Test-Path -LiteralPath $Dest) { throw ("Destination already exists: {0} - pick another -Dest" -f $Dest) }
 
 # ---- 1. what goes in (paths relative to the project folder) -----------------
 $include = New-Object System.Collections.Generic.List[string]
-foreach ($f in @('WHD.ps1', 'WHD-GUI.ps1', 'Inventory.ps1', 'README.md', 'Run.txt', 'LICENSE', 'SECURITY.md', '.gitignore', '.gitattributes')) { $include.Add($f) }
+foreach ($f in @('Start-WHD.cmd', 'Start-WHD.ps1', 'WHD.ps1', 'WHD-GUI.ps1', 'WHD-Placeholder.ps1', 'Inventory.ps1', 'README.md', 'Run.txt', 'LICENSE', 'SECURITY.md', '.gitignore', '.gitattributes')) { $include.Add($f) }
 foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $root 'modules') -Filter *.ps1 -File)) { $include.Add("modules\$($f.Name)") }
 foreach ($f in @(Get-ChildItem -LiteralPath (Join-Path $root 'tools') -Filter *.ps1 -File)) { $include.Add("tools\$($f.Name)") }
 # profiles: WHD's own JSON profiles only (not the downloaded block lists - other people's data, check their licenses first)
 foreach ($f in @('standard.json', 'validated.json', 'lean.json', 'firewall-baseline.json')) { $include.Add("profiles\$f") }
 # docs: general guides + test write-ups
-foreach ($f in @('firewall-module.md', 'standard-reimage.md', 'radio-group-test.md', 'update-review-2026-09-29.md')) { $include.Add("docs\$f") }
+foreach ($f in @('firewall-module.md', 'standard-reimage.md', 'radio-group-test.md', 'update-review-2026-09-29.md', 'theme.md')) { $include.Add("docs\$f") }
+# installers: only the note that explains the folder (never an installer file)
+$include.Add('installers\README.txt')
+# theme pictures (WHD Next's own, made by the project): copied byte for byte, never read as text
+$binary = New-Object System.Collections.Generic.List[string]
+$picDir = Join-Path $root 'theme\pictures'
+if (Test-Path -LiteralPath $picDir) { foreach ($f in @(Get-ChildItem -LiteralPath $picDir -Filter *.jpg -File | Sort-Object Name)) { $binary.Add("theme\pictures\$($f.Name)") } }
 
 # ---- 2. this PC's identifiers (read live) ----------------------------------
 $terms = New-Object System.Collections.Generic.List[object]   # @{ Find; Repl; Label }
@@ -130,7 +138,7 @@ function Read-TextKeepEncoding {
 
 # ---- 3. copy + scrub --------------------------------------------------------
 $report = New-Object System.Collections.Generic.List[string]
-$report.Add(("WinHardenDebloat - PUBLISH COPY   {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm')))
+$report.Add(("WHD Next - PUBLISH COPY   {0}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm')))
 $report.Add(("Source (read only): <project folder>    Output: {0}" -f (Split-Path $Dest -Leaf)))
 $report.Add(("Hardware generalization rules (docs): {0} from tools\publish-generalize.txt" -f $genRules.Count))
 if (-not $genFound) { $report.Add('NOTE: ' + $genMissingNote) }
@@ -165,6 +173,16 @@ foreach ($rel in $include) {
     $copied++
     $report.Add(("  {0,-48} {1}" -f $rel, $(if ($hits) { "$hits replacement(s)" } else { 'clean' })))
 }
+# pictures: byte-for-byte copy (reading a picture as text would damage it)
+foreach ($rel in $binary) {
+    $src = Join-Path $root $rel
+    $dst = Join-Path $Dest $rel
+    $dd = Split-Path -Parent $dst
+    if (-not (Test-Path -LiteralPath $dd)) { New-Item -ItemType Directory -Path $dd -Force | Out-Null }
+    Copy-Item -LiteralPath $src -Destination $dst
+    $copied++
+}
+if ($binary.Count) { $report.Add(("  {0,-48} {1} picture(s) copied byte for byte" -f 'theme\pictures\*.jpg', $binary.Count)) }
 foreach ($m in $missing) { $report.Add(("  {0,-48} NOT FOUND - skipped" -f $m)) }
 
 # ---- 4. leak scan of the output ---------------------------------------------
@@ -172,6 +190,7 @@ $report.Add('')
 $report.Add('LEAK SCAN (output folder):')
 $leaks = 0
 foreach ($f in @(Get-ChildItem -LiteralPath $Dest -Recurse -File)) {
+    if ($f.Extension -eq '.jpg') { continue }   # pictures are not text; nothing from this PC is written into them here
     $t = (Read-TextKeepEncoding -Path $f.FullName).Text
     foreach ($term in $terms) { if ($t.IndexOf($term.Find, [StringComparison]::OrdinalIgnoreCase) -ge 0) { $leaks++; $report.Add(("  LEAK {0}: {1}" -f $f.Name, $term.Label)) } }
     if ($f.Extension -in '.md', '.txt') {
@@ -191,7 +210,7 @@ $sums = @(foreach ($f in @(Get-ChildItem -LiteralPath $Dest -Recurse -File | Sor
 
 $report.Add('')
 $report.Add(("Files copied: {0}   missing: {1}   leaks: {2}   SHA256SUMS.txt written" -f $copied, $missing.Count, $leaks))
-$report.Add('Not included on purpose: logs, inventory, restore, archive, publish, profiles\incoming, block lists, planning docs, private notes.')
+$report.Add('Not included on purpose: logs, inventory, restore, archive, publish, profiles\incoming, block lists, planning docs, private notes, installer files.')
 $repPath = Join-Path (Split-Path -Parent $Dest) ("PUBLISH-REPORT_{0}.txt" -f $stamp)
 [IO.File]::WriteAllLines($repPath, [string[]]$report, (New-Object System.Text.UTF8Encoding($false)))
 $report | ForEach-Object { Write-Host $_ }

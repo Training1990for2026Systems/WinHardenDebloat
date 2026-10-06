@@ -1,6 +1,6 @@
 # Security policy
 
-WinHardenDebloat (WHD) changes Windows security and privacy settings, so problems in it matter.
+WHD Next (WinHardenDebloat for PowerShell 7.6) changes Windows security and privacy settings, so problems in it matter.
 
 ## Reporting a problem
 
@@ -15,7 +15,7 @@ You will get an answer by e-mail. Please give a reasonable time to fix the probl
 
 ## Scope
 
-- In scope: the scripts in this repository (WHD.ps1, WHD-GUI.ps1, Inventory.ps1, modules\, tools\) and its profiles.
+- In scope: the scripts in this repository (Start-WHD.ps1, WHD.ps1, WHD-GUI.ps1, Inventory.ps1, modules\, tools\) and its profiles.
 - Out of scope: Windows itself, Microsoft Defender, and third-party block lists.
 
 ## Safe use

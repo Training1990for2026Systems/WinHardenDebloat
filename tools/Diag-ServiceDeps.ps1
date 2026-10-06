@@ -44,7 +44,7 @@ function Get-SvcDependsOn {
     param([string]$Name)
     $k = Get-ItemProperty -LiteralPath (Join-Path $svcRoot $Name) -EA SilentlyContinue
     if (-not $k) { return @() }
-    @(@($k.DependOnService) + @($k.DependOnGroup | Where-Object { $_ } | ForEach-Object { "group:$_" }) | Where-Object { $_ })
+    @(@($k.DependOnService) + @($k.DependOnGroup | ForEach-Object { "group:$_" }) | Where-Object { $_ })
 }
 function Show-NeedsTree {
     param([string]$Name, [int]$Depth = 0, [System.Collections.Generic.HashSet[string]]$Seen)

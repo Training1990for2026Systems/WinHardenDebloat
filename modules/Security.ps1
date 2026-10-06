@@ -1,6 +1,6 @@
 <#
 ================================================================================
- WinHardenDebloat  -  modules\Security.ps1   ("Security+")
+ WHD Next  -  modules\Security.ps1   (Phase 8 - "Security+")
  Author : Training1990for2026Systems   Contact: t90018273@gmail.com
  License: MIT (see LICENSE)            Built with Claude by Anthropic
 --------------------------------------------------------------------------------
@@ -8,17 +8,14 @@
  Common.ps1 engine: dry-run by default, one confirm per action, restore point
  before the first change, journaled (Undo center) and verified (read-back).
 
- What it offers:
-   B6 Defender : PUA blocking ON; Network protection + Controlled folder access:
-                 the menu options set AUDIT (log-only) or Block; ASR groups =
-                 Microsoft standard 3, script/download, Office/Adobe/email - the
-                 menu options start them in AUDIT (K switches audited rules to
-                 Block); a profile can set Audit or Block.
+ Design choices:
+   B6 Defender : PUA blocking ON; Network protection + Controlled folder access
+                 start in AUDIT (log-only); ASR groups = Microsoft standard 3,
+                 script/download, Office/Adobe/email - all start in AUDIT.
                  (Stronger cloud protection and "strict extras" are not included.)
    B7 Protocols: LLMNR, NetBIOS over TCP/IP, WPAD, Remote Assistance - off.
-   B8 Report   : memory integrity, LSA protection = REPORT ONLY. Password +
-                 lockout: report, and option W sets the WHD targets.
-                 UAC: report, and set "Always notify" if it isn't.
+   B8 Report   : memory integrity, LSA protection, password/lockout = REPORT
+                 ONLY. UAC: report, and set "Always notify" if it isn't.
 
  Sources: Microsoft Learn - ASR rules reference (GUIDs; "available on any
  edition of Windows that includes Microsoft Defender Antivirus (for example,
@@ -52,9 +49,9 @@ function _WHDAsrActionName([int]$a) { switch ($a) { 0 { 'Off' } 1 { 'Block' } 2 
 
 # ---- Defender availability ---------------------------------------------------
 function Test-WHDDefenderReady {
-    if (-not (Get-Command Get-MpPreference -EA SilentlyContinue)) { Write-WHDLog 'Defender PowerShell commands are not available.' 'ERR'; return $false }
+    if (-not (Test-WHDDefenderCim)) { Write-WHDLog 'Microsoft Defender management (CIM) is not available on this PC.' 'ERR'; return $false }
     try {
-        $s = Get-MpComputerStatus -EA Stop
+        $s = Get-WHDMpComputerStatus
         if (-not $s.AntivirusEnabled -or "$($s.AMRunningMode)" -notmatch 'Normal') {
             Write-WHDLog ("Microsoft Defender Antivirus is not the active antivirus (mode: {0}). These settings only work when it is." -f $s.AMRunningMode) 'WARN'
             return $false
@@ -68,22 +65,27 @@ function Set-WHDMpPreference {
     param([Parameter(Mandatory)][ValidateSet('PUAProtection','EnableNetworkProtection','EnableControlledFolderAccess')][string]$Setting,
           [Parameter(Mandatory)][int]$Value)
     $old = $null
-    try { $old = [int](Get-MpPreference -EA Stop).$Setting } catch {}
+    try { $old = [int](Get-WHDMpPreference).$Setting } catch {}
     if ($null -ne $old -and $old -eq $Value) { Write-WHDLog ("{0} already {1}." -f $Setting, $Value) 'INFO'; return }
     $jr = @{ Kind = 'mppref'; Setting = $Setting; OldValue = $old; NewValue = $Value }
-    Invoke-WHDChange -Description ("Defender {0}: {1} -> {2}" -f $Setting, $old, $Value) -Force -Journal $jr -Action {
-        $p = @{ ErrorAction = 'Stop' }; $p[$Setting] = $Value
-        Set-MpPreference @p
-        $now = [int](Get-MpPreference -EA Stop).$Setting
+    $whdMpRes = Invoke-WHDChange -Description ("Defender {0}: {1} -> {2}" -f $Setting, $old, $Value) -Force -Journal $jr -Action {
+        # WHD Next: CIM method Set instead of Set-MpPreference (the type is read from the class).
+        [void](Invoke-WHDCimStatic -Namespace $script:WHDDefenderNs -ClassName 'MSFT_MpPreference' -Method 'Set' -Values @{ $Setting = $Value })
+        $now = [int](Get-WHDMpPreference).$Setting
         if ($now -ne $Value) { throw ("read-back mismatch: {0} is {1} (Tamper Protection or policy may block it)" -f $Setting, $now) }
-    } | Out-Null
+    }
+    # WHD Next (gap G11, user decision 2026-10-02): folder protection was just switched to Block for real -
+    # make sure WHD Next can still write its own files before anything else is changed.
+    if ($Setting -eq 'EnableControlledFolderAccess' -and $Value -eq 1 -and $whdMpRes -and "$($whdMpRes.Status)" -eq 'done') {
+        [void](Wait-WHDFolderProtectionCheck -After ("Defender {0}: {1} -> {2}" -f $Setting, $old, $Value))
+    }
 }
 
 # ---- ASR ---------------------------------------------------------------------
 function Get-WHDAsrState {
     $map = @{}
     try {
-        $p = Get-MpPreference -EA Stop
+        $p = Get-WHDMpPreference
         $ids = @($p.AttackSurfaceReductionRules_Ids); $acts = @($p.AttackSurfaceReductionRules_Actions)
         for ($i = 0; $i -lt $ids.Count; $i++) { if ($ids[$i]) { $map["$($ids[$i])".ToLower()] = [int]$acts[$i] } }
     } catch {}
@@ -103,7 +105,9 @@ function Set-WHDAsrRule {
     $asrAct = $Action; $asrId = $Id
     $jr = @{ Kind = 'asr'; RuleId = $Id; RuleName = $Name; OldAction = $old; NewAction = $asrAct }
     Invoke-WHDChange -Description ("ASR {0} -> {1}: {2}" -f (_WHDAsrActionName $old), (_WHDAsrActionName $asrAct), $Name) -Force -Journal $jr -Action {
-        Add-MpPreference -AttackSurfaceReductionRules_Ids $asrId -AttackSurfaceReductionRules_Actions $asrAct -EA Stop
+        # WHD Next: CIM method Add instead of Add-MpPreference.
+        [void](Invoke-WHDCimStatic -Namespace $script:WHDDefenderNs -ClassName 'MSFT_MpPreference' -Method 'Add' -Values @{
+            AttackSurfaceReductionRules_Ids = @($asrId); AttackSurfaceReductionRules_Actions = @($asrAct) })
         $now = @(Get-WHDAsrState | Where-Object { $_.Id -eq $asrId })[0]
         if ([int]$now.Code -ne $asrAct) { throw ("read-back mismatch: rule is {0}" -f $now.Action) }
     } | Out-Null
@@ -156,7 +160,7 @@ function Get-WHDDefenderEvents {
 }
 
 # The same events, one entry per (type, rule, program, target): how often, first and last time.
-# Newest first. Read-only. (A screen table cut off the Program and Target columns.)
+# Newest first. Read-only. (Build step 11: the screen table cut off the Program and Target columns.)
 function Get-WHDDefenderEventGroups {
     param([object[]]$Events)
     $map = @{}; $keys = New-Object System.Collections.Generic.List[string]
@@ -195,8 +199,8 @@ function Show-WHDDefenderEvents {
         $color = 'Gray'
         if ("$($g.Type)" -like '*block*') { $color = 'Yellow' }
         $last = ''; $first = ''
-        try { $last = ([datetime]$g.Last).ToString($fmt, [Globalization.CultureInfo]::InvariantCulture) } catch { $last = "$($g.Last)" }
-        try { $first = ([datetime]$g.First).ToString($fmt, [Globalization.CultureInfo]::InvariantCulture) } catch { $first = "$($g.First)" }
+        try { $last = ([datetime]$g.Last).ToString($fmt) } catch { $last = "$($g.Last)" }
+        try { $first = ([datetime]$g.First).ToString($fmt) } catch { $first = "$($g.First)" }
         if ([int]$g.Count -gt 1) { $when = ('x{0}   last {1}   first {2}' -f $g.Count, $last, $first) }
         else                     { $when = ('x1   {0}' -f $last) }
         Write-Host ''
@@ -227,17 +231,9 @@ function Invoke-WHDDefenderProtection {
     $note = switch ($Which) {
         'PUA'     { 'Blocks adware / bundleware / unwanted installers. Same as Windows Security > App & browser control > Reputation-based protection.' }
         'Network' { 'Blocks any app from reaching known-malicious sites (not only Edge). AUDIT = log only.' }
-        'Folders' { 'Only trusted apps may change protected folders (Documents, Pictures, Videos, Music, Favorites; on some PCs also Desktop). AUDIT = log only; in Block mode allow an app in Windows Security > Ransomware protection.' }
+        'Folders' { 'Only trusted apps may change protected folders (Documents, Pictures, Desktop...). AUDIT = log only; in Block mode allow an app in Windows Security > Ransomware protection.' }
     }
     Write-WHDRisk $(if ($Mode -eq 'On' -and $Which -eq 'Folders') { 'caution' } else { 'reversible' }) $note
-    if ($Mode -eq 'On' -and $Which -eq 'Folders') {
-        $cfaDir = ''
-        try { $cfaDir = Get-WHDProtectedFolderOfRoot } catch {}
-        if ($cfaDir) {
-            Write-WHDLog ("WHD runs from '{0}', inside the protected folder '{1}'. In BLOCK mode Windows does not treat PowerShell as a trusted app there: WHD's log may stop and later changes may not be recorded for undo." -f $script:WHDRoot, $cfaDir) 'WARN'
-            Write-WHDLog 'Better: do not switch it on now. Move the WHD folder outside the protected folders (for example C:\WHD), start WHD from there, then switch this on.' 'WARN'
-        }
-    }
     if (-not (Confirm-WHDProceed ("{0} -> {1}" -f $label, $Mode))) { Write-WHDLog 'skipped.' 'WARN'; return }
     Set-WHDMpPreference -Setting $setting -Value $val
 }
@@ -272,7 +268,7 @@ function Invoke-WHDProtocolOff {
     if ((Get-WHDRegOpsState -Ops $ops) -eq 'set') { Write-WHDLog 'Already off - nothing to change.' 'OK'; return }
     if (-not (Confirm-WHDProceed ("turn off {0}" -f $Item.Name))) { Write-WHDLog 'skipped.' 'WARN'; return }
     foreach ($op in $ops) { Set-WHDRegistryValue -Path $op.P -Name $op.N -Value $op.V -Type $op.T }
-    if ($Item.Key -eq 'llmnr' -and $script:WHDExecute) { & ipconfig.exe /flushdns | Out-Null }
+    if ($Item.Key -eq 'llmnr') { & ipconfig.exe /flushdns | Out-Null }
 }
 
 # ---- Network services off (v1.2, user's choices 2026-09-27) ------------------
@@ -286,7 +282,7 @@ $script:WHDNetServiceGroups = @(
     [ordered]@{ Key='fileshare'; Name='Workstation + Server (file/printer sharing)'; Services=@('LanmanServer','LanmanWorkstation'); Risk='caution'
                 Note='No Windows file or printer sharing, no mapped drives, no \\PC\share paths, no "net use". A few older installers ask the Workstation service for the PC name and may complain. Undo in the Undo center, then restart.' }
     [ordered]@{ Key='smb';       Name='SMB 1/2/3 protocol (server + client)'; Services=@(); Risk='caution'
-                Note='Server side SMB1=0 + SMB2=0 (SMB2 also covers SMB3; Microsoft Learn: detect/enable/disable SMBv1, v2, v3). Client drivers mrxsmb20/mrxsmb10 Start=4. Disabling the SMB client driver also stops the Workstation service from starting. SMB1 optional feature removed if it is on. Restart needed.' }
+                Note='Server side SMB1=0 + SMB2=0 (SMB2 also covers SMB3; Microsoft Learn: detect/enable/disable SMBv1, v2, v3). Client drivers mrxsmb20/mrxsmb10 Start=4. SMB1 optional feature removed if it is on. Restart needed.' }
     [ordered]@{ Key='dialvpn';   Name='Dial-up + built-in VPN (RAS, SSTP, Telephony)'; Services=@('RasMan','RasAuto','SstpSvc','RemoteAccess','TapiSrv'); Risk='caution'
                 Note='Settings > Network > VPN and Dial-up stop working; Mobile hotspot may too. Third-party VPN apps with their own driver are not affected. If Wi-Fi or Ethernet misbehaves after a restart, undo this group first.' }
     [ordered]@{ Key='ipsec';     Name='IPsec VPN keying (IKEEXT, PolicyAgent)'; Services=@('IKEEXT','PolicyAgent'); Risk='reversible'
@@ -301,7 +297,7 @@ $script:WHDNetServiceGroups = @(
     [ordered]@{ Key='faxphone';  Name='Fax + Phone service'; Services=@('Fax','PhoneSvc'); Risk='reversible'
                 Note='Fax (only if present) and Phone Service.' }
     [ordered]@{ Key='proxysvc';  Name='WinHTTP proxy SERVICE off - TEST ONLY (broke Wi-Fi in testing)'; Services=@('WinHttpAutoProxySvc'); Risk='hard'; NotInAll=$true
-                Note='In testing, with this service disabled Windows Connection Manager, WLAN AutoConfig and IP Helper did not start after a restart: Wi-Fi showed "Dormant" and there was no internet. Test-only; meant for Ethernet-only PCs. Never part of NA or a profile. Undo: Undo center, that session, then restart.' }
+                Note='In testing, with this service disabled WLAN AutoConfig and IP Helper did not run after a restart: Wi-Fi showed "Dormant" and there was no internet. Test-only; meant for Ethernet-only PCs. Never part of NA or a profile. Undo: Undo center, that session, then restart.' }
 )
 $script:WHDProxyConnKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings\Connections'
 # Byte 8 of DefaultConnectionSettings holds the flags; 0x08 = "Automatically detect settings".
@@ -359,7 +355,6 @@ function Invoke-WHDNetServiceOff {
     $smb1On = $false
     if ($Item.Key -eq 'smb') { try { $smb1On = ("$((Get-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -EA Stop).State)" -eq 'Enabled') } catch { } }
     $running = @($Item.Services | ForEach-Object { Get-Service -Name $_ -EA SilentlyContinue } | Where-Object { "$($_.Status)" -ne 'Stopped' })
-    if ($Item.Key -eq 'proxy' -and -not $ops.Count) { Write-WHDLog 'Proxy switch: this user has no saved proxy settings yet - open Settings > Network > Proxy once, then run this again.' 'WARN'; return }
     if (-not $ops.Count -and -not $smb1On) { Write-WHDLog 'Not present on this PC - nothing to do.' 'OK'; return }
     if ((Get-WHDRegOpsState -Ops $ops) -eq 'set' -and -not $smb1On -and -not $running.Count) { Write-WHDLog 'Already off - nothing to change.' 'OK'; return }
     if (-not (Confirm-WHDProceed ("turn off {0}" -f $Item.Name))) { Write-WHDLog 'skipped.' 'WARN'; return }
@@ -379,6 +374,9 @@ function Invoke-WHDNetServiceOff {
         Invoke-WHDChange -Description 'disable optional feature: SMB1Protocol' -Force -Journal $jr -Action {
             Disable-WindowsOptionalFeature -Online -FeatureName SMB1Protocol -NoRestart -EA Stop | Out-Null
         } | Out-Null
+    }
+    if ($Item.Key -eq 'proxy' -and -not @(_WHDProxyAutoDetectOps).Count) {
+        Write-WHDLog 'Proxy switch: this user has no saved proxy settings yet - open Settings > Network > Proxy once, then run this again.' 'WARN'
     }
     Write-WHDLog 'Restart the PC to finish.' 'INFO'
 }
@@ -430,7 +428,7 @@ function Set-WHDPasswordSetting {
         if ($r.Code -ne 0) { throw ("net accounts exit {0}: {1}" -f $r.Code, (($r.Out | Where-Object { $_ }) -join ' ')) }
         $now = Get-WHDPasswordPolicy
         if (-not $now -or [int]$now.$pwSet -ne $pwVal) { throw 'read-back mismatch: password setting did not stick' }
-    } | Out-Null
+    }
 }
 function Show-WHDPasswordPolicy {
     param($Policy = (Get-WHDPasswordPolicy))
@@ -495,7 +493,7 @@ function Show-WHDSecurityReport {
     Write-WHDLog '================ SECURITY+ REPORT (read-only) ================' 'ACT'
     # Defender
     try {
-        $s = Get-MpComputerStatus -EA Stop; $p = Get-MpPreference -EA Stop
+        $s = Get-WHDMpComputerStatus; $p = Get-WHDMpPreference
         $sigAge = [int]$s.AntivirusSignatureAge
         Write-WHDLog ("Defender antivirus  : {0}, real-time {1}, tamper protection {2}, signatures {3} day(s) old" -f $(if ($s.AntivirusEnabled) {'on'} else {'OFF'}), $(if ($s.RealTimeProtectionEnabled) {'on'} else {'OFF'}), $(if ($s.IsTamperProtected) {'on'} else {'off'}), $sigAge) $(if ($s.AntivirusEnabled -and $s.RealTimeProtectionEnabled -and $sigAge -le 7) {'OK'} else {'WARN'})
         $m = @{ 0 = 'off'; 1 = 'ON'; 2 = 'AUDIT' }
@@ -542,7 +540,7 @@ function Show-WHDSecurityMenu {
     Write-Host '  ================= SECURITY+ =================' -ForegroundColor White
     Write-Host '   R. Security report (read-only)'
     Write-Host '  Defender' -ForegroundColor DarkGray
-    $mp = $null; try { $mp = Get-MpPreference -EA Stop } catch {}
+    $mp = $null; try { $mp = Get-WHDMpPreference } catch {}
     $mt = @{ 0 = 'off'; 1 = 'BLOCK'; 2 = 'AUDIT'; 6 = 'WARN' }
     $now = { param($n) if ($mp) { $v = [int]$mp.$n; if ($mt.ContainsKey($v)) { $mt[$v] } else { "$v" } } else { '?' } }
     Write-Host ('   1. Block unwanted apps (PUA)      -> ON                     (now: {0})' -f $(if ($mp) { if ([int]$mp.PUAProtection -eq 1) { 'ON' } else { & $now 'PUAProtection' } } else { '?' }))
@@ -574,6 +572,12 @@ function Show-WHDSecurityMenu {
     $gs = if (Get-Command Get-WHDGuardStatus -EA SilentlyContinue) { (Get-WHDGuardStatus).Text } else { '?' }
     Write-Host ('   G. Install / refresh guard   (now: {0})' -f $gs)
     Write-Host '   GR. Run the check now        GO. Open the last report        GX. Remove guard'
+    # Step 11b: WHD Classic's guard task on the same PC - shown only when it exists.
+    if (Get-Command Get-WHDClassicGuardStatus -EA SilentlyContinue) {
+        $cg = Get-WHDClassicGuardStatus
+        if ($cg.Found -and $cg.Enabled) { Write-Host ('   GC. Switch OFF WHD Classic''s guard task   (now: {0})' -f $cg.Text) -ForegroundColor Yellow }
+        elseif ($cg.Found)              { Write-Host '       WHD Classic''s guard task: off' -ForegroundColor DarkGray }
+    }
     Write-Host '   B. Back'
 }
 function Invoke-WHDSecuritySubmenu {
@@ -601,10 +605,11 @@ function Invoke-WHDSecuritySubmenu {
             '^[Nn][Aa]$'  { foreach ($g in @($script:WHDNetServiceGroups | Where-Object { -not $_.NotInAll })) { Invoke-WHDNetServiceOff -Item $g } }
             '^[Uu]$'   { Set-WHDUacAlwaysNotify }
             '^[Ww]$'   { Invoke-WHDPasswordPolicy }
-            '^[Gg]$'       { Install-WHDUpdateGuard }
+            '^[Gg]$'       { Install-WHDUpdateGuard -AskClassic }
             '^[Gg][Rr]$'   { Invoke-WHDUpdateGuard -Now | Out-Null }
             '^[Gg][Oo]$'   { $st = Get-WHDGuardState; if ($st -and $st.LastReport -and (Test-Path -LiteralPath $st.LastReport)) { Start-Process -FilePath 'notepad.exe' -ArgumentList ('"{0}"' -f $st.LastReport) } else { Write-Host '  (no guard report yet)' -ForegroundColor DarkGray } }
             '^[Gg][Xx]$'   { Uninstall-WHDUpdateGuard }
+            '^[Gg][Cc]$'   { Disable-WHDClassicGuardTask }
             '^[Bb]$'   { return }
             default    { Write-Host '  invalid.' -ForegroundColor Yellow }
         }

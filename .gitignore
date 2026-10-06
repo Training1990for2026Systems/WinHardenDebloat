@@ -1,9 +1,10 @@
-# WinHardenDebloat - never commit PC-specific data
+# WHD Next - never commit PC-specific data
 logs/
 inventory/
 restore/
 archive/
 publish/
+reports/
 profiles/incoming/
 profiles/*.bak
 *.log
@@ -11,14 +12,8 @@ REPORT.txt
 
 # third-party block lists (other people's data - not ours to publish)
 profiles/blacklist-*.txt
-# private planning notes, review notes and this PC's publish rules
-docs/architecture-spec.md
-docs/engine-contract.md
-docs/next-project-brief.md
-docs/nts-option3-plan.md
-docs/release-plan.md
-docs/roadmap-plan-*.md
-docs/prerelease-review-*.md
+# PowerShell installer files someone put in installers\ (only the note is published)
+installers/*
+!installers/README.txt
+# this PC's publish rules (they name the hardware)
 tools/publish-generalize.txt
-# staging folder for the main-branch guide
-repo/
