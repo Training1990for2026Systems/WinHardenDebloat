@@ -636,40 +636,109 @@ function _WHDIcacls {
     $r = Invoke-WHDNative -Exe 'icacls.exe' -ArgList $IcArgs
     if ($r.Code -ne 0) { throw ("icacls {0} failed ({1}): {2}" -f ($IcArgs -join ' '), $r.Code, (($r.Out | Where-Object { $_ }) -join ' ')) }
 }
+# '' when nothing below $Root is a link (reparse point) and every folder below it is locked like the base
+# (owner Administrators / SYSTEM, nobody else may write); otherwise what is wrong. Links are not followed.
+# Why: the commands that set owner and permissions walk the whole tree. They are only safe when no standard
+# user can change the tree while they run, and when no link leads out of it. Never throws.
+function _WHDGuardTreeProblem {
+    param([string]$Root)
+    try {
+        $whdTpStack = New-Object System.Collections.Stack
+        $whdTpStack.Push($Root)
+        while ($whdTpStack.Count -gt 0) {
+            $whdTpDir = [string]$whdTpStack.Pop()
+            $whdTpInfo = New-Object System.IO.DirectoryInfo -ArgumentList $whdTpDir
+            foreach ($whdTpE in @($whdTpInfo.GetFileSystemInfos())) {
+                if ($whdTpE.Attributes -band [IO.FileAttributes]::ReparsePoint) { return ('{0} is a link (reparse point)' -f $whdTpE.FullName) }
+                if ($whdTpE.Attributes -band [IO.FileAttributes]::Directory) {
+                    $whdTpProb = Get-WHDGuardFolderProblem -Path $whdTpE.FullName
+                    if ($whdTpProb) { return ('{0}: {1}' -f $whdTpE.FullName, $whdTpProb) }
+                    $whdTpStack.Push($whdTpE.FullName)
+                }
+            }
+        }
+    } catch { return ('{0} could not be checked: {1}' -f $Root, $_.Exception.Message) }
+    return ''
+}
+# Makes a NEW folder that is locked from the first moment: its permissions (Administrators + SYSTEM full,
+# Users read/execute, nothing inherited from the parent) are part of the creation itself, so there is no
+# moment in which a standard user could put something into it. If that way of creating is not available,
+# the folder is made the plain way and locked in the very next step (as WHD did before 1.5), and a line says so.
+function _WHDGuardNewLockedFolder {
+    param([string]$Path)
+    $whdNlDone = $false
+    try {
+        $whdNlSec = New-Object System.Security.AccessControl.DirectorySecurity
+        $whdNlSec.SetAccessRuleProtection($true, $false)
+        $whdNlInherit = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        $whdNlProp    = [System.Security.AccessControl.PropagationFlags]::None
+        $whdNlAllow   = [System.Security.AccessControl.AccessControlType]::Allow
+        foreach ($whdNlPair in @(@('S-1-5-32-544', 'FullControl'), @('S-1-5-18', 'FullControl'), @('S-1-5-32-545', 'ReadAndExecute'))) {
+            $whdNlSid  = New-Object System.Security.Principal.SecurityIdentifier -ArgumentList "$($whdNlPair[0])"
+            $whdNlRule = New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList $whdNlSid, ([System.Security.AccessControl.FileSystemRights]"$($whdNlPair[1])"), $whdNlInherit, $whdNlProp, $whdNlAllow
+            $whdNlSec.AddAccessRule($whdNlRule)
+        }
+        [void][System.IO.Directory]::CreateDirectory($Path, $whdNlSec)
+        $whdNlDone = $true
+    } catch {
+        Write-WHDLog ("  the guard folder could not be created already locked ({0}) - creating it and locking it in the next step instead." -f $_.Exception.Message) 'WARN'
+    }
+    if (-not $whdNlDone) {
+        if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -EA Stop | Out-Null }
+        _WHDIcacls @($Path, '/inheritance:r', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX', '/Q')
+    }
+}
 # Copy the scripts to ProgramData and lock them: Administrators + SYSTEM full,
 # Users read/execute, owner = Administrators (well-known SIDs, any language).
+# v1.5 - order of the steps (a scheduled task runs these scripts elevated, so there must be no moment in which
+# a standard user or a program without admin rights could put something into this folder):
+#   1. no folder on the way may be a link;
+#   2. a base folder that is already there must be locked already (owner Administrators / SYSTEM, nobody else
+#      may write), and so must every folder below it, with no link anywhere below - otherwise WHD refuses and
+#      says what it found. A base folder that is not there is created locked (see _WHDGuardNewLockedFolder);
+#   3. the lock on the base is set again WITHOUT first resetting it (a reset would let the parent's permissions
+#      in for a moment), then owner and permissions of everything below are put in line (links never followed);
+#   4. every file in the script folder is removed - hidden ones too - and the scripts are copied fresh.
 function _WHDGuardCopy {
     param([string]$Src, [string]$Base, [string]$Dst)
+    $whdGcMod = Join-Path $Dst 'modules'
     # A pre-made junction/symlink here would send the scripts (and the permissions) somewhere else.
-    foreach ($d in @($Base, $Dst, (Join-Path $Dst 'modules'))) {
+    foreach ($d in @($Base, $Dst, $whdGcMod)) {
         if ((Test-Path -LiteralPath $d) -and ((Get-Item -LiteralPath $d -Force -EA Stop).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'the guard folder is a link (reparse point) - refusing to use it' }
     }
     # v1.5: the same for the guard's own data folder (guard-data) and the folders inside it
     # (this look also sees a link whose target is gone).
-    if (_WHDGuardFirstLink -Paths (@($Base, $Dst, (Join-Path $Dst 'modules')) + @(_WHDGuardDataFolders -Base $Base))) { throw 'the guard folder is a link (reparse point) - refusing to use it' }
-    # v1.5: a guard-data folder that is already there must have been made by WHD (owner Administrators / SYSTEM,
-    # nobody else may write). The commands below would hand a folder made by someone else the same owner and
-    # permissions - and its contents would then look like the guard's own. Checked BEFORE they run.
+    if (_WHDGuardFirstLink -Paths (@($Base, $Dst, $whdGcMod) + @(_WHDGuardDataFolders -Base $Base))) { throw 'the guard folder is a link (reparse point) - refusing to use it' }
     $whdGdDir = Join-Path $Base $script:WHDGuardDataName
-    $whdGdHad = Test-Path -LiteralPath $whdGdDir
-    if ($whdGdHad) {
-        $whdGdProb = ''
-        if (-not (Test-Path -LiteralPath $whdGdDir -PathType Container)) { $whdGdProb = 'it is not a folder' } else { $whdGdProb = Get-WHDGuardFolderProblem -Path $whdGdDir }
-        if ($whdGdProb) { throw ("the folder {0} was not made by WHD ({1}) - refusing to use it. Look at it, then delete or rename it and press GU again" -f $whdGdDir, $whdGdProb) }
+    $whdGcFix = 'Look at it; if nothing in it is needed, delete or rename it (as administrator) and press GU again'
+    if (Test-Path -LiteralPath $Base) {
+        # The base folder is there already: it must be WHD's own, locked folder - all of it.
+        if (-not (Test-Path -LiteralPath $Base -PathType Container)) { throw ("{0} is not a folder - refusing to use it. {1}" -f $Base, $whdGcFix) }
+        $whdGcProb = Get-WHDGuardFolderProblem -Path $Base
+        if ($whdGcProb) { throw ("the folder {0} is there, but it is not locked the way WHD locks it ({1}) - refusing to use it. {2}" -f $Base, $whdGcProb, $whdGcFix) }
+        if ((Test-Path -LiteralPath $whdGdDir) -and -not (Test-Path -LiteralPath $whdGdDir -PathType Container)) { throw ("{0} is not a folder - refusing to use it. {1}" -f $whdGdDir, $whdGcFix) }
+        $whdGcProb = _WHDGuardTreeProblem -Root $Base
+        if ($whdGcProb) { throw ("something inside {0} was not made by WHD ({1}) - refusing to use the folder. {2}" -f $Base, $whdGcProb, $whdGcFix) }
+    } else {
+        _WHDGuardNewLockedFolder -Path $Base
+        # If the folder appeared from somewhere else in that moment, it does not carry the lock: refuse.
+        $whdGcProb = Get-WHDGuardFolderProblem -Path $Base
+        if ($whdGcProb) { throw ("the new folder {0} is not locked ({1}) - refusing to use it. {2}" -f $Base, $whdGcProb, $whdGcFix) }
     }
-    foreach ($d in @($Base, $Dst, (Join-Path $Dst 'modules'))) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null } }
-    _WHDIcacls @($Base, '/setowner', '*S-1-5-32-544', '/T', '/C', '/Q')
-    _WHDIcacls @($Base, '/reset', '/Q')
+    $whdGdHad = Test-Path -LiteralPath $whdGdDir
+    # From here on only Administrators / SYSTEM can add or change anything below the base folder.
+    foreach ($d in @($Dst, $whdGcMod)) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -EA Stop | Out-Null } }
     _WHDIcacls @($Base, '/inheritance:r', '/grant:r', '*S-1-5-32-544:(OI)(CI)F', '*S-1-5-18:(OI)(CI)F', '*S-1-5-32-545:(OI)(CI)RX', '/Q')
-    _WHDIcacls @((Join-Path $Base '*'), '/reset', '/T', '/C', '/Q')
-    # v1.5: the base folder is locked now (only Administrators / SYSTEM can add anything) - make guard-data in it.
-    # It was not there before the lock, so if it is there now someone slipped it in meanwhile: refuse.
-    if (-not $whdGdHad -and (Test-Path -LiteralPath $whdGdDir)) { throw ("the folder {0} appeared while the guard folder was being locked - refusing to use it. Look at it, then delete or rename it and press GU again" -f $whdGdDir) }
+    _WHDIcacls @($Base, '/setowner', '*S-1-5-32-544', '/T', '/C', '/L', '/Q')
+    _WHDIcacls @((Join-Path $Base '*'), '/reset', '/T', '/C', '/L', '/Q')
+    # guard-data is made inside the locked base. It was not there before, so if it is there now without WHD
+    # having made it, refuse (cannot happen while the lock holds - kept as a second look).
+    if (-not $whdGdHad -and (Test-Path -LiteralPath $whdGdDir)) { throw ("the folder {0} appeared while the guard folder was being locked - refusing to use it. {1}" -f $whdGdDir, $whdGcFix) }
     _WHDGuardDataMake -Base $Base
     Get-ChildItem -LiteralPath $Dst -Recurse -File -Force -EA SilentlyContinue | Remove-Item -Force -EA Stop
     Copy-Item -LiteralPath (Join-Path $Src 'WHD.ps1')       -Destination $Dst -Force
     Copy-Item -LiteralPath (Join-Path $Src 'Inventory.ps1') -Destination $Dst -Force
-    Copy-Item -Path (Join-Path $Src 'modules\*.ps1') -Destination (Join-Path $Dst 'modules') -Force
+    Copy-Item -Path (Join-Path $Src 'modules\*.ps1') -Destination $whdGcMod -Force
 }
 function _WHDGuardRegister {
     param([string]$Dst, [string]$DataRoot)

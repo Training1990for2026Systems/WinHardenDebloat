@@ -579,7 +579,7 @@ $script:WHDLogSink = {
 # ---- confirm strategy -> a Yes/No dialog ------------------------------------
 $script:WHDConfirm = {
     param($msg)
-    ([System.Windows.MessageBox]::Show($win, ($msg + "`n`nProceed?"), 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)) -eq 'Yes'
+    ([System.Windows.MessageBox]::Show($win, ($msg + "`n`nProceed?"), 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
 }
 
 function Set-WHDStatus { param($t) $StatusTxt.Text = $t }
@@ -634,7 +634,7 @@ function Invoke-GuiPlanAction {
     $script:WHDGuiPlanYes = $false
     $script:WHDConfirm = {
         param($msg)
-        $whdGpYes = ([System.Windows.MessageBox]::Show($win, ($script:WHDGuiPlan + "`n`n" + $msg + "`n`nProceed?"), 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)) -eq 'Yes'
+        $whdGpYes = ([System.Windows.MessageBox]::Show($win, ($script:WHDGuiPlan + "`n`n" + $msg + "`n`nProceed?"), 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
         if ($whdGpYes) { $script:WHDGuiPlanYes = $true }
         return $whdGpYes
     }
@@ -868,7 +868,7 @@ function Invoke-FwAction {
     Write-WHDLog ("=== $Title ($(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'})) ===") 'ACT'
     $prev = $script:WHDConfirm
     if ($script:WHDExecute) {
-        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title`n`nThis changes Windows firewall, DNS or time settings. Proceed?", 'WinHardenDebloat - firewall', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)) -eq 'Yes'
+        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title`n`nThis changes Windows firewall, DNS or time settings. Proceed?", 'WinHardenDebloat - firewall', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
         if (-not $ok) { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
         $script:WHDConfirm = { param($m) $true }
     }
@@ -985,13 +985,13 @@ $FwRefreshBlBtn.Add_Click({
     if (-not $script:WHDExecute) { Write-WHDLog 'DRY-RUN: preview only. Tick EXECUTE to merge or replace.' 'DRY'; Set-WHDStatus 'Preview done (DRY-RUN).'; return }
     $msg = ("Current list: {0} ranges. Incoming: {1} ranges.`n`nMERGE   -> {2} ranges (keep all, add {3} new)`nREPLACE -> {4} ranges (drops {5} not in the new files)`n`nYes = MERGE     No = REPLACE     Cancel = do nothing" -f `
         $sum.Current, $sum.Incoming, $sum.MergeTotal, $sum.Added, $sum.ReplaceTotal, $sum.Removed)
-    $ans = [System.Windows.MessageBox]::Show($win, $msg, 'WinHardenDebloat - blocklist refresh', [System.Windows.MessageBoxButton]::YesNoCancel, [System.Windows.MessageBoxImage]::Question)
+    $ans = [System.Windows.MessageBox]::Show($win, $msg, 'WinHardenDebloat - blocklist refresh', [System.Windows.MessageBoxButton]::YesNoCancel, [System.Windows.MessageBoxImage]::Question, [System.Windows.MessageBoxResult]::Cancel)
     if ("$ans" -eq 'Cancel') { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
     $mode = if ("$ans" -eq 'Yes') { 'Merge' } else { 'Replace' }
     $prev = $script:WHDConfirm; $script:WHDConfirm = { param($m) $true }
     try {
         Invoke-WHDBlocklistRefresh -Mode $mode | Out-Null
-        $rb = [System.Windows.MessageBox]::Show($win, 'Blocklist file updated. Rebuild the firewall block rules from it now?', 'WinHardenDebloat - blocklist refresh', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
+        $rb = [System.Windows.MessageBox]::Show($win, 'Blocklist file updated. Rebuild the firewall block rules from it now?', 'WinHardenDebloat - blocklist refresh', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question, [System.Windows.MessageBoxResult]::No)
         if ("$rb" -eq 'Yes') { Update-WHDBlocklistRules }
     } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
     finally { $script:WHDConfirm = $prev }
@@ -1074,7 +1074,7 @@ $SecCfaBlockBtn.Add_Click({
     try { $cfaDir = Get-WHDProtectedFolderOfRoot } catch {}
     if ($cfaDir -and $script:WHDExecute) {
         $cfaMsg = ("WHD runs from inside the protected folder:`n{0}`n`nIn BLOCK mode Windows does not treat PowerShell as a trusted app there. WHD's log may stop and later changes may not be recorded for undo.`n`nBetter: answer No, move the WHD folder outside the protected folders (for example C:\WHD) and start it from there.`n`nSwitch it on anyway?" -f $cfaDir)
-        $cfaOk = ([System.Windows.MessageBox]::Show($win, $cfaMsg, 'WinHardenDebloat - warning', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)) -eq 'Yes'
+        $cfaOk = ([System.Windows.MessageBox]::Show($win, $cfaMsg, 'WinHardenDebloat - warning', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
         if (-not $cfaOk) { Write-WHDLog 'Ransomware folder protection BLOCK: cancelled (WHD folder is inside a protected folder).' 'INFO'; return }
     }
     Invoke-SecAction 'Defender: ransomware folder protection BLOCK' { Invoke-WHDDefenderProtection -Which Folders -Mode On }
@@ -1140,7 +1140,7 @@ function Invoke-UndoAction {
     Write-WHDLog ("=== $Title ($(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'})) ===") 'ACT'
     $prev = $script:WHDConfirm
     if ($script:WHDExecute) {
-        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title`n`nProceed?", 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)) -eq 'Yes'
+        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title`n`nProceed?", 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
         if (-not $ok) { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
         $script:WHDConfirm = { param($m) $true }
     }

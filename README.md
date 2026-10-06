@@ -520,17 +520,24 @@ Windows PowerShell 5.1 and still makes no web calls.
   - The change history, `update-gate.json` and `blocked-programs.json` stay in the WHD folder.
   - Menu **D** (compare scans) no longer sees the guard's scans; the guard compares against its own.
   - **GX** removes the task, the protected copy and the event log source; `guard-data` is kept.
+  - **The protected copy is locked more tightly.** A new `C:\ProgramData\WinHardenDebloat` folder is created already locked.
+    On a refresh the lock is set again without first resetting it, and nothing is changed unless the folder and every folder
+    inside it is WHD's own (owner Administrators / SYSTEM, nobody else may write, no link anywhere inside). If that is not
+    so, **GU refuses** and says which folder and why: look at it, delete or rename it as administrator, press GU again.
+    Hidden files in the script folder are removed on a refresh.
 - **Security+ E** (what the attack-surface rules caught) prints each item on its own lines with the full program and path;
   identical events are grouped with a count.
 - **Safety fixes found while merging:** "Enable default-deny" (Firewall 6) does nothing while the update gate is CLOSED or on
   PROGRAMS (before, its auto-rollback could set outbound back to Allow and so open the gate without a word); a JSON firewall
   import keeps the web rules off while the gate is closed; the gate is recorded "open" only when the change succeeded.
+- **Window version:** every Yes / No question now has **No** as its default button (Cancel in the block-list question), so a
+  stray Enter no longer confirms a change.
 - **Small things:** no stray result tables in any menu; an error message also says which file and line; fewer error lines in
   the log when reading permission switches and the firewall log size.
 - **Known limits of 1.5:** nothing of the above has run on a real PC yet. In the blocked-connections view, a second program
   with the same file name, protocol and port in another folder is shown as "allowed already". The guard's check of the
-  permissions on `C:\ProgramData\WinHardenDebloat` could only be tested with stand-ins; if it misreads a real folder, the guard
-  reports that its own folder is not used and keeps its files in the WHD folder as before.
+  permissions on `C:\ProgramData\WinHardenDebloat`, and creating that folder already locked, could only be tested with
+  stand-ins. If the check misreads a real folder, GU refuses to install or refresh the guard and says why.
 
 ## Menu
 ```
