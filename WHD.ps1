@@ -100,9 +100,19 @@ if ($Guard) {
     try { Invoke-WHDUpdateGuard | Out-Null }
     catch {
         try {
-            $gd = Join-Path $script:WHDRoot 'restore\update-guard'
-            if (-not (Test-Path -LiteralPath $gd)) { New-Item -ItemType Directory -Path $gd -Force | Out-Null }
-            ("{0}  guard error: {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $_.Exception.Message) | Add-Content -LiteralPath (Join-Path $gd 'guard-errors.txt') -Encoding UTF8
+            # v1.5: the guard's own folder first (Get-WHDGuardDataDir - it is the WHD folder when the guard's own folder
+            # is not in use); if that cannot be written, the place used before v1.5.
+            $guardErrLine = ("{0}  guard error: {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $_.Exception.Message)
+            $guardErrDirs = @()
+            if (Get-Command Get-WHDGuardDataDir -EA SilentlyContinue) { try { $guardErrDirs += "$(Get-WHDGuardDataDir)" } catch {} }
+            $guardErrDirs += (Join-Path $script:WHDRoot 'restore\update-guard')
+            foreach ($gd in @($guardErrDirs | Where-Object { $_ } | Select-Object -Unique)) {
+                try {
+                    if (-not (Test-Path -LiteralPath $gd)) { New-Item -ItemType Directory -Path $gd -Force | Out-Null }
+                    $guardErrLine | Add-Content -LiteralPath (Join-Path $gd 'guard-errors.txt') -Encoding UTF8
+                    break
+                } catch {}
+            }
         } catch {}
     }
     return
@@ -217,21 +227,39 @@ function Invoke-WHDAiSubmenu {
         Show-WHDMode
         Show-WHDAiMenu
         Write-Host ''
-        $c = (Read-Host '  Select # (then f=feature-off / r=remove), S, or B').Trim()
+        $c = (Read-Host '  Select #, a list + action (e.g. 1,3,5 r), S, or B').Trim()
         if (Invoke-WHDGuardHotkey $c) { continue }
         if ($c -match '^[Bb]$') { return }
         if ($c -match '^[Ss]$') { Invoke-WHDStoreSuppression; continue }
-        if ($c -match '^\d+$') {
+        # One item: its number, then f / r / c. (1-9 digits only, so a typed number can never overflow.)
+        if ($c -match '^[0-9]{1,9}$') {
             $idx = [int]$c - 1
             if ($idx -lt 0 -or $idx -ge $script:WHDAiModules.Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
             $m = $script:WHDAiModules[$idx]
-            $act = (Read-Host ("  [{0}]  f = feature-off,  r = remove,  c = cancel" -f $m.Name)).Trim()
+            $act = (Read-Host ("  [{0}]  f = feature-off,  r = remove + set its off-switch (OFF where it cannot be removed),  c = cancel" -f $m.Name)).Trim()
             switch -regex ($act) {
                 '^[Ff]$' { Invoke-WHDAiFeatureOff -Module $m }
-                '^[Rr]$' { Invoke-WHDAiRemove     -Module $m }
+                '^[Rr]$' { Invoke-WHDAiBatch -Modules @($m) -Action remove }   # the same rule for one item as for a list
                 default  { Write-Host '  cancelled.' -ForegroundColor DarkGray }
             }
-        } else { Write-Host '  invalid.' -ForegroundColor Yellow }
+            continue
+        }
+        # Several items at once: "1,3,5 r", "2-6 f", "* r", "*,7 r", or a list alone (then the action is asked). One y/N for the list.
+        if ($c -match '^([0-9,\s\-\*]+?)\s*([FfRr]?)$') {
+            $whdSelText = $Matches[1]; $whdAct = $Matches[2]
+            $whdStar = @(for ($whdI = 1; $whdI -le $script:WHDAiModules.Count; $whdI++) { if (Test-WHDAiRecommended -Module $script:WHDAiModules[$whdI - 1]) { $whdI } })
+            $whdSel = ConvertFrom-WHDSelection -Text $whdSelText -Max $script:WHDAiModules.Count -Star $whdStar
+            if ($null -eq $whdSel -or -not @($whdSel).Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
+            if (-not $whdAct) { $whdAct = (Read-Host ("  {0} item(s) selected:  r = remove + set the off-switch (OFF where it cannot be removed),  f = feature-off,  c = cancel" -f @($whdSel).Count)).Trim() }
+            $whdMods = @(foreach ($whdN in @($whdSel)) { $script:WHDAiModules[$whdN - 1] })
+            switch -regex ($whdAct) {
+                '^[Rr]$' { Invoke-WHDAiBatch -Modules $whdMods -Action remove }
+                '^[Ff]$' { Invoke-WHDAiBatch -Modules $whdMods -Action off }
+                default  { Write-Host '  cancelled.' -ForegroundColor DarkGray }
+            }
+            continue
+        }
+        Write-Host '  invalid.' -ForegroundColor Yellow
     }
 }
 
@@ -240,18 +268,30 @@ function Invoke-WHDGeneralSubmenu {
         Show-WHDMode
         Show-WHDGeneralMenu
         Write-Host ''
-        $c = (Read-Host '  Select # to remove, A / P / D / S, or B').Trim()
+        $c = (Read-Host '  Select # to remove, a list (e.g. 1,3,5), A / P / D / S, or B').Trim()
         if (Invoke-WHDGuardHotkey $c) { continue }
         if ($c -match '^[Bb]$') { return }
         if ($c -match '^[Ss]$') { Invoke-WHDPrivacySubmenu; continue }
-        if ($c -match '^[Aa]$') { Invoke-WHDRemoveRecommended; continue }
         if ($c -match '^[Pp]$') { Invoke-WHDPrivacyHardening;  continue }
         if ($c -match '^[Dd]$') { Invoke-WHDDisableDiagTrack;  continue }
-        if ($c -match '^\d+$') {
+        # One app: its number. (1-9 digits only, so a typed number can never overflow.)
+        if ($c -match '^[0-9]{1,9}$') {
             $idx = [int]$c - 1
             if ($idx -lt 0 -or $idx -ge @($script:WHDGenCatalog).Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
             Invoke-WHDGeneralRemove -Entry $script:WHDGenCatalog[$idx]
-        } else { Write-Host '  invalid.' -ForegroundColor Yellow }
+            continue
+        }
+        # A (= *, every recommended app) and lists like 1,3,5 / 2-6 / *,3,7: one plan, one y/N for the whole list.
+        if ($c -match '^[Aa]$') { $c = '*' }
+        if ($c -match '^[0-9,\s\-\*]+$') {
+            $whdCat = @($script:WHDGenCatalog)
+            $whdStar = @(for ($whdI = 1; $whdI -le $whdCat.Count; $whdI++) { if ($whdCat[$whdI - 1].Rec) { $whdI } })
+            $whdSel = ConvertFrom-WHDSelection -Text $c -Max $whdCat.Count -Star $whdStar
+            if ($null -eq $whdSel -or -not @($whdSel).Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
+            Invoke-WHDGeneralBatch -Entries @(foreach ($whdN in @($whdSel)) { $whdCat[$whdN - 1] })
+            continue
+        }
+        Write-Host '  invalid.' -ForegroundColor Yellow
     }
 }
 
@@ -262,8 +302,18 @@ function Invoke-WHDPrivacySubmenu {
         $c = (Read-Host '  Select # / A / B').Trim()
         if (Invoke-WHDGuardHotkey $c) { continue }
         if ($c -match '^[Bb]$' -or -not $c) { return }
-        if ($c -match '^[Aa]$') { foreach ($it in $script:WHDPrivacyItems) { Invoke-WHDPrivacyItem -Item $it }; continue }
-        if ($c -match '^\d+$' -and [int]$c -ge 1 -and [int]$c -le $script:WHDPrivacyItems.Count) { Invoke-WHDPrivacyItem -Item $script:WHDPrivacyItems[[int]$c - 1]; continue }
+        if ($c -match '^[Aa]$') { Invoke-WHDPrivacyBatch -Items @($script:WHDPrivacyItems); continue }   # one plan, one y/N
+        # One setting: its number. (1-9 digits only, so a typed number can never overflow.)
+        if ($c -match '^[0-9]{1,9}$') {
+            if ([int]$c -ge 1 -and [int]$c -le $script:WHDPrivacyItems.Count) { Invoke-WHDPrivacyItem -Item $script:WHDPrivacyItems[[int]$c - 1] }
+            else { Write-Host '  invalid.' -ForegroundColor Yellow }
+            continue
+        }
+        # Several: 1,3,5 or 2-4 - one y/N for the list.
+        if ($c -match '^[0-9,\s\-]+$') {
+            $whdSel = ConvertFrom-WHDSelection -Text $c -Max $script:WHDPrivacyItems.Count
+            if ($null -ne $whdSel -and @($whdSel).Count) { Invoke-WHDPrivacyBatch -Items @(foreach ($whdN in @($whdSel)) { $script:WHDPrivacyItems[$whdN - 1] }); continue }
+        }
         Write-Host '  invalid.' -ForegroundColor Yellow
     }
 }
@@ -423,13 +473,15 @@ try {
                 $inv = Join-Path $script:WHDRoot 'Inventory.ps1'
                 if (Test-Path $inv) { & $inv -NoElevate } else { Write-WHDLog 'Inventory.ps1 not found at root.' 'ERR' }
             }
-            '^2$' { Invoke-WHDAiSubmenu }
-            '^3$' { Invoke-WHDGeneralSubmenu }
-            '^4$' { Invoke-WHDPermSubmenu }
-            '^5$' { Invoke-WHDWin32Submenu }
-            '^6$' { Invoke-WHDMaintenanceSubmenu }
-            '^9$' { Invoke-WHDFirewallSubmenu; if ($script:WHDQuit) { break mainloop } }
-            '^7$' { New-WHDCheckpointNow }
+            # "| Out-Null" keeps the result rows of the actions off the screen (everything meant for the screen is
+            # written with Write-Host / Out-Host and is not affected).
+            '^2$' { Invoke-WHDAiSubmenu | Out-Null }
+            '^3$' { Invoke-WHDGeneralSubmenu | Out-Null }
+            '^4$' { Invoke-WHDPermSubmenu | Out-Null }
+            '^5$' { Invoke-WHDWin32Submenu | Out-Null }
+            '^6$' { Invoke-WHDMaintenanceSubmenu | Out-Null }
+            '^9$' { Invoke-WHDFirewallSubmenu | Out-Null; if ($script:WHDQuit) { break mainloop } }
+            '^7$' { New-WHDCheckpointNow | Out-Null }
             '^8$' {
                 $script:WHDExecute = -not $script:WHDExecute
                 Write-WHDLog ("mode -> {0}" -f $(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'})) 'ACT'
@@ -441,32 +493,41 @@ try {
                 $def = Join-Path $script:WHDRoot 'profiles\lean.json'
                 $pp = (Read-Host ("  Profile path [{0}]" -f $def)).Trim().Trim('"')
                 if (-not $pp) { $pp = $def }
-                Invoke-WHDApplyProfile -Path $pp
+                Invoke-WHDApplyProfile -Path $pp | Out-Null
             }
             '^[Ee]$' {
                 $def = Join-Path $script:WHDRoot 'profiles\lean.json'
                 $pp = (Read-Host ("  Export starter profile to [{0}]" -f $def)).Trim().Trim('"')
                 if (-not $pp) { $pp = $def }
-                Export-WHDProfile -Path $pp
+                Export-WHDProfile -Path $pp | Out-Null
             }
             '^[Dd]$' {
                 $inv = Join-Path $script:WHDRoot 'Inventory.ps1'
                 if (Test-Path $inv) { & $inv -Compare -NoElevate | ForEach-Object { Write-Host $_ } } else { Write-WHDLog 'Inventory.ps1 not found at root.' 'ERR' }
             }
-            '^[Uu]$' { Invoke-WHDUndoSubmenu }
-            '^[Ss]$' { Invoke-WHDSecuritySubmenu }
-            '^[Ww]$' { Invoke-WHDUpdatesSubmenu }
-            '^[Nn]$' { Invoke-WHDDevicesSubmenu }
-            '^[Tt]$' { Invoke-WHDTimeRegionSubmenu }
+            '^[Uu]$' { Invoke-WHDUndoSubmenu | Out-Null }
+            '^[Ss]$' { Invoke-WHDSecuritySubmenu | Out-Null }
+            '^[Ww]$' { Invoke-WHDUpdatesSubmenu | Out-Null }
+            '^[Nn]$' { Invoke-WHDDevicesSubmenu | Out-Null }
+            '^[Tt]$' { Invoke-WHDTimeRegionSubmenu | Out-Null }
             '^[Vv]$' {
                 $vr = @(Invoke-WHDVerify -All)
-                if (@($vr | Where-Object { $_.Result -eq 'RETURNED' -and "$($_.Entry.Kind)" -in @('appx','provisioned') }).Count) { Invoke-WHDReRemoveReturned -Results $vr }
-                if (@($vr | Where-Object { $_.Result -eq 'CHANGED' }).Count) { Invoke-WHDReApplyChanged -Results $vr }
+                if (@($vr | Where-Object { $_.Result -eq 'RETURNED' -and "$($_.Entry.Kind)" -in @('appx','provisioned') }).Count) { Invoke-WHDReRemoveReturned -Results $vr | Out-Null }
+                if (@($vr | Where-Object { $_.Result -eq 'CHANGED' }).Count) { Invoke-WHDReApplyChanged -Results $vr | Out-Null }
             }
             '^[Qq]$' { Write-WHDLog 'Quit selected.' 'INFO'; break mainloop }
             default  { Write-Host '  invalid.' -ForegroundColor Yellow }
         }
-        } catch { Write-WHDLog ("error: {0} - back at the main menu." -f $_.Exception.Message) 'ERR' }
+        } catch {
+            $whdErr = $_
+            Write-WHDLog ("error: {0} - back at the main menu." -f $whdErr.Exception.Message) 'ERR'
+            # where it happened (script file and line), to make a report useful
+            try {
+                if ($whdErr.InvocationInfo -and $whdErr.InvocationInfo.ScriptName) {
+                    Write-WHDLog ("  where: {0} line {1}" -f (Split-Path -Leaf $whdErr.InvocationInfo.ScriptName), $whdErr.InvocationInfo.ScriptLineNumber) 'INFO'
+                }
+            } catch {}
+        }
     }
 }
 finally {

@@ -162,6 +162,53 @@ function Write-WHDProtectedFolderWarning {
     } catch {}
 }
 
+# ---- "1,3,5-7" style selections ----------------------------------------------
+# Numbers separated by commas or spaces, ranges like 5-7, and * for the recommended set ($Star).
+# Returns the sorted, unique numbers (all within 1..$Max), or $null when the text is not understood.
+# A piece must be a number of 1-9 digits, a range of two such numbers, or *; anything else makes the
+# whole entry invalid (so a very long number can never overflow). [0-9] on purpose: \d also matches digits of
+# other scripts, which [int] cannot convert. Never throws.
+function ConvertFrom-WHDSelection {
+    param([string]$Text, [int]$Max, [int[]]$Star = @())
+    $t = "$Text".Trim()
+    if (-not $t) { return $null }
+    $out = New-Object System.Collections.Generic.List[int]
+    foreach ($tok in @($t -split '[,\s]+' | Where-Object { $_ })) {
+        if ($tok -eq '*') {
+            foreach ($s in @($Star)) { if ([int]$s -ge 1 -and [int]$s -le $Max -and -not $out.Contains([int]$s)) { $out.Add([int]$s) } }
+            continue
+        }
+        if ($tok -match '^([0-9]{1,9})-([0-9]{1,9})$') {
+            $a = [int]$Matches[1]; $b = [int]$Matches[2]
+            if ($a -gt $b) { $x = $a; $a = $b; $b = $x }
+            if ($a -lt 1 -or $b -gt $Max) { return $null }
+            for ($n = $a; $n -le $b; $n++) { if (-not $out.Contains($n)) { $out.Add($n) } }
+            continue
+        }
+        if ($tok -match '^[0-9]{1,9}$') {
+            $n = [int]$tok
+            if ($n -lt 1 -or $n -gt $Max) { return $null }
+            if (-not $out.Contains($n)) { $out.Add($n) }
+            continue
+        }
+        return $null
+    }
+    return ,@($out.ToArray() | Sort-Object)
+}
+
+# ---- progress for slow loops -------------------------------------------------
+# A progress bar in the console plus a log line every $Every steps, so a long action is seen working
+# (the log lines also reach the window version's log box).
+# The window version may set $script:WHDProgressHook = { param($Activity, $Done, $Total) ... } to move its own progress bar.
+if (-not (Get-Variable -Name WHDProgressHook -Scope Script -EA SilentlyContinue)) { $script:WHDProgressHook = $null }
+function Write-WHDProgressStep {
+    param([string]$Activity, [int]$Done, [int]$Total, [int]$Every = 25)
+    try { Write-Progress -Activity $Activity -Status ('{0} of {1}' -f $Done, $Total) -PercentComplete ([math]::Min(100, [int](100 * $Done / [math]::Max(1, $Total)))) } catch {}
+    if ($Done -ge $Total) { try { Write-Progress -Activity $Activity -Completed } catch {} }
+    if ($script:WHDProgressHook) { try { & $script:WHDProgressHook $Activity $Done $Total } catch {} }
+    if ($Done -ge $Total -or ($Every -gt 0 -and ($Done % $Every) -eq 0)) { Write-WHDLog ('  {0}: {1} of {2}' -f $Activity, $Done, $Total) 'INFO' }
+}
+
 # ---- risk labelling ---------------------------------------------------------
 function Write-WHDRisk {
     param([ValidateSet('reversible','caution','hard')]$Tier, [string]$Text)
@@ -169,6 +216,133 @@ function Write-WHDRisk {
     Write-Host ("    [{0}] " -f $Tier.ToUpper()) -ForegroundColor $map[$Tier] -NoNewline
     Write-Host $Text
     if ($script:WHDLogSink) { try { & $script:WHDLogSink ("    [{0}] {1}" -f $Tier.ToUpper(), $Text) 'INFO' } catch {} }
+}
+
+# =============================================================================
+#  Alerts: a small window + a Windows event log entry
+# -----------------------------------------------------------------------------
+#  Used by the update guard next to its .txt report.
+#  The event source is registered when the guard is INSTALLED and removed when
+#  the guard is removed - a guard CHECK itself only writes an entry, it never registers.
+#  None of these helpers throws to its caller.
+# =============================================================================
+$script:WHDEventSource = 'WinHardenDebloat'
+$script:WHDEventLog    = 'Application'
+
+function Test-WHDEventSource {
+    # Looks at the registration itself. (EventLog.SourceExists also searches the Security log and throws when not elevated.)
+    try { return [bool](Test-Path -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\{0}\{1}' -f $script:WHDEventLog, $script:WHDEventSource)) }
+    catch { return $false }
+}
+# Registers the source (needs an elevated session; writes one key under
+# HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application). Safe to call again: an existing source is left alone.
+# Nothing is done in DRY-RUN. No output; a failure is one WARN line - Test-WHDEventSource tells whether it is there.
+function Register-WHDEventSource {
+    try {
+        if (Test-WHDEventSource) { return }
+        if (-not $script:WHDExecute) { Write-WHDLog ("would: register Windows event log source '{0}' ({1} log)" -f $script:WHDEventSource, $script:WHDEventLog) 'DRY'; return }
+        [System.Diagnostics.EventLog]::CreateEventSource($script:WHDEventSource, $script:WHDEventLog)
+    } catch {
+        try { Write-WHDLog ("Windows event log source '{0}' could not be registered (alerts still show the window and the report): {1}" -f $script:WHDEventSource, $_.Exception.Message) 'WARN' } catch { }
+    }
+}
+# Removes the source again. Safe to call when it is not registered. Nothing is done in DRY-RUN.
+function Unregister-WHDEventSource {
+    try {
+        if (-not (Test-WHDEventSource)) { return }
+        if (-not $script:WHDExecute) { Write-WHDLog ("would: remove Windows event log source '{0}'" -f $script:WHDEventSource) 'DRY'; return }
+        [System.Diagnostics.EventLog]::DeleteEventSource($script:WHDEventSource)
+    } catch {
+        try { Write-WHDLog ("Windows event log source '{0}' could not be removed: {1}" -f $script:WHDEventSource, $_.Exception.Message) 'WARN' } catch { }
+    }
+}
+# Writes one entry (Event Viewer > Windows Logs > Application, source "WinHardenDebloat"). Never throws.
+# Returns $true when it was written, $false when the source is not registered or writing failed.
+# Writing an entry changes no setting, so it also works in DRY-RUN (the guard check runs that way).
+function Write-WHDEventLog {
+    param([Parameter(Mandatory)][string]$Message,
+          [ValidateSet('Information','Warning','Error')][string]$Type = 'Information', [int]$EventId = 1000)
+    try {
+        if (-not (Test-WHDEventSource)) { return $false }
+        $et = [System.Diagnostics.EventLogEntryType]::$Type
+        if ($Message.Length -gt 30000) { $Message = $Message.Substring(0, 30000) + ' ...' }
+        [System.Diagnostics.EventLog]::WriteEntry($script:WHDEventSource, $Message, $et, $EventId)
+        return $true
+    } catch { return $false }
+}
+
+# A small always-on-top window with a few lines and two buttons. Blocks until it is closed.
+# Built from plain WPF objects. Never throws: returns $true when the window was shown and closed,
+# $false when it could not be shown (no desktop session, WPF not available) so the caller can fall back.
+function Show-WHDAlertWindow {
+    param([string]$Title = 'WinHardenDebloat', [string]$Heading = '', [string[]]$Lines = @(), [string]$ReportPath = '')
+    try {
+        if (-not [Environment]::UserInteractive) { return $false }   # nobody could close it
+        Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase -ErrorAction Stop
+        $win = New-Object System.Windows.Window
+        $win.Title = $Title
+        $win.Width = 620
+        $win.SizeToContent = [System.Windows.SizeToContent]::Height
+        $win.MaxHeight = 520
+        $win.Topmost = $true
+        $win.ResizeMode = [System.Windows.ResizeMode]::NoResize
+        $win.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
+
+        $root = New-Object System.Windows.Controls.StackPanel
+        $root.Margin = New-Object System.Windows.Thickness(16)
+
+        if ($Heading) {
+            $h = New-Object System.Windows.Controls.TextBlock
+            $h.Text = $Heading
+            $h.FontSize = 16
+            $h.FontWeight = [System.Windows.FontWeights]::Bold
+            $h.TextWrapping = [System.Windows.TextWrapping]::Wrap
+            $h.Margin = New-Object System.Windows.Thickness(0, 0, 0, 10)
+            [void]$root.Children.Add($h)
+        }
+
+        $body = New-Object System.Windows.Controls.TextBox
+        $body.Text = (@($Lines) -join "`r`n")
+        $body.IsReadOnly = $true
+        $body.TextWrapping = [System.Windows.TextWrapping]::Wrap
+        $body.VerticalScrollBarVisibility = [System.Windows.Controls.ScrollBarVisibility]::Auto
+        $body.MaxHeight = 320
+        $body.BorderThickness = New-Object System.Windows.Thickness(0)
+        $body.FontFamily = New-Object System.Windows.Media.FontFamily('Consolas')
+        [void]$root.Children.Add($body)
+
+        $buttons = New-Object System.Windows.Controls.StackPanel
+        $buttons.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+        $buttons.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+        $buttons.Margin = New-Object System.Windows.Thickness(0, 14, 0, 0)
+
+        if ($ReportPath) {
+            $open = New-Object System.Windows.Controls.Button
+            $open.Content = 'Open the report'
+            $open.Padding = New-Object System.Windows.Thickness(12, 4, 12, 4)
+            $open.Margin = New-Object System.Windows.Thickness(0, 0, 8, 0)
+            $whdAlertReport = $ReportPath
+            # Opened through the desktop shell, so the report shows in a normal (non-admin) window.
+            $open.Add_Click({ try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $whdAlertReport) } catch { } }.GetNewClosure())
+            [void]$buttons.Children.Add($open)
+        }
+        $close = New-Object System.Windows.Controls.Button
+        $close.Content = 'Close'
+        $close.IsDefault = $true
+        $close.IsCancel = $true
+        $close.Padding = New-Object System.Windows.Thickness(12, 4, 12, 4)
+        $whdAlertWin = $win
+        $close.Add_Click({ try { $whdAlertWin.Close() } catch { } }.GetNewClosure())
+        [void]$buttons.Children.Add($close)
+        [void]$root.Children.Add($buttons)
+
+        $win.Content = $root
+        [void]$win.ShowDialog()
+        return $true
+    } catch {
+        try { Write-WHDLog ("alert window could not be shown: {0}" -f $_.Exception.Message) 'WARN' } catch { }
+        return $false
+    }
 }
 
 # ---- restore point + registry backup (before first real change) ------------
@@ -553,6 +727,20 @@ function Get-WHDSessionOwner {
     try { $stamp = [datetime]::ParseExact((Split-Path $SessionPath -Leaf), 'yyyy-MM-dd_HHmmss', $null) } catch {}
     if ($inst -and $stamp -and $stamp -lt $inst) { return 'legacy-other' }
     return 'legacy-this'
+}
+
+# Does a saved update-guard status (state.json content) belong to THIS PC / this Windows install?
+# Tagged status: the MachineId decides. Untagged (older) status: a last check older than this Windows
+# install = another PC / an earlier install. No status at all counts as this PC's. Read-only.
+function Test-WHDGuardStateIsThisPC {
+    param($State)
+    if (-not $State) { return $true }
+    if ("$($State.MachineId)") { return ("$($State.MachineId)".ToLower() -eq (Get-WHDMachineId)) }
+    $inst = Get-WHDWindowsInstallDate
+    $lc = $null
+    try { $lc = [datetime]::ParseExact("$($State.LastCheck)", 'yyyy-MM-dd HH:mm', $null) } catch { $lc = $null }
+    if ($inst -and $lc -and $lc -lt $inst) { return $false }
+    return $true
 }
 
 function Add-WHDJournal {

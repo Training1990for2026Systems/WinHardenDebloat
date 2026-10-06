@@ -143,7 +143,7 @@ function Remove-WHDFwGroup {
     Invoke-WHDChange -Description ("remove {0} firewall rule(s) in group '{1}'" -f $rules.Count, $Group) -Action {
         Backup-WHDFirewallOnce
         Get-NetFirewallRule -Group $Group -EA Stop | Remove-NetFirewallRule -EA Stop
-    }
+    } | Out-Null      # no result row on the screen (no caller uses it)
 }
 
 # Create a rule idempotently (remove same-named first), routed through the engine.
@@ -249,6 +249,10 @@ function Show-WHDFirewallSummary {
     foreach ($g in @($script:WHDFwGroupIPv6,$script:WHDFwGroupAllow,$script:WHDFwGroupBlock,$script:WHDFwGroupBase,$script:WHDFwGroupApp)) {
         $c = @(Get-NetFirewallRule -Group $g -EA SilentlyContinue).Count
         if ($c -gt 0) { Write-Host ('   {0,-28} {1} rule(s)' -f $g, $c) -ForegroundColor Cyan }
+    }
+    # The update gate position (read-only; reading it creates nothing).
+    if (Get-Command Get-WHDGateState -EA SilentlyContinue) {
+        try { Write-Host ('   Update gate   : {0}' -f (Get-WHDGateState).Text) -ForegroundColor Gray } catch { }
     }
     # Live DNS readout so you can confirm the adapter is on the pinned resolver.
     $dns = @(Get-DnsClientServerAddress -AddressFamily IPv4 -EA SilentlyContinue | Where-Object { @($_.ServerAddresses).Count -gt 0 })
@@ -369,18 +373,35 @@ function Invoke-WHDFirewallWipe {
     }
     $what = if ($ApplyBaseline) { 'delete ALL firewall rules, then apply the WHD baseline' } else { 'delete ALL firewall rules (empty slate)' }
     if (-not (Confirm-WHDProceed $what)) { Write-WHDLog 'skipped.' 'WARN'; return }
-    Invoke-WHDChange -Description ("delete ALL {0} firewall rule(s) - empty slate" -f $all.Count) -Action {
+    $script:WHDFwWipeKept = 0
+    $whdWipeRes = Invoke-WHDChange -Description ("delete ALL {0} firewall rule(s) - empty slate" -f $all.Count) -Action {
         Backup-WHDFirewallOnce
-        foreach ($r in @(Get-NetFirewallRule -EA SilentlyContinue)) {
-            try { Remove-NetFirewallRule -Name $r.Name -EA Stop } catch {}
+        # Deleting several hundred rules one by one takes a while: show progress.
+        $whdWipeRules = @(Get-NetFirewallRule -EA SilentlyContinue)
+        $whdWipeN = 0; $whdWipeKept = 0
+        if ($whdWipeRules.Count -gt 50) { Write-WHDLog ('  deleting {0} rule(s) one by one - this can take several minutes; progress is shown' -f $whdWipeRules.Count) 'INFO' }
+        foreach ($r in $whdWipeRules) {
+            $whdWipeN++
+            try { Remove-NetFirewallRule -Name $r.Name -EA Stop } catch { $whdWipeKept++ }
+            try { Write-WHDProgressStep -Activity 'Deleting firewall rules' -Done $whdWipeN -Total $whdWipeRules.Count -Every 50 } catch { }
         }
-    } | Out-Null
+        $script:WHDFwWipeKept = $whdWipeKept
+        if ($whdWipeKept) { Write-WHDLog ('  {0} rule(s) could not be deleted and were left in place' -f $whdWipeKept) 'INFO' }
+    } | Select-Object -Last 1
     if ($ApplyBaseline) {
         $p = Join-Path $script:WHDRoot 'profiles\firewall-baseline.json'
         if (Test-Path $p) { Invoke-WHDApplyFirewallProfile -Path $p -NoConfirm }
         else { Write-WHDLog 'firewall-baseline.json not found; wipe only.' 'WARN' }
     }
-    Write-WHDLog 'Wipe complete. Only rules added after this exist.' 'OK'
+    # A dry run must not say the wipe happened; a wipe that left rules in place says so.
+    switch ("$($whdWipeRes.Status)") {
+        'done'    {
+            if ([int]$script:WHDFwWipeKept -gt 0) { Write-WHDLog ('Wipe complete, except {0} rule(s) that could not be deleted and were left in place. Apart from those, only rules added after this exist.' -f $script:WHDFwWipeKept) 'OK' }
+            else { Write-WHDLog 'Wipe complete. Only rules added after this exist.' 'OK' }
+        }
+        'planned' { Write-WHDLog 'DRY-RUN: preview only - nothing was deleted. Switch to EXECUTE to wipe for real.' 'DRY' }
+        default   { Write-WHDLog 'Wipe NOT done - see the lines above.' 'WARN' }
+    }
 }
 
 # =============================================================================
@@ -444,6 +465,19 @@ function Import-WHDFirewallPolicy {
         if ($r.program)       { $p['Program']       = $r.program }
         New-WHDFwRule $p
     }
+    # v1.5: an imported file may switch on rules the update gate keeps off. Put that right, as the allow-list does.
+    if ((Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) {
+        $whdImpMode = "$((Get-WHDGateState).Mode)"
+        $whdImpApps = @()
+        if ($whdImpMode -ne 'programs') {
+            $whdImpApps = @(Get-NetFirewallRule -Group $script:WHDFwGroupApp -EA SilentlyContinue | Where-Object { "$($_.Enabled)" -eq 'True' } | ForEach-Object { "$($_.Name)" })
+        }
+        Invoke-WHDChange -Description ("update gate is {0}: keep WHD-Allow-HTTPS / WHD-Allow-HTTP switched off{1}" -f $whdImpMode.ToUpper(), $(if ($whdImpApps.Count) { " and switch off {0} imported program allow(s)" -f $whdImpApps.Count } else { '' })) -Force -Action {
+            foreach ($rn in @('WHD-Allow-HTTPS','WHD-Allow-HTTP')) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
+            foreach ($rn in $whdImpApps) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
+            if ($whdImpApps.Count -and (Get-Command Add-WHDGateRemembered -EA SilentlyContinue)) { Add-WHDGateRemembered -Names $whdImpApps }
+        } | Out-Null
+    }
     Write-WHDLog ("imported {0} rule(s) from {1}" -f @($doc.rules).Count, $Path) 'OK'
 }
 
@@ -481,12 +515,13 @@ function Invoke-WHDFirewallAllowList {
         if ($a.raddr) { $p['RemoteAddress'] = $a.raddr }
         New-WHDFwRule $p
     }
-    # v1.1: with the update gate closed, the any-program web rules stay OFF.
+    # v1.1: with the update gate CLOSED or on PROGRAMS, the any-program web rules stay OFF.
     if ((Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) {
-        Invoke-WHDChange -Description 'update gate is closed: keep WHD-Allow-HTTPS / WHD-Allow-HTTP switched off' -Force -Action {
+        $whdGateName = "$((Get-WHDGateState).Mode)".ToUpper()
+        Invoke-WHDChange -Description ("update gate is {0}: keep WHD-Allow-HTTPS / WHD-Allow-HTTP switched off" -f $whdGateName) -Force -Action {
             foreach ($rn in @('WHD-Allow-HTTPS','WHD-Allow-HTTP')) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
         } | Out-Null
-        Write-WHDLog 'Allow-list applied (update gate CLOSED: HTTP/HTTPS stay off except Defender + DoH).' 'OK'
+        Write-WHDLog ("Allow-list applied (update gate {0}: the any-program HTTP/HTTPS rules stay off)." -f $whdGateName) 'OK'
         return
     }
     Write-WHDLog 'Allow-list applied. DHCP in+out, DNS pinned, HTTP/HTTPS open. Re-apply rebuilds this group.' 'OK'
@@ -575,6 +610,13 @@ function Enable-WHDDefaultDenyOutbound {
         Write-WHDLog ("auto-rollback minutes must be 1 to 720 (got {0}) - using 10." -f $RollbackMinutes) 'WARN'
         $RollbackMinutes = 10
     }
+    # v1.5: while the update gate is CLOSED or on PROGRAMS, outbound is already default-deny and the gate keeps it
+    # that way. Arming the auto-rollback here would set outbound back to Allow after the minutes ran out and so
+    # open the gate without a word. Nothing to do.
+    if ((Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) {
+        Write-WHDLog ("The update gate is {0}: outbound is already default-deny and the gate keeps it that way. Nothing was changed and no auto-rollback was armed. To change it, use the Updates menu (O = open the gate)." -f "$((Get-WHDGateState).Mode)".ToUpper()) 'INFO'
+        return
+    }
     Write-WHDRisk 'hard' ("Sets DefaultOutboundAction=Block. Anything not in the allow-list is cut. Auto-rollback in {0} min unless you confirm keep." -f $RollbackMinutes)
     if (-not $NoConfirm -and -not (Confirm-WHDProceed ("enable default-deny outbound (auto-rollback in {0} min)" -f $RollbackMinutes))) { Write-WHDLog 'skipped.' 'WARN'; return }
     # make sure the essential allow rules (DNS + DHCP) exist and are enabled first
@@ -637,7 +679,7 @@ function Confirm-WHDDefaultDenyKeep {
 
 function Disable-WHDDefaultDenyOutbound {
     if ((Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) {
-        Write-WHDLog 'The update gate is CLOSED - use Updates menu (W) -> O to open it; that also puts back the rules it switched off.' 'WARN'
+        Write-WHDLog ("The update gate is {0} - use Updates menu (W) -> O to open it; that also puts back the rules it switched off." -f "$((Get-WHDGateState).Mode)".ToUpper()) 'WARN'
         return
     }
     if (-not (Confirm-WHDProceed 'revert default-deny (set outbound back to Allow on all profiles)')) { Write-WHDLog 'skipped.' 'WARN'; return }
@@ -794,7 +836,7 @@ function Invoke-WHDApplyFirewallProfile {
         }
     }
     if ($cfg.allowList -and (Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) {
-        Invoke-WHDChange -Description 'update gate is closed: keep WHD-Allow-HTTPS / WHD-Allow-HTTP switched off' -Force -Action {
+        Invoke-WHDChange -Description ("update gate is {0}: keep WHD-Allow-HTTPS / WHD-Allow-HTTP switched off" -f "$((Get-WHDGateState).Mode)".ToUpper()) -Force -Action {
             foreach ($rn in @('WHD-Allow-HTTPS','WHD-Allow-HTTP')) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
         } | Out-Null
     }
@@ -827,7 +869,8 @@ function Invoke-WHDApplyFirewallProfile {
 #  (32,767 KB; Windows then starts a new file and keeps one .old). WHD's older
 #  Security-log / event 5157 method is replaced (its old journal lines still undo).
 #  The firewall log has no program path; where it records a process id (pid), WHD
-#  names the program if that process is still running.
+#  names the program if that process is still running and started before the log
+#  line, or from the names it remembered (see "remembered program names" below).
 # =============================================================================
 $script:WHDFwLogMaxKB = 32767
 $script:WHDFwLogDefault = '%systemroot%\system32\LogFiles\Firewall\pfirewall.log'
@@ -841,7 +884,8 @@ function Get-WHDConnectionLoggingState {
     $on = ($pr.Count -gt 0)
     foreach ($p in $pr) { if ("$($p.LogAllowed)" -ne 'True' -or "$($p.LogBlocked)" -ne 'True' -or [int64]$p.LogMaxSizeKilobytes -ne $script:WHDFwLogMaxKB) { $on = $false } }
     $file = Get-WHDFirewallLogFile
-    $sz = $null; try { $sz = [math]::Round((Get-Item -LiteralPath $file -EA Stop).Length / 1KB) } catch { }
+    # Test-Path first: a log file that does not exist yet must not leave a TerminatingError line in the transcript.
+    $sz = $null; if (Test-Path -LiteralPath $file) { try { $sz = [math]::Round((Get-Item -LiteralPath $file -EA Stop).Length / 1KB) } catch { } }
     [pscustomobject]@{ On = $on; File = $file; UsedKB = $sz
         Profiles = @($pr | ForEach-Object { "{0}: allowed={1} dropped={2} {3} KB" -f $_.Name, $_.LogAllowed, $_.LogBlocked, $_.LogMaxSizeKilobytes }) }
 }
@@ -905,43 +949,220 @@ function Read-WHDFirewallLog {
     }
     $rows.ToArray()
 }
+# ---- remembered program names ----------------------------------------------------
+# The firewall log only records a process id. While that process runs WHD can name it; once it has
+# closed, the id means nothing - and Windows may give the same id to ANOTHER program later. So:
+#   1. a running process is used only if it started BEFORE the log line was written;
+#   2. every name WHD resolves is remembered for this PC (id + start time + path + when it was last
+#      seen running), so the lines of a program that has closed since keep their name.
+# File: restore\update-guard\blocked-programs.json - WHD's own cache (like a log), dates as invariant
+# text. The view writes it in DRY-RUN too; when it cannot be written the view goes on without it.
+$script:WHDFwNamesName = 'blocked-programs.json'
+$script:WHDFwNamesKeepDays = 7
+$script:WHDFwNamesMax = 400
+$script:WHDFwNamesNoWrite = $false
+function _WHDFwNamesPath { Join-Path $script:WHDRoot ('restore\update-guard\' + $script:WHDFwNamesName) }
+function Read-WHDFwNames {
+    $whdNf = _WHDFwNamesPath
+    $out = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $whdNf)) { return @() }
+    try {
+        $j = Get-Content -LiteralPath $whdNf -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ("$($j.MachineId)".ToLower() -ne (Get-WHDMachineId)) { return @() }      # another PC's file
+        $whdNi = [Globalization.CultureInfo]::InvariantCulture
+        foreach ($n in @($j.Names)) {
+            $st = [datetime]::MinValue; $se = [datetime]::MinValue
+            if (-not [datetime]::TryParseExact("$($n.Start)", 'yyyy-MM-dd HH:mm:ss', $whdNi, [Globalization.DateTimeStyles]::None, [ref]$st)) { continue }
+            if (-not [datetime]::TryParseExact("$($n.Seen)",  'yyyy-MM-dd HH:mm:ss', $whdNi, [Globalization.DateTimeStyles]::None, [ref]$se)) { continue }
+            if (-not "$($n.Path)") { continue }
+            $out.Add([pscustomobject]@{ Pid = "$($n.Pid)"; Start = $st; Seen = $se; Path = "$($n.Path)"; Exe = "$($n.Exe)" })
+        }
+    } catch { return @() }
+    return @($out.ToArray())
+}
+function Save-WHDFwNames {
+    param([object[]]$Names)
+    if ($script:WHDFwNamesNoWrite) { return }      # it failed once in this session: do not try (and log) again
+    try {
+        $whdNf = _WHDFwNamesPath
+        $whdNd = Split-Path -Parent $whdNf
+        if (-not (Test-Path -LiteralPath $whdNd)) { New-Item -ItemType Directory -Path $whdNd -Force -EA Stop | Out-Null }
+        $whdNi = [Globalization.CultureInfo]::InvariantCulture
+        $rows = @($Names | ForEach-Object { [ordered]@{ Pid = "$($_.Pid)"; Start = $_.Start.ToString('yyyy-MM-dd HH:mm:ss', $whdNi); Seen = $_.Seen.ToString('yyyy-MM-dd HH:mm:ss', $whdNi); Path = "$($_.Path)"; Exe = "$($_.Exe)" } })
+        $o = [ordered]@{ MachineId = (Get-WHDMachineId); Computer = $env:COMPUTERNAME; Names = $rows }
+        ([pscustomobject]$o | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $whdNf -Encoding UTF8 -EA Stop
+    } catch {
+        # best effort: the view works without the memory (folder protection can refuse the write)
+        $script:WHDFwNamesNoWrite = $true
+        try { Write-WHDLog ("  note: the program names could not be saved ({0}). The view works; names of programs that close are not kept in this session." -f $_.Exception.Message) 'INFO' } catch { }
+    }
+}
+# Rule name of a per-program allow (one place, used by the allow and by the view).
+function Get-WHDProgramAllowName {
+    param([string]$Program, [string]$Protocol, [string]$RemotePort)
+    $exe = if ($Program) { Split-Path $Program -Leaf } else { '' }
+    $safe = ($exe -replace '[^A-Za-z0-9._-]', '_')
+    "WHD-App-{0}-{1}-{2}" -f $safe, $Protocol, $RemotePort
+}
+
+# What the WHD allow-list lets out for ANY program right now (enabled outbound rules of that group):
+# protocol, remote ports, remote addresses. Used to mark old blocked lines that would pass today
+# (example: a program's DNS lines from minutes when the firewall had no rules).
+function Get-WHDAllowListCover {
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @(Get-NetFirewallRule -Group $script:WHDFwGroupAllow -EA SilentlyContinue | Where-Object { "$($_.Direction)" -eq 'Outbound' -and "$($_.Action)" -eq 'Allow' -and "$($_.Enabled)" -eq 'True' })) {
+        $pf = $r | Get-NetFirewallPortFilter -EA SilentlyContinue
+        $af = $r | Get-NetFirewallAddressFilter -EA SilentlyContinue
+        if (-not $pf) { continue }
+        if ("$($pf.LocalPort)" -and "$($pf.LocalPort)" -ne 'Any') { continue }                 # tied to a local port (DHCP): not a general allow
+        $apf = $null; try { $apf = $r | Get-NetFirewallApplicationFilter -EA SilentlyContinue } catch { $apf = $null }
+        if ($apf -and "$($apf.Program)" -and "$($apf.Program)" -ne 'Any') { continue }         # tied to one program: not a general allow
+        $out.Add([pscustomobject]@{ Protocol = "$($pf.Protocol)"
+            Ports = @(@($pf.RemotePort) | Where-Object { $null -ne $_ } | ForEach-Object { "$_" })
+            Addrs = @(@($af.RemoteAddress) | Where-Object { $null -ne $_ } | ForEach-Object { "$_" }) })
+    }
+    return @($out.ToArray())
+}
+function Test-WHDAllowListCovers {
+    param([object[]]$Cover, [string]$Protocol, [string]$Port, [string[]]$IPs)
+    if (-not @($IPs).Count) { return $false }
+    # Only plain IPv4 addresses / CIDR are compared; any other address form counts as "not covered".
+    $whdCvPat = '^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$'
+    foreach ($c in @($Cover)) {
+        if ($c.Protocol -ne 'Any' -and $c.Protocol -ne $Protocol) { continue }
+        if (@($c.Ports).Count -and ($c.Ports -notcontains 'Any') -and ($c.Ports -notcontains $Port)) { continue }
+        if (-not @($c.Addrs).Count -or ($c.Addrs -contains 'Any')) { return $true }
+        $all = $true
+        try {
+            $ranges = @($c.Addrs | Where-Object { $_ -match $whdCvPat } | ForEach-Object { ,(ConvertTo-WHDIpRange $_) } | Where-Object { $_ })
+            foreach ($ip in @($IPs)) {
+                $a = $null
+                if ("$ip" -match $whdCvPat) { $a = ConvertTo-WHDIpRange $ip }
+                if (-not $a -or -not @($ranges | Where-Object { $a[0] -ge $_[0] -and $a[0] -le $_[1] }).Count) { $all = $false; break }
+            }
+        } catch { $all = $false }
+        if ($all) { return $true }
+    }
+    return $false
+}
+
 # Blocked (DROP) connections, grouped by direction + program + protocol + port.
+# Each row gets a State: can (can be allowed from here) | allowed | allowed-off (allow exists, switched off) |
+# covered (the allow-list lets it out now) | windows (service / System / not TCP-UDP) | inbound |
+# ended (program closed, name not known).
 function Get-WHDBlockedConnections {
     param([int]$Hours = 24, [ValidateSet('Outbound','Inbound','Any')]$Direction = 'Outbound', [ValidateSet('DROP','ALLOW')]$Action = 'DROP')
-    $since = (Get-Date).AddHours(-1 * [math]::Abs($Hours))
+    $now = Get-Date
+    $since = $now.AddHours(-1 * [math]::Abs($Hours))
     $local = @(Get-NetIPAddress -EA SilentlyContinue | ForEach-Object { "$($_.IPAddress)" })
-    $procs = @{}; foreach ($pp in @(Get-Process -EA SilentlyContinue)) { $procs["$($pp.Id)"] = $pp }
+    $procs = @{}
+    foreach ($pp in @(Get-Process -EA SilentlyContinue)) {
+        $whdPs = $null; try { $whdPs = $pp.StartTime } catch { $whdPs = $null }       # protected processes do not show it
+        $whdPp = ''; try { $whdPp = "$($pp.Path)" } catch { $whdPp = '' }
+        $procs["$($pp.Id)"] = [pscustomobject]@{ Path = $whdPp; Exe = "$($pp.ProcessName).exe"; Start = $whdPs }
+    }
+    $boot = $null; try { $boot = (Get-CimInstance -ClassName Win32_OperatingSystem -EA Stop).LastBootUpTime } catch { $boot = $null }
+    $names = @(Read-WHDFwNames)
+    $byPid = @{}; foreach ($n in $names) { if (-not $byPid.ContainsKey($n.Pid)) { $byPid[$n.Pid] = New-Object System.Collections.Generic.List[object] }; $byPid[$n.Pid].Add($n) }
+    $seenNow = @{}
     $groups = @{}
     foreach ($e in @(Read-WHDFirewallLog -Since $since)) {
         if ("$($e.action)" -ne $Action) { continue }
         $dir = switch ("$($e.path)") { 'SEND' { 'Outbound' } 'RECEIVE' { 'Inbound' } default { if ($local -contains "$($e.'dst-ip')") { 'Inbound' } else { 'Outbound' } } }
         if ($Direction -ne 'Any' -and $dir -ne $Direction) { continue }
-        $pidv = "$($e.pid)"; $prog = ''; $exe = '(unknown)'
+        $pidv = "$($e.pid)"; $prog = ''; $exe = '(unknown)'; $ended = $false
         if ($pidv -eq '4' -or $pidv -eq '0') { $prog = 'System'; $exe = 'System' }
-        elseif ($pidv -and $procs.ContainsKey($pidv)) { $prog = "$($procs[$pidv].Path)"; $exe = "$($procs[$pidv].ProcessName).exe" }
-        elseif ($pidv) { $exe = "(pid $pidv, ended)" }
+        elseif ($pidv -and $pidv -ne '-') {
+            $lp = $procs[$pidv]
+            if ($lp -and (-not $lp.Start -or $lp.Start -le $e.when.AddSeconds(2))) {
+                $prog = $lp.Path; $exe = $lp.Exe; $seenNow[$pidv] = $lp        # running, and it started before this line
+            } else {
+                $ended = $true; $exe = '(program has closed)'
+                $hit = $null
+                if ($byPid.ContainsKey($pidv)) {
+                    foreach ($c in $byPid[$pidv]) {
+                        if ($c.Start -gt $e.when.AddSeconds(2)) { continue }                         # started after the line
+                        if ($e.when -gt $c.Seen.AddMinutes(30)) { continue }                        # long after it was last seen running
+                        if ($boot -and $c.Start -lt $boot -and $e.when -gt $boot) { continue }      # a restart lies between
+                        if (-not $hit -or $c.Start -gt $hit.Start) { $hit = $c }
+                    }
+                }
+                if ($hit) { $prog = $hit.Path; $exe = $hit.Exe }
+            }
+        }
         $proto = "$($e.protocol)"
-        $port  = if ($dir -eq 'Inbound') { "$($e.'dst-port')" } else { "$($e.'dst-port')" }
+        $port  = "$($e.'dst-port')"
         $ip    = if ($dir -eq 'Inbound') { "$($e.'src-ip')" } else { "$($e.'dst-ip')" }
-        $key   = "$dir|$exe|$proto|$port"
+        $who   = if ($prog -and $prog -ne 'System') { $prog.ToLower() } else { $exe }
+        $key   = "$dir|$who|$proto|$port"
         if (-not $groups.ContainsKey($key)) {
             $groups[$key] = [pscustomobject]@{ Count = 0; Last = $e.when; First = $e.when; Direction = $dir
                 RawApp = $prog; Program = $prog; Exe = $exe; Protocol = $proto; RemotePort = $port
-                IPs = (New-Object System.Collections.Generic.List[string]); Addresses = '' }
+                IPs = (New-Object System.Collections.Generic.List[string]); Addresses = ''
+                Closed = $ended; State = ''; StateText = ''; Sort = 0 }
         }
         $g = $groups[$key]
         $g.Count++
         if ($e.when -gt $g.Last)  { $g.Last  = $e.when }
         if ($e.when -lt $g.First) { $g.First = $e.when }
+        if (-not $ended) { $g.Closed = $false }
         if ($ip -and -not $g.IPs.Contains($ip)) { $g.IPs.Add($ip) }
     }
+    # remember the names resolved just now (running programs that appear in the log)
+    if ($seenNow.Count) {
+        $whdNi = [Globalization.CultureInfo]::InvariantCulture
+        $keep = New-Object System.Collections.Generic.List[object]
+        $done = @{}
+        foreach ($k in @($seenNow.Keys)) {
+            $lp = $seenNow[$k]
+            if (-not $lp.Path -or -not $lp.Start) { continue }
+            $keep.Add([pscustomobject]@{ Pid = "$k"; Start = $lp.Start; Seen = $now; Path = $lp.Path; Exe = $lp.Exe })
+            $done["$k|" + $lp.Start.ToString('yyyy-MM-dd HH:mm:ss', $whdNi)] = $true
+        }
+        foreach ($n in $names) {
+            if ($done.ContainsKey($n.Pid + '|' + $n.Start.ToString('yyyy-MM-dd HH:mm:ss', $whdNi))) { continue }
+            if ($n.Seen -lt $now.AddDays(-1 * [int]$script:WHDFwNamesKeepDays)) { continue }
+            $keep.Add($n)
+        }
+        if ($keep.Count) { Save-WHDFwNames -Names @($keep.ToArray() | Sort-Object Seen -Descending | Select-Object -First ([int]$script:WHDFwNamesMax)) }
+    }
+    if (-not $groups.Count) { return @() }
+    # what can be done with each row
+    $appRules = @{}
+    foreach ($r in @(Get-NetFirewallRule -Group $script:WHDFwGroupApp -EA SilentlyContinue)) { $appRules["$($r.Name)".ToLower()] = "$($r.Enabled)" }
+    $cover = @(); try { $cover = @(Get-WHDAllowListCover) } catch { $cover = @() }
+    $whdBcGate = 'open'
+    if (Get-Command Get-WHDGateState -EA SilentlyContinue) { try { $whdBcGate = "$((Get-WHDGateState).Mode)" } catch { $whdBcGate = 'open' } }
+    $order = @{ 'can' = 1; 'allowed-off' = 2; 'allowed' = 3; 'covered' = 3; 'windows' = 4; 'inbound' = 5; 'ended' = 6 }
+    $progMax = @{}
     $out = foreach ($g in $groups.Values) {
         $show = @($g.IPs | Select-Object -First 3) -join ', '
         if ($g.IPs.Count -gt 3) { $show += (" (+{0} more)" -f ($g.IPs.Count - 3)) }
         $g.Addresses = $show
+        $leaf = if ($g.Program) { Split-Path $g.Program -Leaf } else { '' }
+        if     ($g.Direction -eq 'Inbound')                                { $g.State = 'inbound';  $g.StateText = 'no - inbound' }
+        elseif (-not $g.Program -and $g.Closed)                             { $g.State = 'ended';    $g.StateText = 'no - program has closed (start it again, then load again)' }
+        elseif (-not $g.Program -and $g.Exe -eq '(unknown)')                { $g.State = 'windows';  $g.StateText = 'no - the log has no process id for it' }
+        elseif (-not $g.Program -or $g.Program -eq 'System' -or $leaf -ieq 'svchost.exe' -or $g.Program -notmatch '^[A-Za-z]:\\') { $g.State = 'windows'; $g.StateText = 'no - Windows service / System' }
+        elseif ($g.Protocol -notin @('TCP','UDP') -or -not $g.RemotePort -or $g.RemotePort -eq '-') { $g.State = 'windows'; $g.StateText = 'no - not TCP/UDP' }
+        else {
+            $rn = (Get-WHDProgramAllowName -Program $g.Program -Protocol $g.Protocol -RemotePort $g.RemotePort).ToLower()
+            if     ($appRules.ContainsKey($rn) -and $appRules[$rn] -eq 'True') { $g.State = 'allowed';     $g.StateText = 'allowed already (older lines)' }
+            elseif ($appRules.ContainsKey($rn))                                { $g.State = 'allowed-off'; $g.StateText = $(if ($whdBcGate -eq 'closed') { 'allow exists, switched off (gate CLOSED)' } else { 'allow exists, but it is switched off' }) }
+            elseif (Test-WHDAllowListCovers -Cover $cover -Protocol $g.Protocol -Port $g.RemotePort -IPs @($g.IPs)) { $g.State = 'covered'; $g.StateText = 'no need - the allow-list lets this out now (older lines)' }
+            else                                                              { $g.State = 'can';         $g.StateText = 'yes' }
+        }
+        $pk = if ($g.Program) { $g.Program.ToLower() } else { $g.Exe }
+        if (-not $progMax.ContainsKey($pk) -or $g.Count -gt $progMax[$pk]) { $progMax[$pk] = $g.Count }
         $g
     }
-    @($out | Sort-Object Count -Descending)
+    # order: what can be allowed first, rows of one program together (busiest program first)
+    @($out | Sort-Object @{ e = { $order[$_.State] } },
+                         @{ e = { $pk2 = if ($_.Program) { $_.Program.ToLower() } else { $_.Exe }; $progMax[$pk2] }; Descending = $true },
+                         @{ e = { if ($_.Program) { $_.Program.ToLower() } else { $_.Exe } } },
+                         @{ e = { $_.Count }; Descending = $true },
+                         @{ e = { "$($_.Protocol)" } },
+                         @{ e = { "$($_.RemotePort)".PadLeft(5, '0') } })      # last two: the same order (and numbers) on every load
 }
 
 # \device\harddiskvolumeN\... -> C:\...  (fltmc is a built-in tool; admin only)
@@ -968,14 +1189,54 @@ function ConvertFrom-WHDDevicePath {
 }
 
 function Show-WHDBlockedConnections {
+    # Numbers are given only to the rows that can be allowed from here; the rest is listed below them.
     param([object[]]$Items)
     if (-not @($Items).Count) { Write-Host '  (no blocked connections recorded in that window - is logging on? menu M)' -ForegroundColor DarkGray; return }
-    Write-Host ('  {0,3}  {1,6}  {2,-16} {3,-6} {4,-6} {5,-24} {6}' -f '#','count','last seen','prot','port','program','addresses') -ForegroundColor White
-    $i = 0
-    foreach ($b in @($Items)) {
-        $i++
-        Write-Host ('  {0,3}  {1,6}  {2,-16} {3,-6} {4,-6} {5,-24} {6}' -f $i, $b.Count, $b.Last.ToString('MM-dd HH:mm:ss'), $b.Protocol, $b.RemotePort, $b.Exe, $b.Addresses)
+    $fmt = '  {0,3}  {1,6}  {2,-14} {3,-5} {4,-6} {5,-26} {6}'
+    $can = @($Items | Where-Object { $_.State -eq 'can' })
+    Write-Host ''
+    Write-Host ('  CAN BE ALLOWED ({0}) - that program, that protocol + port, outbound:' -f $can.Count) -ForegroundColor White
+    if ($can.Count) {
+        Write-Host ($fmt -f '#','count','last seen','prot','port','program','addresses') -ForegroundColor DarkGray
+        $i = 0
+        foreach ($b in $can) {
+            $i++
+            Write-Host ($fmt -f $i, $b.Count, $b.Last.ToString('MM-dd HH:mm:ss'), $b.Protocol, $b.RemotePort, $(if ($b.Closed) { $b.Exe + ' (closed)' } else { $b.Exe }), $b.Addresses)
+        }
+    } else { Write-Host '       (nothing)' -ForegroundColor DarkGray }
+    $done = @($Items | Where-Object { $_.State -in @('allowed','allowed-off','covered') })
+    if ($done.Count) {
+        Write-Host ('  NOTHING TO ALLOW ({0}) - older lines; an allow for it exists, or the allow-list lets it out:' -f $done.Count) -ForegroundColor Green
+        foreach ($b in $done) {
+            Write-Host ($fmt -f '', $b.Count, $b.Last.ToString('MM-dd HH:mm:ss'), $b.Protocol, $b.RemotePort, $b.Exe, $b.StateText) -ForegroundColor DarkGray
+        }
     }
+    $win = @($Items | Where-Object { $_.State -in @('windows','inbound') })
+    if ($win.Count) {
+        Write-Host ('  WINDOWS ITSELF ({0}) - services / System, cannot be allowed from here (open the gate for Windows Update / Store):' -f $win.Count) -ForegroundColor White
+        foreach ($b in @($win | Select-Object -First 8)) { Write-Host ($fmt -f '', $b.Count, $b.Last.ToString('MM-dd HH:mm:ss'), $b.Protocol, $b.RemotePort, $b.Exe, $b.Addresses) -ForegroundColor DarkGray }
+        if ($win.Count -gt 8) { Write-Host ('       ... and {0} more line(s)' -f ($win.Count - 8)) -ForegroundColor DarkGray }
+    }
+    $end = @($Items | Where-Object { $_.State -eq 'ended' })
+    if ($end.Count) {
+        $endN = 0; foreach ($b in $end) { $endN += $b.Count }
+        Write-Host ('  PROGRAMS THAT HAVE CLOSED - name not known ({0} blocked connection(s)): {1}' -f $endN, ((@($end | Select-Object -First 6 | ForEach-Object { "$($_.Protocol) $($_.RemotePort)" }) -join ', '))) -ForegroundColor White
+        Write-Host '       Start the program again and open this view while it runs - WHD then remembers its name.' -ForegroundColor DarkGray
+    }
+}
+
+# Menu V: view, then allow one or several rows (e.g. 1,3 or 1-3) with one question.
+function Invoke-WHDBlockedView {
+    $h = (Read-Host '  Hours to look back [24]').Trim(); if (-not ($h -match '^[0-9]{1,4}$')) { $h = 24 }
+    $items = @(Get-WHDBlockedConnections -Hours ([int]$h))
+    Show-WHDBlockedConnections -Items $items
+    $can = @($items | Where-Object { $_.State -eq 'can' })
+    if (-not $can.Count) { return }
+    $pick = (Read-Host '  Numbers to allow (e.g. 1,3 or 1-3), Enter = back').Trim()
+    if (-not $pick) { return }
+    $sel = ConvertFrom-WHDSelection -Text $pick -Max $can.Count
+    if ($null -eq $sel -or -not @($sel).Count) { Write-Host '  invalid.' -ForegroundColor Yellow; return }
+    Add-WHDProgramAllows -Items @($sel | ForEach-Object { $can[$_ - 1] })
 }
 
 # One-click allow: THAT program, THAT protocol + remote port, any destination
@@ -994,15 +1255,59 @@ function Add-WHDProgramAllow {
         Write-WHDLog ("not allowed from the viewer: only TCP/UDP with a port can be allowed ({0} {1})." -f $Item.Protocol, $Item.RemotePort) 'WARN'; return
     }
     if (-not (Test-Path -LiteralPath $Item.Program)) { Write-WHDLog ("note: program path not found on disk (moved or updated?): {0}" -f $Item.Program) 'WARN' }
-    $safe = ($exe -replace '[^A-Za-z0-9._-]', '_')
-    $name = "WHD-App-{0}-{1}-{2}" -f $safe, $Item.Protocol, $Item.RemotePort
+    $name = Get-WHDProgramAllowName -Program $Item.Program -Protocol $Item.Protocol -RemotePort $Item.RemotePort
     Write-WHDLog ("ALLOW PROGRAM: {0}  ({1} port {2}, outbound)" -f $Item.Program, $Item.Protocol, $Item.RemotePort) 'ACT'
     Write-WHDRisk 'caution' ("allows only this program, only {0} to remote port {1}, any destination. Removable in the Undo center or with 'remove program allows'." -f $Item.Protocol, $Item.RemotePort)
     if (-not (Confirm-WHDProceed ("allow {0} out on {1} {2}" -f $exe, $Item.Protocol, $Item.RemotePort))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    # With the update gate CLOSED the per-program allows are switched off. A new allow is saved switched off
+    # and the gate remembers it, so setting the gate to PROGRAMS or OPEN switches it on.
+    $whdGateMode = 'open'
+    if (Get-Command Get-WHDGateState -EA SilentlyContinue) { try { $whdGateMode = "$((Get-WHDGateState).Mode)" } catch { $whdGateMode = 'open' } }
+    $whdAppOn = 'True'; if ($whdGateMode -eq 'closed') { $whdAppOn = 'False' }
     New-WHDFwRule -Params @{ Name = $name; DisplayName = ("WHD Allow {0} ({1} {2})" -f $exe, $Item.Protocol, $Item.RemotePort)
-        Group = $script:WHDFwGroupApp; Direction = 'Outbound'; Action = 'Allow'; Enabled = 'True'; Profile = 'Any'
+        Group = $script:WHDFwGroupApp; Direction = 'Outbound'; Action = 'Allow'; Enabled = $whdAppOn; Profile = 'Any'
         Program = $Item.Program; Protocol = $Item.Protocol; RemotePort = $Item.RemotePort } `
         -Journal @{ Kind = 'fwrule'; RuleName = $name }
+    if ($whdGateMode -eq 'closed') {
+        if (-not $script:WHDExecute) {
+            Write-WHDLog 'would: save this allow switched OFF, because the update gate is CLOSED - it starts working when the gate is set to PROGRAMS (Updates menu P) or OPEN (Updates menu O)' 'DRY'
+        } elseif (@(Get-NetFirewallRule -Name $name -EA SilentlyContinue).Count) {
+            $whdRemOk = $true
+            if (Get-Command Add-WHDGateRemembered -EA SilentlyContinue) {
+                try { Add-WHDGateRemembered -Names @($name) }
+                catch { $whdRemOk = $false; Write-WHDLog ("The allow is saved switched OFF, but the update gate could not note it down ({0}). It will NOT come on by itself with PROGRAMS or OPEN: close the gate again (Updates menu C) and then set P or O, so the gate takes it into account." -f $_.Exception.Message) 'ERR' }
+            }
+            if ($whdRemOk) { Write-WHDLog 'The update gate is CLOSED: the allow is saved, but it is switched OFF until the gate is set to PROGRAMS (Updates menu P) or OPEN (Updates menu O).' 'WARN' }
+        }
+    } elseif ($script:WHDExecute -and $whdGateMode -eq 'programs' -and -not $script:WHDFwAllowBatch -and @(Get-NetFirewallRule -Name $name -EA SilentlyContinue).Count) {
+        Write-WHDLog $script:WHDAllowLiveText 'OK'
+    }
+}
+$script:WHDAllowLiveText = 'Live now: the update gate is on PROGRAMS, so the allow works from this moment. No other step is needed - the gate does not have to be set again.'
+$script:WHDFwAllowBatch = $false
+
+# Several rows at once: the lines are listed, ONE question, then every row.
+function Add-WHDProgramAllows {
+    param([object[]]$Items)
+    $whdAllowList = @($Items | Where-Object { $_ })
+    if (-not $whdAllowList.Count) { return }
+    if ($whdAllowList.Count -eq 1) { Add-WHDProgramAllow -Item $whdAllowList[0]; return }
+    Write-WHDLog ("ALLOW {0} PROGRAM LINE(S) (each: that program, that protocol + port, outbound, any destination):" -f $whdAllowList.Count) 'ACT'
+    foreach ($whdAl in $whdAllowList) { Write-WHDLog ("  {0}  {1} {2}   {3}" -f $whdAl.Exe, $whdAl.Protocol, $whdAl.RemotePort, $whdAl.Program) 'INFO' }
+    if (-not (Confirm-WHDProceed ("allow the {0} line(s) listed above" -f $whdAllowList.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    # The question above covers the whole batch: the single allows do not ask again.
+    $whdAlPrev = $script:WHDConfirm; $whdAlPrevBatch = $script:WHDFwAllowBatch
+    $script:WHDConfirm = { param($m) $true }; $script:WHDFwAllowBatch = $true
+    try { foreach ($whdAl in $whdAllowList) { Add-WHDProgramAllow -Item $whdAl } }
+    finally { $script:WHDConfirm = $whdAlPrev; $script:WHDFwAllowBatch = $whdAlPrevBatch }
+    if ($script:WHDExecute -and (Get-Command Get-WHDGateState -EA SilentlyContinue)) {
+        try {
+            if ("$((Get-WHDGateState).Mode)" -eq 'programs') {
+                $whdAlMade = @($whdAllowList | Where-Object { $_.Program -and @(Get-NetFirewallRule -Name (Get-WHDProgramAllowName -Program $_.Program -Protocol $_.Protocol -RemotePort $_.RemotePort) -EA SilentlyContinue).Count })
+                if ($whdAlMade.Count) { Write-WHDLog $script:WHDAllowLiveText 'OK' }
+            }
+        } catch { }
+    }
 }
 
 function Remove-WHDProgramAllows {
@@ -1382,7 +1687,7 @@ function Show-WHDFirewallMenu {
     Write-Host '  Blocked connections' -ForegroundColor DarkGray
     Write-WHDMenuItem 'M' 'Turn ON the Windows Firewall log' '(default file, dropped + allowed, 32,767 KB)'
     Write-WHDMenuItem 'O' 'Turn OFF the Windows Firewall log'
-    Write-WHDMenuItem 'V' 'View blocked connections / allow a program'
+    Write-WHDMenuItem 'V' 'View blocked connections / allow a program' '(several at once: 1,3 or 1-3)'
     Write-WHDMenuItem 'G' 'Remove all per-program allows'
     Write-Host '  Time sync' -ForegroundColor DarkGray
     Write-WHDMenuItem 'T' 'Use time.cloudflare.com' '(UDP 123 pinned + 1 h time-jump limit)'
@@ -1437,15 +1742,7 @@ function Invoke-WHDFirewallSubmenu {
             }
             '^[Mm]$'{ Enable-WHDConnectionLogging }
             '^[Oo]$'{ Disable-WHDConnectionLogging }
-            '^[Vv]$'{
-                $h = (Read-Host '  Hours to look back [24]').Trim(); if (-not ($h -match '^\d+$')) { $h = 24 }
-                $items = @(Get-WHDBlockedConnections -Hours ([int]$h))
-                Show-WHDBlockedConnections -Items $items
-                if ($items.Count) {
-                    $pick = (Read-Host '  # to allow that program on that port (outbound), Enter = back').Trim()
-                    if ($pick -match '^\d+$' -and [int]$pick -ge 1 -and [int]$pick -le $items.Count) { Add-WHDProgramAllow -Item $items[[int]$pick - 1] }
-                }
-            }
+            '^[Vv]$'{ Invoke-WHDBlockedView }
             '^[Gg]$'{ Remove-WHDProgramAllows }
             '^[Tt]$'{ Invoke-WHDSetTimeSync -Mode Cloudflare }
             '^[Nn]$'{ Invoke-WHDSetTimeSync -Mode Windows }

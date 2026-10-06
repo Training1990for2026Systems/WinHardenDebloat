@@ -86,8 +86,8 @@ encrypted DNS (DoH) for it; menu **U** undoes both. Filtering at the router (pfS
 - **M** turns logging on (v1.3, 2026-09-28): Windows Firewall's own log, default file
   (%SystemRoot%\System32\LogFiles\Firewall\pfirewall.log), dropped + allowed, 32,767 KB (maximum). Journal kind `fwlog`.
   The older Security-log / event 5157 method is replaced; its old journal lines still undo.
-  **O** turns it off. The log has no program path; the viewer names the program from the logged pid when that process
-  is still running.
+  **O** turns it off. The log has no program path; the viewer names the program from the logged pid (1.5: only when
+  that process started before the log line, or from the names WHD remembered - see "1.5 - blocked-connections view").
 - **V** lists blocked connections (default last 24 h, outbound) grouped by program + protocol + port,
   with a count, last-seen time and sample addresses.
 - One-click allow (**program + that port only**) creates
@@ -95,6 +95,8 @@ encrypted DNS (DoH) for it; menu **U** undoes both. Filtering at the router (pfS
   that protocol + remote port, any destination. Journaled as `fwrule` (undo = remove rule).
   Refused: inbound rows (would open the PC) and Windows service traffic (`svchost.exe`, `System`) —
   a program rule for svchost would open every service. **G** removes all program allows.
+  1.5: several rows can be allowed at once, and an allow made while the update gate is CLOSED is saved switched off
+  (see the two 1.5 sections below).
 
 ### Time sync — Option 1 (menu 9 → T / N / S)
 Windows' time service speaks NTP only (no NTS). **T** sets
@@ -144,6 +146,70 @@ Safety: if the current list can't be read, the refresh aborts without changing a
 - `Invoke-WHDApplyFirewallProfile` never lowers outbound Block to Allow.
 - `Invoke-WHDFirewallAllowList` and the profile allow-list keep `WHD-Allow-HTTPS` / `WHD-Allow-HTTP` off while the gate is
   closed. `Disable-WHDDefaultDenyOutbound` refuses while the gate is closed.
+
+### 1.5 - update gate position PROGRAMS, two more Defender rules, gate line on the firewall screen
+- **Update gate, three positions** (`restore\update-guard\update-gate.json` now also holds `Mode`; a file written by an
+  older version has no `Mode` and is read as closed):
+  - **OPEN** as before.
+  - **PROGRAMS** (`Close-WHDUpdateGate -Mode programs`, Updates menu **P**) = outbound default-deny; Defender + DoH + the
+    per-program allows (group `WinHardenDebloat-AppAllow`, made in Firewall menu **V**) stay on; the any-program web rules
+    and every other outbound allow rule are switched off and remembered. Windows Update and the Store stay off.
+  - **CLOSED** (`Close-WHDUpdateGate`, Updates menu **C**) as before: the per-program allows are switched off and
+    remembered too.
+- `Get-WHDGateState` returns `Mode` (`open` / `programs` / `closed`) and `Text` (`OPEN` / `PROGRAMS` / `CLOSED` + since
+  when). `Closed` and `Test-WHDGateClosed` are true for PROGRAMS and CLOSED. Reading the state creates no folder; the
+  folder is made when the state is saved.
+- CLOSED -> PROGRAMS switches on only the per-program allows the gate itself had switched off; an allow that was switched
+  off by hand stays off. PROGRAMS -> CLOSED switches them off and remembers them again.
+- **A program allowed in Firewall V while the gate is CLOSED is saved switched off** and added to the gate's remembered
+  list (`Add-WHDGateRemembered`); it comes on when the gate is set to PROGRAMS or OPEN. (Before 1.5 it was created
+  switched on and switched off at the next close.) With the gate on PROGRAMS a new allow works at once - WHD says so.
+- Everything the gate checked before still applies to both positions: the DNS-pin check (refuses when an adapter does
+  not use the pinned DNS servers; DRY-RUN only warns), the allow-list check, the state saved before the change, and the
+  roll-back when the change fails. A failed change of position (CLOSED <-> PROGRAMS) puts the per-program allows back and
+  records the old position again.
+- `Open-WHDUpdateGate`: the gate is recorded as open only when the change went through. If it fails, the rules it had
+  just switched on are switched off again and the saved state is not touched. "Nothing to open" is unchanged: a
+  default-deny that was turned on separately (Firewall **6**) is left alone.
+- **Two more gate rules** (created only when the program file exists in Defender's platform folder):
+  `WHD-Gate-NisSrv` (`NisSrv.exe`, Defender network inspection - a program rule next to the service rule) and
+  `WHD-Gate-MpCore` (`MpDefenderCoreService.exe`, the Defender core service). Microsoft Learn ("Microsoft Defender Core
+  service overview"): the core service delivers Defender fixes and configuration and also sends Defender telemetry; the
+  close-gate text says so.
+- The firewall screen (`Show-WHDFirewallSummary`) shows one line `Update gate   : OPEN / PROGRAMS / CLOSED since ...`.
+- `Invoke-WHDFirewallAllowList`, the profile allow-list and `Disable-WHDDefaultDenyOutbound` name the real position
+  (CLOSED or PROGRAMS) in their messages; their behaviour is unchanged.
+- Profile key `updates.gate` accepts `"closed"` or `"programs"` (`modules\Profiles.ps1`).
+- `Enable-WHDDefaultDenyOutbound` (Firewall **6**) does nothing while the gate is CLOSED or on PROGRAMS: outbound is already
+  default-deny, and arming the auto-rollback there would set outbound back to Allow when the minutes ran out.
+- `Import-WHDFirewallPolicy -Mode Json` keeps `WHD-Allow-HTTPS` / `WHD-Allow-HTTP` off while the gate is CLOSED or on PROGRAMS;
+  on CLOSED it also switches imported per-program allows off and adds them to the gate's remembered list.
+
+### 1.5 - blocked-connections view (menu 9 -> V), allow several at once
+- The firewall log only has a process id. A running process is used for a log line only if it **started before** that
+  line, so a restart or a reused id no longer puts the wrong program name on old lines.
+- Names WHD resolves are remembered per PC in `restore\update-guard\blocked-programs.json` (id, start time, path, last
+  time seen running; 7 days, 400 entries), so lines of a program that has closed since keep their name and can still be
+  allowed. A remembered name is used only inside the time that program was known to run (not after a restart, not more
+  than 30 minutes after it was last seen). This file is WHD's own cache; the view writes it in DRY-RUN too. If it cannot
+  be written (folder protection, for example) the view still works and says so once.
+- Every row gets a `State`: `can` / `allowed` / `allowed-off` (an allow exists but is switched off, e.g. gate CLOSED) /
+  `covered` (the allow-list lets it out now) / `windows` (service, System, not TCP-UDP, or no process id) / `inbound` /
+  `ended` (program closed, name not known). `StateText` holds the same in words. Rows that can be allowed come first, one
+  program's rows together; only they get a number. Programs that closed without ever being seen are merged per
+  protocol + port.
+- Menu **V**: several rows at once (`1,3` or `1-3`). The lines are listed, then there is **one** question
+  (`Add-WHDProgramAllows -Items <rows>`); a single row still goes through `Add-WHDProgramAllow`. The refusals are
+  unchanged: inbound rows, Windows service traffic (`svchost.exe`, `System`) and rows that are not TCP/UDP.
+- `Get-WHDProgramAllowName` gives the rule name `WHD-App-<exe>-<proto>-<port>` in one place (the allow and the view).
+
+### 1.5 - wipe (menu 9 -> W) shows progress and an honest result
+- Rules are deleted one by one; the wipe shows a progress count (`Write-WHDProgressStep`, a log line every 50 rules).
+- It says how many rules could not be deleted and were left in place, in the log and in the final line.
+- After a DRY-RUN it says "preview only - nothing was deleted" (no "Wipe complete"); if the wipe did not run (the
+  firewall backup failed, for example) it says "Wipe NOT done".
+- Unchanged: the question before the wipe, the warning when outbound is Block, and the baseline option.
+- Small fixes: `Remove-WHDFwGroup` prints no result row; the firewall log size is read only when the log file exists.
 
 ## Safety behaviour of the firewall functions
 - The firewall backup (`restore\<session>\firewall-before.wfw`) is taken once per session, before the first firewall

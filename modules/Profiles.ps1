@@ -37,7 +37,7 @@
    "updates": { "windowsUpdatePolicy": true, "drivers": true, "driverPolicy": true,
                 "storePolicy": true, "edgeUpdaterOff": true,
                 "updatersOff": ["OneDrive"],                   // name matches from the updater scan
-                "gate": "closed" }                             // closed LAST (after the update guard)
+                "gate": "closed" }                             // "closed" or "programs", set LAST (after the update guard); "" = leave as is
  }
  Order: apps/AI -> privacy -> Security+ (incl. services off) -> devices -> permissions -> win32 -> network
  (time, firewall, DNS, logging) -> updates policies + app updaters -> component
@@ -128,6 +128,7 @@ function Invoke-WHDApplyProfile {
     if ($p.componentCleanup.run)   { _WHDProfSay ("   - Component store cleanup{0}" -f $(if($p.componentCleanup.resetBase){' + ResetBase'}else{''})) }
     if ($p.security -and $p.security.updateGuard) { _WHDProfSay '   - then: install the update guard' }
     if ($p.updates -and "$($p.updates.gate)" -eq 'closed') { _WHDProfSay '   - LAST: CLOSE the update gate (only Defender + DNS-over-HTTPS may use the web)' }
+    if ($p.updates -and "$($p.updates.gate)" -eq 'programs') { _WHDProfSay '   - LAST: set the update gate to PROGRAMS (Defender + DNS-over-HTTPS + the programs you allowed)' }
     Write-Host ''
 
     # ---- one upfront gate in EXECUTE mode (unless -Yes) -------------------
@@ -227,8 +228,11 @@ function Invoke-WHDApplyProfile {
             }
             # Update guard LAST, so its first check sees the finished system.
             if ($p.security -and $p.security.updateGuard -and (Get-Command Install-WHDUpdateGuard -EA SilentlyContinue)) { Install-WHDUpdateGuard }
-            # Update gate LAST: after this only Defender + DoH may use the web.
-            if ($p.updates -and "$($p.updates.gate)" -eq 'closed' -and (Get-Command Close-WHDUpdateGate -EA SilentlyContinue)) { Close-WHDUpdateGate }
+            # Update gate LAST: after this only Defender + DoH (and, on PROGRAMS, the programs you allowed) may use the web.
+            if ($p.updates -and (Get-Command Close-WHDUpdateGate -EA SilentlyContinue)) {
+                if     ("$($p.updates.gate)" -eq 'closed')   { Close-WHDUpdateGate }
+                elseif ("$($p.updates.gate)" -eq 'programs') { Close-WHDUpdateGate -Mode programs }
+            }
         } | Out-Null
     }
     catch   { $applyAborted = $true; Write-WHDLog ("apply error: {0}" -f $_.Exception.Message) 'ERR' }
@@ -281,7 +285,7 @@ function Export-WHDProfile {
         componentCleanup = [ordered]@{ run = $true; resetBase = $false }
         # Network (default OFF). Example: timeSync='Cloudflare'; firewallProfile='profiles\firewall-baseline.json'; dns='Cloudflare'; connectionLogging=$true
         network          = [ordered]@{ firewallWipeFirst = $false; timeSync = ''; firewallProfile = ''; dns = ''; connectionLogging = $false }
-        # Updates (default OFF). Example: windowsUpdatePolicy=$true; drivers=$true; driverPolicy=$true; storePolicy=$true; edgeUpdaterOff=$true; updatersOff=@('OneDrive'); gate='closed'
+        # Updates (default OFF). Example: windowsUpdatePolicy=$true; drivers=$true; driverPolicy=$true; storePolicy=$true; edgeUpdaterOff=$true; updatersOff=@('OneDrive'); gate='closed' (or 'programs')
         updates          = [ordered]@{ windowsUpdatePolicy = $false; drivers = $false; driverPolicy = $false; storePolicy = $false; edgeUpdaterOff = $false; updatersOff = @(); gate = '' }
     }
     $dir = Split-Path -Parent $Path

@@ -10,12 +10,17 @@
  AFTER the baseline, when the owner opens the update gate.
 
  Parts (all user-chosen):
-   1. UPDATE GATE (firewall) - closed: outbound default-deny; HTTP/HTTPS only
-      for Microsoft Defender (engine, network inspection, command-line updater,
-      SmartScreen) + DNS-over-HTTPS; the any-program HTTP/HTTPS allows and every
-      other enabled outbound ALLOW rule (Windows' built-in app rules included)
-      are switched off and remembered. Open: everything put back. Stays open
-      until you close it.
+   1. UPDATE GATE (firewall), three positions:
+      CLOSED   - outbound default-deny; HTTP/HTTPS only for Microsoft Defender
+                 (engine, network inspection, core service, command-line
+                 updater, SmartScreen) + DNS-over-HTTPS; the any-program
+                 HTTP/HTTPS allows and every other enabled outbound ALLOW rule
+                 (Windows' built-in app rules and the per-program allows
+                 included) are switched off and remembered.
+      PROGRAMS - like CLOSED, but the programs allowed in Firewall menu V
+                 (group WinHardenDebloat-AppAllow) stay on. Windows Update and
+                 the Store stay off.
+      OPEN     - everything put back. Stays open until you change it.
    2. Windows Update policy NoAutoUpdate=1 (Microsoft documents it for Pro+;
       tried on Home - Status shows evidence whether Windows obeys it).
    3. Drivers: Device Installation Settings = No (+ manufacturer apps/icons off)
@@ -32,8 +37,11 @@ $script:WHDGateStateName = 'update-gate.json'
 
 # ---- gate state (project folder, per PC) -------------------------------------
 function _WHDGateStateFile {
+    # Reading the state does not create the folder (the firewall screen shows the gate position on every
+    # draw, also in DRY-RUN); the folder is made when the state is saved (-Create).
+    param([switch]$Create)
     $d = Join-Path $script:WHDRoot 'restore\update-guard'
-    if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
+    if ($Create -and -not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Path $d -Force | Out-Null }
     Join-Path $d $script:WHDGateStateName
 }
 function Get-WHDGateState {
@@ -46,21 +54,37 @@ function Get-WHDGateState {
     # (Rule states are not used: rebuilding the allow-list briefly re-creates the
     # HTTPS rule, and it must still see the gate as closed to switch it off again.)
     $closed = [bool]($s -and $s.Closed) -and ($out -notmatch 'Allow|NotConfigured')
+    # Mode: open | programs | closed. "Closed" stays true for PROGRAMS too (not open: the any-program
+    # web rules stay off). A state file written before the PROGRAMS position existed has no Mode = closed.
+    $mode = 'open'
+    if ($closed) { if ("$($s.Mode)" -eq 'programs') { $mode = 'programs' } else { $mode = 'closed' } }
     [pscustomobject]@{
         Closed   = $closed
+        Mode     = $mode
         Outbound = $out
         Since    = $(if ($s) { "$($s.Changed)" } else { '' })
         Disabled = @(if ($s -and $s.DisabledRules) { $s.DisabledRules })
         PrevOutbound = $(if ($s) { "$($s.PrevOutbound)" } else { 'Allow' })
-        Text     = $(if ($closed) { 'CLOSED' + $(if ($s) { " since $($s.Changed)" } else { '' }) } else { 'OPEN' + $(if ($s -and $s.Changed) { " since $($s.Changed)" } else { '' }) })
+        Text     = ($mode.ToUpper() + $(if ($s -and $s.Changed) { " since $($s.Changed)" } else { '' }))
     }
 }
 function Test-WHDGateClosed { (Get-WHDGateState).Closed }
 function _WHDSaveGateState {
-    param([bool]$Closed, [string[]]$DisabledRules, [string]$PrevOutbound)
-    $o = [ordered]@{ MachineId = (Get-WHDMachineId); Computer = $env:COMPUTERNAME; Closed = $Closed
-                     Changed = (Get-Date).ToString('yyyy-MM-dd HH:mm'); PrevOutbound = $PrevOutbound; DisabledRules = @($DisabledRules) }
-    ([pscustomobject]$o | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath (_WHDGateStateFile) -Encoding UTF8
+    param([bool]$Closed, [string[]]$DisabledRules, [string]$PrevOutbound, [string]$Mode, [string]$Changed)
+    if (-not $Mode)    { if ($Closed) { $Mode = 'closed' } else { $Mode = 'open' } }
+    if (-not $Changed) { $Changed = (Get-Date).ToString('yyyy-MM-dd HH:mm') }
+    $o = [ordered]@{ MachineId = (Get-WHDMachineId); Computer = $env:COMPUTERNAME; Closed = $Closed; Mode = $Mode
+                     Changed = $Changed; PrevOutbound = $PrevOutbound; DisabledRules = @($DisabledRules) }
+    ([pscustomobject]$o | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath (_WHDGateStateFile -Create) -Encoding UTF8
+}
+# Add rule names to the list the gate switches back on when it opens (used when a per-program allow is
+# made while the gate is CLOSED). Keeps the position and its date. Does nothing while the gate is open.
+function Add-WHDGateRemembered {
+    param([string[]]$Names)
+    $st = Get-WHDGateState
+    if (-not $st.Closed) { return }
+    $all = @(@($st.Disabled) + @($Names) | Where-Object { $_ } | Select-Object -Unique)
+    _WHDSaveGateState -Closed $true -Mode $st.Mode -DisabledRules $all -PrevOutbound $st.PrevOutbound -Changed $st.Since
 }
 
 # Defender's current platform folder (changes when Defender updates itself).
@@ -87,15 +111,36 @@ function Get-WHDGateAllowSpecs {
     if ($plat) {
         $specs += @{ n='WHD-Gate-MsMpEng';    d='WHD Gate: Defender engine (platform folder)';  prog=(Join-Path $plat 'MsMpEng.exe') }
         $specs += @{ n='WHD-Gate-MpCmdRunP';  d='WHD Gate: Defender updater (platform folder)'; prog=(Join-Path $plat 'MpCmdRun.exe') }
+        # Program rule next to the service rule (WdNisSvc) for the same Defender part.
+        $specs += @{ n='WHD-Gate-NisSrv';     d='WHD Gate: Defender network inspection (NisSrv.exe, platform folder)'; prog=(Join-Path $plat 'NisSrv.exe') }
+        # Defender core service. Microsoft Learn ("Microsoft Defender Core service overview"): it delivers
+        # Defender fixes/configuration and also collects Defender telemetry (owner decision: allowed).
+        $specs += @{ n='WHD-Gate-MpCore';     d='WHD Gate: Defender core service (MpDefenderCoreService.exe, platform folder)'; prog=(Join-Path $plat 'MpDefenderCoreService.exe') }
     }
     $specs
 }
 
 # ---- 1. the gate ---------------------------------------------------------------
 function Close-WHDUpdateGate {
-    Write-WHDLog 'UPDATE GATE: CLOSE' 'ACT'
-    Write-WHDRisk 'hard' 'Outbound becomes default-deny. Only Microsoft Defender (engine, network inspection, updater, SmartScreen) and DNS-over-HTTPS may use HTTP/HTTPS. Windows Update, Microsoft Store, driver/manufacturer-app downloads, app updaters, browsers (Edge too) and every other app are OFFLINE until you open the gate. DNS, DHCP and time (NTP) keep working. Every outbound allow rule the gate switches off is remembered and switched back on when you open it.'
-    if (-not (Confirm-WHDProceed 'close the update gate (outbound default-deny, Defender + DoH only)')) { Write-WHDLog 'skipped.' 'WARN'; return }
+    # -Mode closed   : Defender + DNS-over-HTTPS only
+    # -Mode programs : the same, plus the per-program allows (group WinHardenDebloat-AppAllow, Firewall menu V)
+    param([ValidateSet('closed','programs')][string]$Mode = 'closed')
+    $whdGateProg = ($Mode -eq 'programs')
+    $whdGateApps = @(Get-NetFirewallRule -Group $script:WHDFwGroupApp -EA SilentlyContinue)
+    if ($whdGateProg) {
+        Write-WHDLog 'UPDATE GATE: PROGRAMS' 'ACT'
+        Write-WHDRisk 'hard' ("Outbound becomes default-deny. Only Microsoft Defender (engine, network inspection, core service, updater, SmartScreen), DNS-over-HTTPS and the programs YOU allowed ({0} rule(s) now) may go out (the Defender core service also sends Defender telemetry). Windows Update, Microsoft Store, driver/manufacturer-app downloads, app updaters and every program that is not on your list are OFFLINE until you open the gate. DNS, DHCP and time (NTP) keep working. Allow a program: Firewall menu V (View blocked connections / allow a program). Every outbound allow rule the gate switches off is remembered and switched back on when you open it." -f $whdGateApps.Count)
+        foreach ($whdGateApp in $whdGateApps) { Write-WHDLog ("  on your list: {0}" -f $whdGateApp.DisplayName) 'INFO' }
+        if (-not $whdGateApps.Count) { Write-WHDLog '  Your program list is EMPTY - until you allow a program (Firewall menu V) this works the same as CLOSED.' 'WARN' }
+        if (-not (Confirm-WHDProceed 'set the update gate to PROGRAMS (outbound default-deny; Defender + DoH + your allowed programs)')) { Write-WHDLog 'skipped.' 'WARN'; return }
+    } else {
+        Write-WHDLog 'UPDATE GATE: CLOSE' 'ACT'
+        Write-WHDRisk 'hard' 'Outbound becomes default-deny. Only Microsoft Defender (engine, network inspection, core service, updater, SmartScreen) and DNS-over-HTTPS may use HTTP/HTTPS (the Defender core service also sends Defender telemetry). Windows Update, Microsoft Store, driver/manufacturer-app downloads, app updaters, browsers (Edge too), the programs you allowed and every other app are OFFLINE until you open the gate (or set it to PROGRAMS). DNS, DHCP and time (NTP) keep working. Every outbound allow rule the gate switches off is remembered and switched back on when you open it.'
+        if (-not (Confirm-WHDProceed 'close the update gate (outbound default-deny, Defender + DoH only)')) { Write-WHDLog 'skipped.' 'WARN'; return }
+    }
+    # Wording for the messages below (the two positions share every check).
+    $whdGateIs = 'closed';           if ($whdGateProg) { $whdGateIs = 'on PROGRAMS' }
+    $whdGateDo = 'close the gate';   if ($whdGateProg) { $whdGateDo = 'set the gate to PROGRAMS' }
     # Read-only check before any change: with the gate closed, DNS is allowed only to the pinned servers, so an
     # adapter that still uses other DNS servers (the router's, for example) would lose every name lookup.
     $dnsBad = @()
@@ -106,14 +151,16 @@ function Close-WHDUpdateGate {
         }
     } catch { Write-WHDLog ("  could not check which DNS servers the network adapters use ({0}) - continuing without that check." -f $_.Exception.Message) 'WARN' }
     if ($dnsBad.Count) {
-        $dnsWas = [bool](Get-WHDGateState).Closed
+        $dnsOld = Get-WHDGateState
+        $dnsWas = [bool]$dnsOld.Closed
         if ($script:WHDExecute) {
-            $dnsLead = if ($dnsWas) { 'Gate refresh refused - the gate stays closed as it was, nothing was changed.' } else { 'Gate NOT closed - nothing was changed.' }
-            Write-WHDLog ("{0} Adapter(s) not using the pinned DNS servers ({1}): {2}. With the gate closed their name lookups stop. Set DNS to the pinned servers first (Firewall menu D), then close the gate." -f $dnsLead, ($script:WHDDnsServers -join ', '), ($dnsBad -join '; ')) 'ERR'
-            New-WHDResult -Action 'close the update gate' -Status 'failed' -Detail 'adapter(s) not using the pinned DNS servers' | Out-Null
+            $dnsLead = if ($dnsWas) { "Gate {0} refused - the gate stays {1} as it was, nothing was changed." -f $(if ("$($dnsOld.Mode)" -eq $Mode) { 'refresh' } else { 'change' }), "$($dnsOld.Mode)".ToUpper() }
+                       else { "Gate NOT {0} - nothing was changed." -f $(if ($whdGateProg) { 'set to PROGRAMS' } else { 'closed' }) }
+            Write-WHDLog ("{0} Adapter(s) not using the pinned DNS servers ({1}): {2}. With the gate {3} their name lookups stop. Set DNS to the pinned servers first (Firewall menu D), then {4}." -f $dnsLead, ($script:WHDDnsServers -join ', '), ($dnsBad -join '; '), $whdGateIs, $whdGateDo) 'ERR'
+            New-WHDResult -Action $(if ($whdGateProg) { 'set the update gate to PROGRAMS' } else { 'close the update gate' }) -Status 'failed' -Detail 'adapter(s) not using the pinned DNS servers' | Out-Null
             return
         }
-        Write-WHDLog ("  would refuse to close the gate unless DNS is set to the pinned servers first ({0}; Firewall menu D, or network.dns = Cloudflare in a profile). Adapter(s) using other DNS now: {1}. Preview continues." -f ($script:WHDDnsServers -join ', '), ($dnsBad -join '; ')) 'WARN'
+        Write-WHDLog ("  would refuse to {2} unless DNS is set to the pinned servers first ({0}; Firewall menu D, or network.dns = Cloudflare in a profile). Adapter(s) using other DNS now: {1}. Preview continues." -f ($script:WHDDnsServers -join ', '), ($dnsBad -join '; '), $whdGateDo) 'WARN'
     }
     # essentials first: DNS / DHCP / NTP allow-list (also holds the any-program HTTP/HTTPS rules we switch off)
     if (Get-Command Test-WHDAllowListReady -EA SilentlyContinue) {
@@ -122,7 +169,7 @@ function Close-WHDUpdateGate {
             if ($alCmd -and $alCmd.Parameters -and $alCmd.Parameters.ContainsKey('NoConfirm')) { Invoke-WHDFirewallAllowList -NoConfirm } else { Invoke-WHDFirewallAllowList }
         }
     } elseif (-not @(Get-NetFirewallRule -Group $script:WHDFwGroupAllow -EA SilentlyContinue).Count) { Invoke-WHDFirewallAllowList }
-    # Defender + DoH allows (rebuilt each close so a Defender platform update is picked up)
+    # Defender + DoH allows (rebuilt each time so a Defender platform update is picked up)
     Remove-WHDFwGroup -Group $script:WHDFwGroupGate
     foreach ($g in @(Get-WHDGateAllowSpecs)) {
         $p = @{ Name=$g.n; DisplayName=$g.d; Group=$script:WHDFwGroupGate; Direction='Outbound'; Action='Allow'
@@ -133,7 +180,9 @@ function Close-WHDUpdateGate {
         New-WHDFwRule $p
     }
     # everything else that could let traffic out: enabled outbound ALLOW rules outside our essentials/gate groups
+    # (PROGRAMS keeps the per-program allows as well)
     $keepGroups = @($script:WHDFwGroupAllow, $script:WHDFwGroupGate, $script:WHDFwGroupIPv6, $script:WHDFwGroupBlock)
+    if ($whdGateProg) { $keepGroups += $script:WHDFwGroupApp }
     $toOff = @(Get-NetFirewallRule -Direction Outbound -Action Allow -Enabled True -EA SilentlyContinue |
                Where-Object { $keepGroups -notcontains "$($_.Group)" } | ForEach-Object { "$($_.Name)" })
     $anyWeb = @('WHD-Allow-HTTPS','WHD-Allow-HTTP') | Where-Object { @(Get-NetFirewallRule -Name $_ -EA SilentlyContinue | Where-Object { "$($_.Enabled)" -eq 'True' }).Count }
@@ -141,27 +190,61 @@ function Close-WHDUpdateGate {
     if (-not $prevOut -or $prevOut -eq 'NotConfigured') { $prevOut = 'Allow' }
     $old = Get-WHDGateState
     $remember = @(@($old.Disabled) + $toOff + @($anyWeb) | Where-Object { $_ } | Select-Object -Unique)
-    Write-WHDLog ("  switching off {0} other outbound allow rule(s) + {1} any-program web rule(s)" -f $toOff.Count, @($anyWeb).Count) 'INFO'
+    # PROGRAMS: the per-program allows the gate switched off earlier (CLOSED) come back on now and leave the
+    # remembered list. An allow that was switched off by hand is not in that list and stays off.
+    $whdGateAppNames = @($whdGateApps | ForEach-Object { "$($_.Name)" })
+    $gOn = @()
+    $whdGateFinal = $remember
+    if ($whdGateProg) {
+        $gOn          = @($whdGateAppNames | Where-Object { @($old.Disabled) -contains $_ })
+        $whdGateFinal = @($remember | Where-Object { $whdGateAppNames -notcontains $_ })
+    }
+    Write-WHDLog ("  switching off {0} other outbound allow rule(s) + {1} any-program web rule(s){2}" -f $toOff.Count, @($anyWeb).Count, $(if ($gOn.Count) { "; switching {0} of your program allow(s) back on" -f $gOn.Count } else { '' })) 'INFO'
     $gOff = @($toOff) + @($anyWeb)
-    # Save the list of rules BEFORE the change, so it is not lost if the change is interrupted.
-    if ($script:WHDExecute) { _WHDSaveGateState -Closed $true -DisabledRules $remember -PrevOutbound $(if ($old.Closed) { $old.PrevOutbound } else { $prevOut }) }
-    $gRes = Invoke-WHDChange -Description ("gate: disable {0} outbound allow rule(s), outbound default-deny on all profiles" -f $gOff.Count) -Force -Action {
+    $whdGatePrev = $(if ($old.Closed) { $old.PrevOutbound } else { $prevOut })
+    # Save the list of rules BEFORE the change, so it is not lost if the change is interrupted. (It still holds
+    # the program allows that are about to come back on; the exact list is saved again after the change.)
+    if ($script:WHDExecute) { _WHDSaveGateState -Closed $true -Mode $Mode -DisabledRules $remember -PrevOutbound $whdGatePrev }
+    $whdGateDesc = if ($whdGateProg) { "gate PROGRAMS: disable {0} outbound allow rule(s), {1} program allow(s) back on, outbound default-deny on all profiles" -f $gOff.Count, $gOn.Count }
+                   else              { "gate: disable {0} outbound allow rule(s), outbound default-deny on all profiles" -f $gOff.Count }
+    $gRes = Invoke-WHDChange -Description $whdGateDesc -Force -Action {
         Backup-WHDFirewallOnce
         foreach ($rn in $gOff) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
+        foreach ($rn in $gOn)  { Set-NetFirewallRule -Name $rn -Enabled True  -EA SilentlyContinue }
         Set-NetFirewallProfile -All -DefaultOutboundAction Block -Confirm:$false -EA Stop
     } | Select-Object -Last 1
     if ($script:WHDExecute) {
         if ("$($gRes.Status)" -ne 'done') {
-            # failed or skipped. A gate that was already closed stays closed (state saved above, outbound is still Block).
-            if ($old.Closed) { Write-WHDLog 'The update gate could not be closed again (see the line above). It stays closed as it was before.' 'ERR'; return }
-            # Otherwise: switch the rules from this attempt back on and record the gate as not closed.
+            # failed or skipped. A gate that was already closed stays closed (outbound is still Block).
+            if ($old.Closed) {
+                if ("$($old.Mode)" -eq $Mode) { Write-WHDLog ("The update gate could not be {0} again (see the line above). It stays {1} as it was before." -f $(if ($whdGateProg) { 'set to PROGRAMS' } else { 'closed' }), $Mode.ToUpper()) 'ERR'; return }
+                # A change of position (CLOSED <-> PROGRAMS) did not go through: put the per-program allows back
+                # as the old position had them and record the old position again.
+                if ($whdGateProg) {
+                    foreach ($rn in $gOn) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
+                    _WHDSaveGateState -Closed $true -Mode "$($old.Mode)" -DisabledRules $remember -PrevOutbound $whdGatePrev -Changed $old.Since
+                } else {
+                    $whdGateBack = @($toOff | Where-Object { $whdGateAppNames -contains $_ })
+                    foreach ($rn in $whdGateBack) { Set-NetFirewallRule -Name $rn -Enabled True -EA SilentlyContinue }
+                    _WHDSaveGateState -Closed $true -Mode "$($old.Mode)" -DisabledRules @($remember | Where-Object { $whdGateBack -notcontains $_ }) -PrevOutbound $whdGatePrev -Changed $old.Since
+                }
+                Write-WHDLog ("The update gate could NOT be {0} (see the line above). It stays {1} as it was before." -f $(if ($whdGateProg) { 'set to PROGRAMS' } else { 'closed' }), "$($old.Mode)".ToUpper()) 'ERR'
+                return
+            }
+            # Otherwise: put the rules from this attempt back as they were and record the gate as not closed.
             foreach ($rn in $gOff) { Set-NetFirewallRule -Name $rn -Enabled True -EA SilentlyContinue }
+            foreach ($rn in $gOn)  { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
             _WHDSaveGateState -Closed $false -DisabledRules @($old.Disabled) -PrevOutbound $prevOut
-            Write-WHDLog 'The update gate could NOT be closed (see the line above). The rules it had switched off are switched back on; the gate is recorded as open.' 'ERR'
+            Write-WHDLog ("The update gate could NOT be {0} (see the line above). The rules it had switched off are switched back on; the gate is recorded as open." -f $(if ($whdGateProg) { 'set to PROGRAMS' } else { 'closed' })) 'ERR'
             return
         }
         Remove-WHDRollbackTask
-        Write-WHDLog 'Update gate CLOSED. Open it (Updates menu O) when you want updates.' 'OK'
+        if ($whdGateProg) {
+            _WHDSaveGateState -Closed $true -Mode $Mode -DisabledRules $whdGateFinal -PrevOutbound $whdGatePrev
+            Write-WHDLog 'Update gate on PROGRAMS. Allow a program: Firewall menu V. Updates: open the gate (Updates menu O).' 'OK'
+        } else {
+            Write-WHDLog 'Update gate CLOSED. Open it (Updates menu O) when you want updates.' 'OK'
+        }
     }
 }
 function Open-WHDUpdateGate {
@@ -173,13 +256,25 @@ function Open-WHDUpdateGate {
     Write-WHDRisk 'caution' ("Puts back the {0} outbound allow rule(s) the gate switched off and outbound '{1}' (as before the gate closed). Windows Update, Store, drivers and app updaters can then download - the Windows Update / driver / Store policies still apply. Stays open until you close it." -f @($st.Disabled).Count, $st.PrevOutbound)
     if (-not (Confirm-WHDProceed 'open the update gate')) { Write-WHDLog 'skipped.' 'WARN'; return }
     $gOn = @($st.Disabled); $gOut = if ($st.PrevOutbound) { $st.PrevOutbound } else { 'Allow' }
-    Invoke-WHDChange -Description ("gate: re-enable {0} rule(s), outbound {1}" -f $gOn.Count, $gOut) -Force -Action {
+    $whdGateOpenRes = Invoke-WHDChange -Description ("gate: re-enable {0} rule(s), outbound {1}" -f $gOn.Count, $gOut) -Force -Action {
         foreach ($rn in $gOn) { Set-NetFirewallRule -Name $rn -Enabled True -EA SilentlyContinue }
         Set-NetFirewallProfile -All -DefaultOutboundAction $gOut -Confirm:$false -EA Stop
-    } | Out-Null
+    } | Select-Object -Last 1
     if ($script:WHDExecute) {
-        _WHDSaveGateState -Closed $false -DisabledRules @() -PrevOutbound $gOut
-        Write-WHDLog 'Update gate OPEN. Close it again (Updates menu C) when updates are done.' 'OK'
+        # The gate is recorded as open only when the change went through.
+        if ("$($whdGateOpenRes.Status)" -ne 'done') {
+            # A gate that was closed stays closed: the rules this attempt switched on are switched off again, so
+            # the recorded position stays true. The saved state (position + remembered rules) is not touched.
+            if ($st.Closed) {
+                foreach ($rn in $gOn) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
+                Write-WHDLog ("The update gate could NOT be opened (see the line above). It stays {0} as it was before; the rules it had switched off stay remembered. Try O again." -f "$($st.Mode)".ToUpper()) 'ERR'
+            } else {
+                Write-WHDLog 'The update gate could NOT be opened (see the line above). The saved list of rules it had switched off is kept. Try O again.' 'ERR'
+            }
+            return
+        }
+        _WHDSaveGateState -Closed $false -Mode 'open' -DisabledRules @() -PrevOutbound $gOut
+        Write-WHDLog 'Update gate OPEN. Close it again (Updates menu C, or P for PROGRAMS) when updates are done.' 'OK'
     }
 }
 
@@ -283,12 +378,21 @@ function Show-WHDUpdatesStatus {
     Write-WHDLog '================ UPDATES STATUS (read-only) ================' 'ACT'
     $g = Get-WHDGateState
     Write-WHDLog ("Update gate          : {0}   (outbound: {1})" -f $g.Text, $g.Outbound) $(if ($g.Closed) { 'OK' } else { 'WARN' })
+    if ($g.Mode -eq 'programs') {
+        $apps = @(Get-NetFirewallRule -Group $script:WHDFwGroupApp -EA SilentlyContinue)
+        Write-WHDLog ("  programs on your list: {0} rule(s){1}" -f $apps.Count, $(if ($apps.Count) { '' } else { ' - empty: works the same as CLOSED until you allow one (Firewall menu V)' })) $(if ($apps.Count) { 'INFO' } else { 'WARN' })
+        foreach ($a in $apps) { Write-WHDLog ("    {0}  [{1}]" -f $a.DisplayName, $(if ("$($a.Enabled)" -eq 'True') { 'on' } else { 'off' })) 'INFO' }
+    }
+    if ($g.Mode -eq 'closed') {
+        $appsOn = @(Get-NetFirewallRule -Group $script:WHDFwGroupApp -EA SilentlyContinue | Where-Object { "$($_.Enabled)" -eq 'True' })
+        if ($appsOn.Count) { Write-WHDLog ("  {0} program allow(s) are still switched ON although the gate is CLOSED (made before this version, or switched on by hand). Press C to close the gate again - that switches them off and remembers them - or P to keep them on." -f $appsOn.Count) 'WARN' }
+    }
     if ($g.Closed) {
         $plat = Get-WHDDefenderPlatformDir
         $rule = @(Get-NetFirewallRule -Name 'WHD-Gate-MsMpEng' -EA SilentlyContinue)
         if ($plat -and $rule.Count) {
             $pf = "$(@($rule[0] | Get-NetFirewallApplicationFilter -EA SilentlyContinue)[0].Program)"
-            if ($pf -and $pf -ne (Join-Path $plat 'MsMpEng.exe')) { Write-WHDLog '  Defender updated its platform since the gate closed - close the gate again (C) to refresh its allow rules.' 'WARN' }
+            if ($pf -and $pf -ne (Join-Path $plat 'MsMpEng.exe')) { Write-WHDLog '  Defender updated its platform since the gate closed - set the gate again (C or P) to refresh its allow rules.' 'WARN' }
         }
     }
     foreach ($it in $script:WHDUpdatePolicies) {
@@ -316,7 +420,7 @@ function Invoke-WHDDefenderUpdateTest {
     try {
         $duSt = Get-WHDGateState
         $duGate = [bool]$duSt.Closed
-        Write-WHDLog ("  update gate: {0}   outbound: {1}" -f $(if ($duGate) { 'CLOSED' } else { 'open' }), $duSt.Outbound) 'INFO'
+        Write-WHDLog ("  update gate: {0}   outbound: {1}" -f $(if ($duGate) { "$($duSt.Mode)".ToUpper() } else { 'open' }), $duSt.Outbound) 'INFO'
     } catch {}
     try { $before = (Get-MpComputerStatus -EA Stop).AntivirusSignatureVersion } catch { $before = '?' }
     if (-not $script:WHDExecute) { Write-WHDLog ("would: Update-MpSignature -UpdateSource MMPC   (definitions now {0})" -f $before) 'DRY'; return }
@@ -338,7 +442,7 @@ function Invoke-WHDDefenderUpdateTest {
                 }
             }
         } catch {}
-        if ($duGate) { Write-WHDLog 'The update gate is closed. Try again with the gate open (O), then close it again (C).' 'WARN' }
+        if ($duGate) { Write-WHDLog 'The update gate is not open. Try again with the gate open (O), then set it back (C or P).' 'WARN' }
     }
 }
 
@@ -347,8 +451,9 @@ function Show-WHDUpdatesMenu {
     Write-Host ''
     Write-Host '  ================= UPDATES (stop auto-installs) =================' -ForegroundColor White
     Write-Host ('   Gate now: {0}' -f (Get-WHDGateState).Text)
-    Write-Host '   C. CLOSE update gate   (only Defender + DNS-over-HTTPS may use the web)'
-    Write-Host '   O. OPEN update gate    (let updates in; stays open until you close it)'
+    Write-Host '   C. CLOSE update gate      (only Defender + DNS-over-HTTPS may use the web)'
+    Write-Host '   P. PROGRAMS update gate   (Defender + DNS-over-HTTPS + the programs you allowed; no Windows Update / Store)'
+    Write-Host '   O. OPEN update gate       (let updates in; stays open until you change it)'
     $i = 0
     foreach ($it in $script:WHDUpdatePolicies) {
         $i++
@@ -370,6 +475,7 @@ function Invoke-WHDUpdatesSubmenu {
         if (Invoke-WHDGuardHotkey $c) { continue }
         switch -regex ($c) {
             '^[Cc]$'    { Close-WHDUpdateGate }
+            '^[Pp]$'    { Close-WHDUpdateGate -Mode programs }
             '^[Oo]$'    { Open-WHDUpdateGate }
             '^[1-4]$'   { Invoke-WHDUpdatePolicy -Item $script:WHDUpdatePolicies[[int]$c - 1] }
             '^[Aa]$'    { foreach ($it in $script:WHDUpdatePolicies) { Invoke-WHDUpdatePolicy -Item $it } }

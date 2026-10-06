@@ -1,7 +1,7 @@
 > **WinHardenDebloat (WHD)** - by **Training1990for2026Systems** - contact: t90018273@gmail.com
 > License: [MIT](LICENSE) - Security reports: see [SECURITY.md](SECURITY.md) - Built with Claude by Anthropic.
 
-**Version: Classic 1.4.2** (2026-10-04) - runs on Windows PowerShell 5.1, which is built into Windows.
+**Version: Classic 1.5** (2026-10-05; not yet live-tested - the last released and tested version is 1.4.2, see Releases) - runs on Windows PowerShell 5.1, which is built into Windows.
 
 # WinHardenDebloat
 
@@ -211,7 +211,7 @@ use that session's firewall backup (**F** in the Undo center) and the reset opti
   *Edge: on-device AI model + AI themes*. The list shows each one as `on / partly / OFF(set)`.
   These are Microsoft policies documented for Pro/Enterprise; on Home they are best-effort, and Verify
   shows whether the values stuck. The OS AI platform (CoreAI, AI Fabric) still can't be removed.
-- **More privacy settings (menu 3 → S / GUI General tab):** activity history, clipboard history + sync,
+- **More privacy settings (menu 3 → S / GUI General tab; from 1.5 several at once, see v1.5):** activity history, clipboard history + sync,
   ads/suggestions/account nags, online speech + inking/typing data, Edge background/startup/shopping,
   Edge diagnostics/personalization. Profile key: `"privacy": ["activity", ...]` (empty by default).
 - **Usage history (menu 4 → 5 / GUI Permissions → Usage history):** which apps last used the camera,
@@ -254,7 +254,8 @@ Checks after Windows updates that nothing WHD set or removed has quietly come ba
   3. **Inventory scan only if Windows changed** (build/UBR or installed-update list; daily Defender
      signature updates don't count). Compares with the previous scan and flags **CAME BACK** apps.
      Keeps the last **5** guard-made scans (marked `.whd-guard`); your own scans are never touched.
-- **Alert:** the report is always written to `restore\update-guard\guard_<time>.txt`. It **opens in
+- **Alert:** the report is always written to `restore\update-guard\guard_<time>.txt` (from 1.5: under
+  `C:\ProgramData\WinHardenDebloat\guard-data` once the guard is installed, plus an alert window and an event log entry - see v1.5). It **opens in
   Notepad only if** a WHD change is CHANGED/RETURNED or a removed app CAME BACK. New apps from an
   update are listed but don't pop up. **GR** = run the check now, **GO** = open the last report.
 - Profile key `"security": { "updateGuard": true }` (default off). Journal kind `schtask`.
@@ -482,6 +483,54 @@ Issues found in that test, and where they stand in 1.4.2:
   closed; the start-up folder-protection warning appeared when WHD ran from Documents; closing the gate, the Updates status,
   Verify and the permission Lock check ran without errors. **Not yet run on Windows:** the new uninstall check (OneDrive had
   already been removed from the test PC) and the warning shown before 3B switches the protection to BLOCK.
+
+## v1.5 - improvements carried over from WHD Next (2026-10-05; checked with a PowerShell parser, simulated runs and two independent reviews, **not yet live-tested**)
+
+WHD Next is the PowerShell 7 line of this project. These parts of it were merged by hand into Classic. Classic stays on
+Windows PowerShell 5.1 and still makes no web calls.
+
+- **Several items at once (menu 2 AI, menu 3 General apps, menu 3 -> S More privacy settings; window: AI and General tabs).**
+  Type a list instead of one number: `1,3,5`, a range `2-6`, or `*` for the recommended items (marked `*` on screen), also mixed
+  (`*,7`). WHD shows one list of what will happen, with each item's own note, and asks **once** for the whole list.
+  - AI menu: add the action letter - `1,3,5 r`, `2-6 f`, `* r`. Without a letter WHD asks r / f / c.
+  - **`r` in the AI menu changed:** it now removes the app **and** sets its off-switch; an item that cannot be removed (Recall,
+    Click to Do, the Edge and Paint / Notepad AI switches) is turned OFF instead. This also applies to a single item.
+  - `*` never includes Notepad, Paint, Photos or the "found on this PC" apps. General `A` is the same as `*` and asks once.
+  - Not accepted: `2 - 6` with spaces, numbers outside the list - the whole entry is refused, nothing is done.
+  - Window: "Select recommended (*)" on the AI tab, "Select all" for privacy; the one question shows the list.
+- **Update gate: third position PROGRAMS (Updates menu P; window button "PROGRAMS gate"; profile `"gate": "programs"`).**
+  Like CLOSED - Windows Update, Store and everything else stay offline - but the programs you allowed in Firewall **V** keep
+  working. A program you allow while the gate is CLOSED is saved **switched off** and comes on with PROGRAMS or OPEN.
+  Two more Defender programs are let out while the gate is closed (network inspection and the Defender core service; the core
+  service also sends Defender telemetry). The firewall screen and the Updates status show the gate position.
+  After an upgrade from 1.4.2, allows made while the gate was closed are still on: the status says so; press C or P once.
+- **Blocked connections (Firewall V; window: Firewall tab).** A program is named only if it was running before the logged
+  line, so a reused process number no longer shows the wrong name. Names are remembered for 7 days
+  (`restore\update-guard\blocked-programs.json`), so a program that has closed keeps its name. Each row says whether it can be
+  allowed (already allowed, covered by the allow-list, Windows itself, inbound, closed program). Allow several rows at once:
+  `1,3` or `1-3`, one question.
+- **Firewall wipe (W)** shows a count while it deletes, says how many rules could not be deleted, and no longer says
+  "Wipe complete" after a dry run.
+- **Update guard.** Once the guard is installed or refreshed (**GU** / G), its reports, status and its own scans are kept in
+  `C:\ProgramData\WinHardenDebloat\guard-data`, so ransomware folder protection on the WHD folder cannot stop it. Older guard
+  files are copied there once; nothing is deleted from the WHD folder. If a report still cannot be saved, the guard says so and
+  raises an alert instead of stopping silently. The guard status is tagged with the PC, so a copied WHD folder does not bring
+  another PC's status along. **On an alert** a small window shows the result ("Open the report" / "Close") and a Warning is
+  written to Windows Logs > Application (source `WinHardenDebloat`, event 1001).
+  - The change history, `update-gate.json` and `blocked-programs.json` stay in the WHD folder.
+  - Menu **D** (compare scans) no longer sees the guard's scans; the guard compares against its own.
+  - **GX** removes the task, the protected copy and the event log source; `guard-data` is kept.
+- **Security+ E** (what the attack-surface rules caught) prints each item on its own lines with the full program and path;
+  identical events are grouped with a count.
+- **Safety fixes found while merging:** "Enable default-deny" (Firewall 6) does nothing while the update gate is CLOSED or on
+  PROGRAMS (before, its auto-rollback could set outbound back to Allow and so open the gate without a word); a JSON firewall
+  import keeps the web rules off while the gate is closed; the gate is recorded "open" only when the change succeeded.
+- **Small things:** no stray result tables in any menu; an error message also says which file and line; fewer error lines in
+  the log when reading permission switches and the firewall log size.
+- **Known limits of 1.5:** nothing of the above has run on a real PC yet. In the blocked-connections view, a second program
+  with the same file name, protocol and port in another folder is shown as "allowed already". The guard's check of the
+  permissions on `C:\ProgramData\WinHardenDebloat` could only be tested with stand-ins; if it misreads a real folder, the guard
+  reports that its own folder is not used and keeps its files in the WHD folder as before.
 
 ## Menu
 ```
