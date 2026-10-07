@@ -1,7 +1,7 @@
 > **WinHardenDebloat (WHD)** - by **Training1990for2026Systems** - contact: t90018273@gmail.com
 > License: [MIT](LICENSE) - Security reports: see [SECURITY.md](SECURITY.md) - Built with Claude by Anthropic.
 
-**Version: Classic 1.5** (2026-10-05, additions 2026-10-06; not yet live-tested - the last released and tested version is 1.4.2, see Releases) - runs on Windows PowerShell 5.1, which is built into Windows.
+**Version: Classic 1.5** (2026-10-05, additions 2026-10-06; live-tested 2026-10-06 in the console menus - "v1.5 - live test" below says what was run and what was not; the last released version is 1.4.2, see Releases) - runs on Windows PowerShell 5.1, which is built into Windows.
 
 # WinHardenDebloat
 
@@ -484,7 +484,7 @@ Issues found in that test, and where they stand in 1.4.2:
   Verify and the permission Lock check ran without errors. **Not yet run on Windows:** the new uninstall check (OneDrive had
   already been removed from the test PC) and the warning shown before 3B switches the protection to BLOCK.
 
-## v1.5 - improvements carried over from WHD Next (2026-10-05; checked with a PowerShell parser, simulated runs and two independent reviews, **not yet live-tested**)
+## v1.5 - improvements carried over from WHD Next (2026-10-05; checked with a PowerShell parser, simulated runs and two independent reviews, **live-tested 2026-10-06** - see "v1.5 - live test")
 
 WHD Next is the PowerShell 7 line of this project. These parts of it were merged by hand into Classic. Classic stays on
 Windows PowerShell 5.1 and still makes no web calls.
@@ -534,14 +534,15 @@ Windows PowerShell 5.1 and still makes no web calls.
   stray Enter no longer confirms a change.
 - **Small things:** no stray result tables in any menu; an error message also says which file and line; fewer error lines in
   the log when reading permission switches and the firewall log size.
-- **Known limits of 1.5:** nothing of the above has run on a real PC yet. In the blocked-connections view, a second program
-  with the same file name, protocol and port in another folder is shown as "allowed already". The guard's check of the
-  permissions on `C:\ProgramData\WinHardenDebloat`, and creating that folder already locked, could only be tested with
-  stand-ins. If the check misreads a real folder, GU refuses to install or refresh the guard and says why.
+- **Known limits of 1.5:** In the blocked-connections view, a second program with the same file name, protocol and port in
+  another folder is shown as "allowed already". The guard's check of the permissions on `C:\ProgramData\WinHardenDebloat`,
+  and creating that folder already locked, were built with stand-ins; in the live test the guard installed and refreshed
+  its protected copy on a real PC. If the check misreads a real folder, GU refuses to install or refresh the guard and
+  says why.
 
-### v1.5 - added on 2026-10-06: rules WHD did not make, and the gate and firewall tools tell each other's changes (checked with a PowerShell parser and simulated runs, **not yet live-tested**)
+### v1.5 - added on 2026-10-06: rules WHD did not make, and the gate and firewall tools tell each other's changes (checked with a PowerShell parser, simulated runs and independent reviews, **partly live-tested 2026-10-06** - see "v1.5 - live test")
 
-Found in the first run of 1.5 on a real PC (2026-10-06); what is described below has not run on a real PC yet. The update
+Found in the first run of 1.5 on a real PC (2026-10-06) and built the same day. The update
 gate switches other outbound allow rules off only at the moment it is set. Windows and program installers write firewall
 rules of their own afterwards - a Store rule came back after the wipe, and an installed desktop program brought wide allow
 rules with it - and such a rule lets its program out through a CLOSED or PROGRAMS gate. Nothing reported it.
@@ -620,10 +621,33 @@ rules with it - and such a rule lets its program out through a CLOSED or PROGRAM
   update policies for Windows"). Microsoft documents that the Copilot app can be installed and updated through Microsoft
   Edge Update, so an Edge update could bring a removed Copilot back. Documented as Edge Update policies; on Home they are
   tried. If the off-switch was applied with an earlier version, apply it once more to set the two values.
-- **Limits:** none of this has run on a real PC yet. WHD looks for such rules when it is used and in the guard (10 minutes
-  after sign-in) - not all the time in between. A rule that is switched off is not reported. Block rules made by others are
+- **Limits:** WHD looks for such rules when it is used and in the guard (10 minutes after sign-in) - not all the time in
+  between. A rule that is switched off is not reported. Block rules made by others are
   not reported (they only restrict). Decisions are tied to the rule's name: when Windows writes a rule again under a new
   name (it does that for some app rules), the new rule is reported as new.
+
+### v1.5 - live test (2026-10-06)
+
+Fresh Windows 11 Home 26H2 image, console menus (`WHD.ps1`), Windows PowerShell 5.1, DRY-RUN and EXECUTE.
+
+- **1.5 as of 2026-10-05** was run first in the console menus. It worked. The run showed the gap the additions of
+  2026-10-06 close: rules that were written after the update gate had been set got through it.
+- **The additions of 2026-10-06** were run the same evening, without errors in the logs:
+  - the alert at WHD's start and in the Firewall and Updates menus, and the list that opens by itself;
+  - the answers `r` (remove) and `k` (keep); `p` on a service rule was left out, as described;
+  - a wipe with the gate on PROGRAMS: the note in the question, the gate's record put right, the gate's own question and
+    the gate rebuilt;
+  - a reset with the gate on PROGRAMS: the gate recorded as OPEN, Windows' own inbound rules counted as kept;
+  - gate P and O, the Updates status, program allows from Firewall V;
+  - the Copilot off-switch with the two Edge Update policy values;
+  - the update guard: its protected copy refreshed itself with the changed files, and GU installed it again.
+- **Not yet run on Windows:**
+  - the window version (`WHD-GUI.ps1`) of the additions;
+  - the answers `o` (switch OFF) and `p` on a program's rule, `S` (watch inbound rules) and `F`;
+  - Undo, Verify and re-apply for a rule that was switched off;
+  - the update guard's report after a sign-in, with its new firewall section;
+  - `.wfw` import, Undo center F, DNS reset and "remove program allows" while the gate is set;
+  - a profile run with a wipe while the gate is set.
 
 ## Menu
 ```
