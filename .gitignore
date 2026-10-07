@@ -1,0 +1,19 @@
+# WHD USB Image - never commit Windows image files, PC-specific data or work files
+
+# Windows image files (Microsoft's files - not ours to publish)
+*.wim
+*.swm
+*.esd
+original/
+usb/
+usb-custom/
+usb-custom_old_*/
+usb-max/
+usb-max_old_*/
+from-usb_*/
+mount/
+mount_*/
+
+# what the scripts write on this PC
+*.log
+image-contents.txt
