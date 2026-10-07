@@ -524,6 +524,16 @@ function Invoke-WHDUpdateGuard {
         try { $gs = Get-WHDGateState; $rep.Add(("-- UPDATE GATE: {0}   (outbound {1})" -f $gs.Text, $gs.Outbound)); $rep.Add('') } catch {}
     }
 
+    # 2d) v1.5: allow rules WHD did not make that are ON, and a gate that is not what its record says (read-only).
+    #     Both are alerts: an outbound rule lets its program through the gate, an inbound one opens the PC for its program.
+    if (Get-Command Get-WHDFirewallGuardReport -EA SilentlyContinue) {
+        $rep.Add('-- 1c. FIREWALL: RULES WHD DID NOT MAKE + THE UPDATE GATE ITSELF ------')
+        $whdFg = Get-WHDFirewallGuardReport
+        foreach ($whdFgL in @($whdFg.Lines)) { $rep.Add("$whdFgL") }
+        if ($whdFg.Alert) { $alert = $true }
+        $rep.Add('')
+    }
+
     # 3) Inventory compare - only when Windows itself changed
     $rep.Add('-- 2. APPS / FEATURES AFTER WINDOWS UPDATES (inventory compare) ------')
     $fp = Get-WHDUpdateFingerprint

@@ -27,8 +27,13 @@ $script:WHDAiModules = @(
         FeatureOff=@(
             _reg 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot' 1
             _reg 'HKCU:\SOFTWARE\Policies\Microsoft\Windows\WindowsCopilot' 'TurnOffWindowsCopilot' 1
+            # v1.5: on current Windows 11 the Copilot app is installed and updated by Microsoft Edge Update.
+            # Microsoft Learn, "Microsoft Copilot update policies for Windows": Install{app id} = 0 "installs
+            # disabled", Update{app id} = 0 "updates disabled" (Edge Update 1.3.253.25 or later).
+            _reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'Install{C50565E9-CCCF-44B4-BA15-5AC5C6569197}' 0
+            _reg 'HKLM:\SOFTWARE\Policies\Microsoft\EdgeUpdate' 'Update{C50565E9-CCCF-44B4-BA15-5AC5C6569197}' 0
         )
-        Note='Legacy TurnOffWindowsCopilot key (Microsoft is deprecating it, but it still works on Home and needs no AppLocker). Targets the app + Win+C launch.'
+        Note='Legacy TurnOffWindowsCopilot key (Microsoft is deprecating it, but it still works on Home and needs no AppLocker): targets the app + Win+C launch. Plus the two Edge Update policies for the Copilot app (install off, update off): on current Windows 11 Copilot comes with Microsoft Edge Update, so an Edge update could bring a removed Copilot back. Microsoft documents them as Edge Update policies; on Home they are TRIED - Verify and the update guard report it if Copilot returns.'
     }
     [ordered]@{
         Key='recall'; Name='Recall'; Packages=@()

@@ -202,6 +202,37 @@ $xaml = @'
                   </DataGrid>
                 </DockPanel>
               </TabItem>
+              <TabItem Header="Rules from others">
+                <DockPanel Margin="2">
+                  <DockPanel DockPanel.Dock="Top" Margin="0,0,0,4" LastChildFill="False">
+                    <Button   x:Name="FwForLoadBtn"   Content="Load" ToolTip="Reads the list again (with a few hundred rules this takes a while; progress is shown). Changes nothing."/>
+                    <Button   x:Name="FwForOffBtn"    Content="Switch OFF" ToolTip="The selected rules stay in Windows, switched off. The Undo tab switches them on again; Verify and the update guard report it when something switches one back on."/>
+                    <Button   x:Name="FwForRemoveBtn" Content="Remove" ToolTip="Deletes the selected rules. Windows or the program that made a rule may write it again - WHD then reports it again."/>
+                    <Button   x:Name="FwForKeepBtn"   Content="Keep" ToolTip="The selected rules stay ON and are not reported again. A kept outbound rule stays on through the update gate."/>
+                    <TextBlock Text="port:" Foreground="#9AA6BF" VerticalAlignment="Center" Margin="8,0,4,0"/>
+                    <TextBox  x:Name="FwForPort" Width="50" Text="443" VerticalContentAlignment="Center"/>
+                    <Button   x:Name="FwForPortBtn"   Content="One port only" ToolTip="For an outbound rule that names one program file: makes a WHD allow for that program on this TCP port and switches the wide rule off"/>
+                    <Button   x:Name="FwForForgetBtn" Content="Forget kept rules" ToolTip="Forgets the rules you kept with Keep. No firewall rule is changed; those rules are listed again. Inbound rules that were counted as kept when the watch started stay counted."/>
+                    <Button   x:Name="FwForWatchBtn"  Content="Watch inbound rules..." ToolTip="Inbound rules raise an alert only after you start this. WHD asks whether the inbound rules present now count as kept or are listed too."/>
+                  </DockPanel>
+                  <TextBlock DockPanel.Dock="Top" x:Name="FwForInfo" Foreground="#9AA6BF" Margin="0,0,0,4" TextWrapping="Wrap"
+                             Text="Allow rules that are ON and were not made by WHD. Press Load. (Each button has a tooltip.)"/>
+                  <DataGrid x:Name="FwForGrid" AutoGenerateColumns="False" IsReadOnly="True" CanUserSortColumns="True"
+                            SelectionMode="Extended" Background="#0B0E13" Foreground="#C9D3E5" GridLinesVisibility="Horizontal"
+                            HeadersVisibility="Column" FontSize="11" RowHeight="18" RowBackground="#0B0E13"
+                            AlternatingRowBackground="#11151C" BorderBrush="#22303C">
+                    <DataGrid.Columns>
+                      <DataGridTextColumn Header="Dir"       Binding="{Binding Direction}"   Width="66"/>
+                      <DataGridTextColumn Header="Gets out"  Binding="{Binding Leak}"        Width="60"/>
+                      <DataGridTextColumn Header="Proto"     Binding="{Binding Protocol}"    Width="50"/>
+                      <DataGridTextColumn Header="LPort"     Binding="{Binding LocalPort}"   Width="54"/>
+                      <DataGridTextColumn Header="RPort"     Binding="{Binding RemotePort}"  Width="54"/>
+                      <DataGridTextColumn Header="Rule"      Binding="{Binding DisplayName}" Width="190"/>
+                      <DataGridTextColumn Header="Program / app" Binding="{Binding Who}"     Width="*"/>
+                    </DataGrid.Columns>
+                  </DataGrid>
+                </DockPanel>
+              </TabItem>
             </TabControl>
           </DockPanel>
         </Grid>
@@ -558,6 +589,7 @@ foreach ($n in 'ElevTxt','ModeChk','RpBtn','GuardRefreshBtn','ReRemoveBtn','ReAp
                 'FwStatus','FwRulesBtn','FwCustomChk','FwFilter','FwGrid',
                 'FwRefreshBlBtn','FwLogOnBtn','FwLogOffBtn','FwAppClearBtn','FwTimeCfBtn','FwTimeWinBtn','FwTimeStatBtn','FwTzCombo','FwTzSetBtn','FwDateBox','FwDateSetBtn',
                 'FwBlkHours','FwBlkInChk','FwBlkLoadBtn','FwBlkAllowBtn','FwBlkGrid',
+                'Tabs','FwSubTabs','FwForLoadBtn','FwForOffBtn','FwForRemoveBtn','FwForKeepBtn','FwForPort','FwForPortBtn','FwForForgetBtn','FwForWatchBtn','FwForInfo','FwForGrid',
                 'SecReportBtn','SecPuaBtn','SecNetAuditBtn','SecNetBlockBtn','SecCfaAuditBtn','SecCfaBlockBtn',
                 'SecAsrStdBtn','SecAsrScrBtn','SecAsrOffBtn','SecAsrPromoteBtn','SecLlmnrBtn','SecNetbiosBtn','SecWpadBtn',
                 'SecRaBtn','SecProtoAllBtn','SecUacBtn','SecPwBtn','SecGuardInstBtn','SecGuardRunBtn','SecGuardOpenBtn','SecGuardDelBtn','SecStatus','SecAsrLoadBtn','SecAsrGrid','SecEvLoadBtn','SecEvGrid',
@@ -642,13 +674,16 @@ function Invoke-GuiPlanAction {
     finally { $script:WHDConfirm = $whdGpPrev; $script:WHDGuiPlan = '' }
 }
 # The text of such a plan: a head line, one line per item (at most $Max; the rest follows in one run-on line, so every item is named), closing lines.
+# -RestInLog: for lists that can hold hundreds of long lines - the rest is only counted (the engine writes every item to the log).
 function Get-GuiPlanText {
-    param([string]$Head, [string[]]$Lines, [string[]]$Foot = @(), [int]$Max = 16)
+    param([string]$Head, [string[]]$Lines, [string[]]$Foot = @(), [int]$Max = 16, [switch]$RestInLog, [int]$Total = 0)
     $whdPtAll = @($Lines | Where-Object { $_ })
     $whdPtOut = New-Object System.Collections.Generic.List[string]
     $whdPtOut.Add($Head); $whdPtOut.Add('')
     foreach ($whdPtL in @($whdPtAll | Select-Object -First $Max)) { $whdPtOut.Add('   ' + $whdPtL) }
-    if ($whdPtAll.Count -gt $Max) { $whdPtOut.Add(('   and {0} more:  {1}' -f ($whdPtAll.Count - $Max), ((@($whdPtAll | Select-Object -Skip $Max) | ForEach-Object { "$_".Trim() }) -join ';  '))) }
+    $whdPtCount = $whdPtAll.Count; if ($Total -gt $whdPtCount) { $whdPtCount = $Total }      # -Total: the caller passed only the first lines
+    if ($whdPtCount -gt $Max -and $RestInLog) { $whdPtOut.Add(('   ... and {0} more (every one is written to the log below)' -f ($whdPtCount - $Max))) }
+    elseif ($whdPtAll.Count -gt $Max) { $whdPtOut.Add(('   and {0} more:  {1}' -f ($whdPtAll.Count - $Max), ((@($whdPtAll | Select-Object -Skip $Max) | ForEach-Object { "$_".Trim() }) -join ';  '))) }
     foreach ($whdPtF in @($Foot | Where-Object { $_ })) { $whdPtOut.Add(''); $whdPtOut.Add($whdPtF) }
     return ($whdPtOut.ToArray() -join "`n")
 }
@@ -817,6 +852,20 @@ $ProfPickBtn.Add_Click({
 # ---- Firewall tab -----------------------------------------------------------
 $FwProfilesPath = Join-Path $script:WHDRoot 'profiles'
 
+# v1.5: the lines both status boxes end with - the update gate is not what its record says, or an allow rule
+# that WHD did not make is ON. '' when there is nothing to say. Read-only; never throws.
+function Get-GuiAttentionText {
+    $whdAtOut = ''
+    try { foreach ($whdAtP in @((Get-WHDGateHealth).Problems)) { $whdAtOut += ("`n!! UPDATE GATE: {0}" -f $whdAtP) } } catch { }
+    try {
+        $whdAtS = Get-WHDForeignSummary
+        if ($whdAtS.Alert) { $whdAtOut += ("`n!! {0}  -> Firewall tab, 'Rules from others'" -f $whdAtS.Text) }
+        elseif ([int]$whdAtS.Unwatched -gt 0) { $whdAtOut += ("`n{0} inbound allow rule(s) were not made by WHD. Inbound rules are not watched (Firewall tab, 'Rules from others': Watch inbound rules)." -f [int]$whdAtS.Unwatched) }
+        if ("$($whdAtS.KeptOut)") { $whdAtOut += ("`nkept by you: {0}" -f $whdAtS.KeptOut) }
+        if ("$($whdAtS.FileProblem)") { $whdAtOut += ("`n!! {0}" -f $whdAtS.FileProblem) }
+    } catch { }
+    return $whdAtOut
+}
 function Refresh-FwStatus {
     try {
         $p   = Get-WHDFwProfiles
@@ -841,8 +890,9 @@ function Refresh-FwStatus {
         $ntpTxt = if ($ntp.Exists) { "$($ntp.Value)" } else { '(default)' }
         $lgTxt = if ((Get-WHDConnectionLoggingState).On) { 'ON (dropped + allowed)' } else { 'off' }
         $gateTxt = '?'; try { $gateTxt = "$((Get-WHDGateState).Text)" } catch { }      # update gate position (OPEN / PROGRAMS / CLOSED)
-        $FwStatus.Text = ("Profiles in/out:  {0}`nRules: {1} total   |   WHD - IPv6 {2}, Allow-list {3}, Blacklist {4}, Program allows {5}`nDNS: {6}    DoH: {7}`nTime: {8}    Firewall log: {9}`nUpdate gate: {10}" -f `
-            $prof, $all.Count, $gi, $ga, $gb, $gp, $dnsTxt, $dohTxt, $ntpTxt, $lgTxt, $gateTxt)
+        $gg = 0; try { $gg = @(Get-NetFirewallRule -Group $script:WHDFwGroupGate -EA SilentlyContinue).Count } catch { }      # v1.5: the gate's own rules
+        $FwStatus.Text = ("Profiles in/out:  {0}`nRules: {1} total   |   WHD - IPv6 {2}, Allow-list {3}, Blacklist {4}, Program allows {5}, Gate {11}`nDNS: {6}    DoH: {7}`nTime: {8}    Firewall log: {9}`nUpdate gate: {10}" -f `
+            $prof, $all.Count, $gi, $ga, $gb, $gp, $dnsTxt, $dohTxt, $ntpTxt, $lgTxt, $gateTxt, $gg) + (Get-GuiAttentionText)
     } catch { $FwStatus.Text = "status error: $($_.Exception.Message)" }
 }
 function Set-FwGrid {
@@ -862,29 +912,42 @@ function Refresh-FwGrid {
     Set-WHDStatus ("Firewall rules loaded: {0}" -f @($script:FwAllRules).Count)
 }
 # One upfront confirm in EXECUTE, then auto-approve the batch (no dialog spam).
+# v1.5: -Tool names a tool that can change what the update gate set (reset | wipe | wfw | dnsreset | appclear).
+# What it will change is then said IN the one question (the log box cannot be read while a dialog is open), and
+# after a wipe / .wfw import the gate's own question follows when the gate was left without its rules.
 function Invoke-FwAction {
-    param([string]$Title, [scriptblock]$Body, [switch]$Reload)
+    param([string]$Title, [scriptblock]$Body, [switch]$Reload, [string]$Tool = '')
+    $script:WHDFwToolStatus = ''      # (set by a reset / wipe / import in $Body; an older value must not count)
     Set-WHDStatus ("Working: $Title ...")
     Write-WHDLog ("=== $Title ($(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'})) ===") 'ACT'
     $prev = $script:WHDConfirm
     if ($script:WHDExecute) {
-        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title`n`nThis changes Windows firewall, DNS or time settings. Proceed?", 'WinHardenDebloat - firewall', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
+        $fwNote = ''
+        if ($Tool) { try { $fwNoteObj = Get-WHDCrossToolNote -Tool $Tool; if (@($fwNoteObj.Lines).Count) { $fwNote = "`n`n" + (@($fwNoteObj.Lines) -join "`n`n") } } catch { $fwNote = '' } }
+        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title`n`nThis changes Windows firewall, DNS or time settings.$fwNote`n`nProceed?", 'WinHardenDebloat - firewall', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
         if (-not $ok) { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
         $script:WHDConfirm = { param($m) $true }
     }
     try { & $Body } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
     finally { $script:WHDConfirm = $prev }
+    # the gate lost its rules (wipe / import): its own question, asked for real (the confirm strategy is back)
+    # (only when the wipe / import was really done - not after a failed or refused one)
+    if ($script:WHDExecute -and ($Tool -eq 'wipe' -or $Tool -eq 'wfw') -and "$($script:WHDFwToolStatus)" -eq 'done') {
+        try { Invoke-WHDGateRepairOffer -After $(if ($Tool -eq 'wipe') { 'the wipe' } else { 'the import' }) } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
+    }
     Reset-WHDBusyBar
-    Refresh-FwStatus
-    if ($Reload) { Refresh-FwGrid }
+    if ($Reload) { Refresh-FwGrid } else { Refresh-FwStatus }      # (Refresh-FwGrid refreshes the status box itself)
+    try { Update-UpdStatus } catch { }
+    Sync-FwForeign
     Set-WHDStatus ("Ready. $Title finished.")
+    Show-GuiForeignAlert
 }
 
 $FwIpv6Btn.Add_Click({   Invoke-FwAction 'Suppress IPv6 (keep ::1)' { Invoke-WHDDisableIPv6 } -Reload })
 $FwIpv6LoBtn.Add_Click({ Invoke-FwAction 'Suppress IPv6 + block ::1 loopback' { Invoke-WHDDisableIPv6 -BlockLoopback } -Reload })
 $FwIpv6OnBtn.Add_Click({ Invoke-FwAction 'Re-enable IPv6' { Invoke-WHDEnableIPv6 } -Reload })
 $FwDnsBtn.Add_Click({    Invoke-FwAction 'Set Cloudflare 1.1.1.2 + DoH' { Invoke-WHDSetDns -Mode Cloudflare } })
-$FwDnsOffBtn.Add_Click({ Invoke-FwAction 'Reset DNS to automatic' { Invoke-WHDSetDns -Mode Reset } })
+$FwDnsOffBtn.Add_Click({ Invoke-FwAction 'Reset DNS to automatic' { Invoke-WHDSetDns -Mode Reset } -Tool 'dnsreset' })
 $FwAllowBtn.Add_Click({  Invoke-FwAction 'Apply outbound allow-list' { Invoke-WHDFirewallAllowList } -Reload })
 $FwDenyBtn.Add_Click({
     $m = 10; $tmp = 0
@@ -898,8 +961,8 @@ $FwHostsBtn.Add_Click({   Invoke-FwAction 'Hosts sinkhole' { Block-WHDHostsList 
 $FwClearBlBtn.Add_Click({ Invoke-FwAction 'Clear blacklist' { Remove-WHDBlacklist } -Reload })
 $FwApplyBtn.Add_Click({   Invoke-FwAction 'Apply baseline profile' { Invoke-WHDApplyFirewallProfile -Path (Join-Path $FwProfilesPath 'firewall-baseline.json') } -Reload })
 $FwExportBtn.Add_Click({  Invoke-FwAction 'Export policy (json + .wfw)' { Export-WHDFirewallPolicy } })
-$FwResetBtn.Add_Click({   Invoke-FwAction 'Reset to Windows defaults' { Invoke-WHDFirewallReset } -Reload })
-$FwWipeBtn.Add_Click({    Invoke-FwAction 'Wipe ALL firewall rules' { Invoke-WHDFirewallWipe } -Reload })
+$FwResetBtn.Add_Click({   Invoke-FwAction 'Reset to Windows defaults' { Invoke-WHDFirewallReset } -Reload -Tool 'reset' })
+$FwWipeBtn.Add_Click({    Invoke-FwAction 'Wipe ALL firewall rules' { Invoke-WHDFirewallWipe } -Reload -Tool 'wipe' })
 $FwImportBtn.Add_Click({
     $dlg = New-Object Microsoft.Win32.OpenFileDialog
     $dlg.InitialDirectory = $FwProfilesPath
@@ -908,10 +971,163 @@ $FwImportBtn.Add_Click({
         $mode = if ($dlg.FileName -match '\.wfw$') { 'Wfw' } else { 'Json' }
         # No code built from the file name: the block reads these handler variables when it runs.
         $fwImpFile = $dlg.FileName; $fwImpMode = $mode
-        Invoke-FwAction ('Import ' + (Split-Path $fwImpFile -Leaf)) { Import-WHDFirewallPolicy -Path $fwImpFile -Mode $fwImpMode } -Reload
+        Invoke-FwAction ('Import ' + (Split-Path $fwImpFile -Leaf)) { Import-WHDFirewallPolicy -Path $fwImpFile -Mode $fwImpMode } -Reload -Tool $(if ($fwImpMode -eq 'Wfw') { 'wfw' } else { '' })
     }
 })
 $FwRulesBtn.Add_Click({ Refresh-FwGrid })
+
+# ---- v1.5: rules WHD did not make (the same engine as K in the console menus) ----------
+$script:WHDGuiForLoaded = $false      # the grid of the 'Rules from others' tab was filled at least once
+$script:WHDGuiForAuto   = 60          # WHD fills the grid by itself only up to this many rows (reading the details of a few hundred rules takes a while); above it: the Load button
+function Set-FwForInfo {
+    param([int]$Count)
+    try {
+        $whdFiKn = Get-WHDFwKnown
+        $whdFiTxt = ("{0} allow rule(s) that are ON were not made by WHD and are not kept by you (kept by you: {1}; inbound counted as kept at a start: {2}). 'Gets out' True = outbound: its program gets out although outbound is Block. False = inbound: its program can be reached from outside. Select rows (Ctrl / Shift + click), then a button - each has a tooltip." -f $Count, @($whdFiKn.Own).Count, @($whdFiKn.Base).Count)
+        if ($whdFiKn.Inbound) { $whdFiTxt += ' Inbound rules: watched.' }
+        else { $whdFiTxt += " Inbound rules: NOT watched - only outbound ones raise an alert ('Watch inbound rules...' starts that)." }
+        $FwForInfo.Text = $whdFiTxt
+    } catch { }
+}
+# Loads the allow rules that are ON and were not made by WHD into the grid of the 'Rules from others' tab.
+# Read-only: looking at the list starts nothing. Protocol, ports and program are read per rule (progress is shown).
+function Refresh-FwForeign {
+    try {
+        Set-WHDStatus 'Reading the rules WHD did not make ...'
+        $whdFoRows = @(Get-WHDForeignRules)
+        $whdFoI = 0
+        foreach ($whdFoR in $whdFoRows) {
+            $whdFoI++
+            [void](Add-WHDFwRuleDetail -Row $whdFoR)
+            $script:WHDFwForeignSeen["$($whdFoR.Name)".ToLower()] = $true
+            if ($whdFoRows.Count -gt 40) { try { Write-WHDProgressStep -Activity 'Reading rule details' -Done $whdFoI -Total $whdFoRows.Count -Every 20 } catch { } }
+        }
+        Reset-WHDBusyBar
+        $FwForGrid.ItemsSource = $whdFoRows
+        $script:WHDGuiForLoaded = $true
+        Set-FwForInfo -Count $whdFoRows.Count
+        Set-WHDStatus ("Rules WHD did not make: {0} are ON." -f $whdFoRows.Count)
+    } catch { Reset-WHDBusyBar; Write-WHDLog ("rules WHD did not make: " + $_.Exception.Message) 'ERR' }
+}
+# After any action that may have changed firewall rules: bring a grid that was loaded before in step, without
+# reading every rule's details again - rows that are gone or off leave, rows already shown keep their details,
+# new rows get theirs (up to $script:WHDGuiForAuto of them; the rest on Load). Does nothing before the first load.
+function Sync-FwForeign {
+    if (-not $script:WHDGuiForLoaded) { return }
+    try {
+        $whdSyOld = @{}
+        foreach ($whdSyR in @($FwForGrid.ItemsSource)) { if ($whdSyR) { $whdSyOld["$($whdSyR.Name)".ToLower()] = $whdSyR } }
+        $whdSyNew = 0
+        $whdSyRows = @(foreach ($whdSyN in @(Get-WHDForeignRules)) {
+            $whdSyK = "$($whdSyN.Name)".ToLower()
+            if ($whdSyOld.ContainsKey($whdSyK) -and $whdSyOld[$whdSyK].Detail) { $whdSyO = $whdSyOld[$whdSyK]; $whdSyO.Rule = $whdSyN.Rule; $whdSyO }
+            else { $whdSyNew++; if ($whdSyNew -le [int]$script:WHDGuiForAuto) { [void](Add-WHDFwRuleDetail -Row $whdSyN) }; $whdSyN }
+        })
+        $FwForGrid.ItemsSource = $whdSyRows
+        Set-FwForInfo -Count $whdSyRows.Count
+    } catch { }
+}
+function Get-GuiForeignPlanText {
+    param([object[]]$Rows, [string]$Action, [int]$Port = 443, [string[]]$LeftOut = @())
+    $whdFpAll = @($Rows | Where-Object { $_ })
+    $whdFpLines = @(foreach ($whdFpR in @($whdFpAll | Select-Object -First 16)) { Get-WHDForeignRowText -Row $whdFpR })      # (details are read for the rows that are shown only)
+    $whdFpN = $whdFpAll.Count
+    switch ($Action) {
+        'off'    { return (Get-GuiPlanText -RestInLog -Total $whdFpN -Head 'Switch OFF these firewall rules (not made by WHD):' -Lines $whdFpLines -Foot @("Each rule stays in Windows' rule list, switched off. The Undo tab switches it on again; Verify and the update guard report it if something switches it back on.")) }
+        'remove' { return (Get-GuiPlanText -RestInLog -Total $whdFpN -Head 'REMOVE these firewall rules (not made by WHD):' -Lines $whdFpLines -Foot @("WHD saves the firewall once per session, before that session's first firewall change (Inventory / Undo tab: Restore firewall backup puts the WHOLE firewall back as it was then - later firewall changes of that session are reverted with it). Windows or the program that made a rule may write it again - WHD then reports it again.")) }
+        'keep'   { return (Get-GuiPlanText -RestInLog -Total $whdFpN -Head 'KEEP these firewall rules ON as they are:' -Lines $whdFpLines -Foot @('They are not reported again. A kept OUTBOUND rule keeps its program online through the update gate (CLOSED / PROGRAMS); the status boxes name such rules. WHD keeps a rule by its name. "Forget kept rules" forgets the rules you kept again.')) }
+        default  {
+            $whdFpFoot = @('For each program file: a WHD allow - TCP, that remote port only, outbound (with the update gate CLOSED it is saved switched off until PROGRAMS or OPEN). The wide rule is then switched OFF, not deleted.')
+            $whdFpOut = @($LeftOut | Where-Object { $_ })
+            if ($whdFpOut.Count) { $whdFpFoot += ("NOT included - {0} selected row(s) are not an outbound rule of one program file (use Switch OFF, Remove or Keep for them): {1}{2}" -f $whdFpOut.Count, ((@($whdFpOut | Select-Object -First 6)) -join ', '), $(if ($whdFpOut.Count -gt 6) { ' ...' } else { '' })) }
+            return (Get-GuiPlanText -RestInLog -Total $whdFpN -Head ("Replace these rules by a WHD allow on TCP port {0} only:" -f $Port) -Lines $whdFpLines -Foot $whdFpFoot)
+        }
+    }
+}
+function Invoke-GuiForeignAction {
+    param([ValidateSet('off','remove','keep','port')][string]$Action)
+    $whdFaPick = @($FwForGrid.SelectedItems)
+    if (-not $whdFaPick.Count) { Set-WHDStatus 'Select one or more rows first (press Load if the list is empty).'; return }
+    $whdFaPort = 443
+    if ($Action -eq 'port') {
+        $whdFaTxt = "$($FwForPort.Text)".Trim(); $whdFaTmp = 0
+        if ($whdFaTxt -notmatch '^[0-9]{1,5}$' -or -not [int]::TryParse($whdFaTxt, [ref]$whdFaTmp) -or $whdFaTmp -lt 1 -or $whdFaTmp -gt 65535) { Set-WHDStatus 'Port: a number from 1 to 65535.'; return }
+        $whdFaPort = $whdFaTmp
+    }
+    # The grid may be older than the firewall (another button, Windows or a program changed rules since Load):
+    # act only on rows that are still ON and not kept NOW, and on the rule as it is now.
+    $whdFaNow = @{}
+    foreach ($whdFaN in @(Get-WHDForeignRules)) { $whdFaNow["$($whdFaN.Name)".ToLower()] = $whdFaN }
+    $whdFaSel = @(foreach ($whdFaP in $whdFaPick) { $whdFaK = "$($whdFaP.Name)".ToLower(); if ($whdFaNow.ContainsKey($whdFaK)) { $whdFaNow[$whdFaK] } })
+    $whdFaGone = $whdFaPick.Count - $whdFaSel.Count
+    if ($whdFaGone) { Write-WHDLog ("{0} selected row(s) are no longer ON, or no longer there, or kept meanwhile - left out; the list is refreshed." -f $whdFaGone) 'WARN' }
+    if (-not $whdFaSel.Count) { Sync-FwForeign; Refresh-FwStatus; try { Update-UpdStatus } catch { }; Set-WHDStatus 'The selected rows changed since the list was loaded - nothing to do. The list was refreshed.'; return }
+    $whdFaLeft = @()
+    if ($Action -eq 'port') {
+        foreach ($whdFaR in $whdFaSel) { [void](Add-WHDFwRuleDetail -Row $whdFaR) }
+        $whdFaLeft = @($whdFaSel | Where-Object { -not $_.CanPort } | ForEach-Object { "$($_.DisplayName)" })
+        $whdFaSel  = @($whdFaSel | Where-Object { $_.CanPort })
+        if (-not $whdFaSel.Count) { Set-WHDStatus "One port only: none of the selected rows is an outbound rule of one program file. Use Switch OFF, Remove or Keep."; return }
+    }
+    $whdFaTitle = switch ($Action) { 'off' { 'switch OFF' } 'remove' { 'remove' } 'keep' { 'keep' } default { ("one port only (TCP {0})" -f $whdFaPort) } }
+    Invoke-GuiPlanAction ("Rules WHD did not make: {0} - {1} rule(s)" -f $whdFaTitle, $whdFaSel.Count) (Get-GuiForeignPlanText -Rows $whdFaSel -Action $Action -Port $whdFaPort -LeftOut $whdFaLeft) { Invoke-WHDForeignRuleBatch -Rows $whdFaSel -Action $Action -Port $whdFaPort }
+    if ($script:WHDGuiPlanYes -or $whdFaGone) { Sync-FwForeign }
+    if ($script:WHDGuiPlanYes) { Refresh-FwGrid } else { Refresh-FwStatus }
+    try { Update-UpdStatus } catch { }
+}
+# A rule that neither WHD nor you put in and that was not shown yet in this session: one message, and its tab is opened.
+# The message comes first (it needs the details of 12 rows only); the grid is filled afterwards - by itself only for a
+# short list, so the window never hangs on a few hundred rules right after its start or after a button.
+$script:WHDGuiShown = $false
+function Show-GuiForeignAlert {
+    if (-not $script:WHDGuiShown) { return }
+    try {
+        $whdGaAll = @(Get-WHDForeignRules)
+        $whdGaNew = @(Get-WHDForeignAttention -Rows $whdGaAll | Where-Object { -not $script:WHDFwForeignSeen.ContainsKey("$($_.Name)".ToLower()) })
+        if (-not $whdGaNew.Count) { return }
+        $whdGaLines = @(foreach ($whdGaR in @($whdGaNew | Select-Object -First 12)) { '   ' + (Get-WHDForeignRowText -Row $whdGaR) })
+        if ($whdGaNew.Count -gt 12) { $whdGaLines += ('   ... and {0} more' -f ($whdGaNew.Count - 12)) }
+        foreach ($whdGaR in $whdGaNew) { $script:WHDFwForeignSeen["$($whdGaR.Name)".ToLower()] = $true }
+        Write-WHDLog ("ALERT: {0} allow rule(s) that WHD did not make are ON and were not shown before in this session." -f $whdGaNew.Count) 'WARN'
+        try { $Tabs.SelectedIndex = 0; $FwSubTabs.SelectedIndex = 2 } catch { }
+        [void][System.Windows.MessageBox]::Show($win, (("{0} allow rule(s) are ON that neither WHD nor you put in:`n`n{1}`n`nAn outbound rule lets its program out although outbound is Block; an inbound rule lets its program be reached from outside.`n`nFirewall tab, 'Rules from others' (press Load if the list is not filled): select rows, then Switch OFF, Remove, Keep or One port only." -f $whdGaNew.Count, ($whdGaLines -join "`n"))), 'WinHardenDebloat - alert', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning)
+        if ($whdGaAll.Count -le [int]$script:WHDGuiForAuto) { Refresh-FwForeign }
+        elseif ($script:WHDGuiForLoaded) { Sync-FwForeign }
+        else { $FwForInfo.Text = ("{0} allow rule(s) that are ON were not made by WHD. Press Load to list them (reading their details takes a while; progress is shown)." -f $whdGaAll.Count) }
+    } catch { try { Write-WHDLog ("alert (rules WHD did not make): " + $_.Exception.Message) 'WARN' } catch { } }
+}
+$FwForLoadBtn.Add_Click({   Refresh-FwForeign; Refresh-FwStatus; try { Update-UpdStatus } catch { } })
+$FwForOffBtn.Add_Click({    Invoke-GuiForeignAction -Action off })
+$FwForRemoveBtn.Add_Click({ Invoke-GuiForeignAction -Action remove })
+$FwForKeepBtn.Add_Click({   Invoke-GuiForeignAction -Action keep })
+$FwForPortBtn.Add_Click({   Invoke-GuiForeignAction -Action port })
+$FwForForgetBtn.Add_Click({
+    if (-not @((Get-WHDFwKnown).Own).Count) { Set-WHDStatus 'You have not kept any rule - nothing to forget.'; return }
+    Invoke-GuiAction 'Forget the firewall rules you kept' { Clear-WHDFwKnown }
+    Sync-FwForeign; Refresh-FwStatus; try { Update-UpdStatus } catch { }
+    Show-GuiForeignAlert
+})
+# Inbound rules raise an alert only after this was started - by you, never by looking at the list.
+$FwForWatchBtn.Add_Click({
+    if ((Get-WHDFwKnown).Inbound) { Set-WHDStatus 'The inbound rules are watched already.'; return }
+    if (-not $script:WHDExecute) { Set-WHDStatus 'Watch inbound rules: tick EXECUTE first - this choice is saved (no firewall rule is changed).'; return }
+    $whdWaN = @(Get-WHDForeignRules | Where-Object { -not $_.Leak }).Count
+    $whdWaMsg = ("Watch the inbound rules too?`n`n{0} inbound allow rule(s) that WHD did not make are ON now.`n`nYes  =  report only rules that appear from NOW on (the inbound rules present now count as kept - except one you had switched off or removed with WHD that is on again).`n`nNo  =  list ALL {0} too, until you keep, switch off or remove each one. Until then WHD and the update guard (after every sign-in) report them. On a Windows install with its own rules still in place that is a few hundred rules.`n`n(WHD asks once more before it starts this.)`n`nCancel  =  do not start.`n`nNo firewall rule is changed either way." -f $whdWaN)
+    $whdWaAns = [System.Windows.MessageBox]::Show($win, $whdWaMsg, 'WinHardenDebloat - watch inbound rules', [System.Windows.MessageBoxButton]::YesNoCancel, [System.Windows.MessageBoxImage]::Question, [System.Windows.MessageBoxResult]::Cancel)
+    if ("$whdWaAns" -ne 'Yes' -and "$whdWaAns" -ne 'No') { Set-WHDStatus 'Watch inbound rules: not started.'; return }
+    if ("$whdWaAns" -eq 'Yes') {
+        # the dialog above was the question: the engine's own one is not asked a second time
+        $whdWaPrev = $script:WHDConfirm
+        $script:WHDConfirm = { param($m) $true }
+        try { Invoke-GuiAction 'Watch the inbound firewall rules' { Start-WHDFwInboundWatch -CountPresent } }
+        finally { $script:WHDConfirm = $whdWaPrev }
+    } else {
+        # "list ALL": the engine asks its own question (with the number of rules; default No) before anything is saved
+        Invoke-GuiAction 'Watch the inbound firewall rules (list all)' { Start-WHDFwInboundWatch }
+    }
+    Sync-FwForeign; Refresh-FwStatus; try { Update-UpdStatus } catch { }
+    Show-GuiForeignAlert
+})
 
 # ---- Phase 6: blocked connections, time sync, blocklist refresh ------------
 function Refresh-FwBlocked {
@@ -942,7 +1158,7 @@ $FwBlkAllowBtn.Add_Click({
 })
 $FwLogOnBtn.Add_Click({    Invoke-FwAction 'Turn ON the Windows Firewall log (default file, dropped + allowed, 32,767 KB)' { Enable-WHDConnectionLogging } })
 $FwLogOffBtn.Add_Click({   Invoke-FwAction 'Turn OFF the Windows Firewall log' { Disable-WHDConnectionLogging } })
-$FwAppClearBtn.Add_Click({ Invoke-FwAction 'Remove all per-program allow rules' { Remove-WHDProgramAllows } -Reload })
+$FwAppClearBtn.Add_Click({ Invoke-FwAction 'Remove all per-program allow rules' { Remove-WHDProgramAllows } -Reload -Tool 'appclear' })
 $FwTimeCfBtn.Add_Click({   Invoke-FwAction 'Time sync -> time.cloudflare.com (UDP 123 pinned, 1 h jump limit)' { Invoke-WHDSetTimeSync -Mode Cloudflare } -Reload })
 $FwTimeWinBtn.Add_Click({  Invoke-FwAction 'Time sync -> Windows default (time.windows.com)' { Invoke-WHDSetTimeSync -Mode Windows } -Reload })
 $FwTimeStatBtn.Add_Click({ Invoke-GuiAction 'Time + logging status' { Show-WHDTimeStatus; Show-WHDConnectionLoggingState; Show-WHDTimeRegionStatus } })
@@ -1040,14 +1256,15 @@ function Invoke-SecAction {
 }
 
 # ---- Updates tab (v1.1: stop auto-installs) ----------------------------------
-function Update-UpdStatus { try { $g = Get-WHDGateState; $UpdStatus.Text = ("Update gate: {0}   (outbound {1})" -f $g.Text, $g.Outbound) } catch { $UpdStatus.Text = 'Update gate: ?' } }
+function Update-UpdStatus { try { $g = Get-WHDGateState; $UpdStatus.Text = ("Update gate: {0}   (outbound {1})" -f $g.Text, $g.Outbound) + (Get-GuiAttentionText) } catch { $UpdStatus.Text = 'Update gate: ?' } }
 function Update-UpdList   { try { $UpdList.ItemsSource = @(Find-WHDAppUpdaters); $UpdList.DisplayMemberPath = 'Label' } catch { $UpdList.ItemsSource = @() } }
-function Invoke-UpdAction { param([string]$Title, [scriptblock]$Body) Invoke-GuiAction $Title $Body; Update-UpdStatus }
+# -Fw: the action changes the firewall (the gate buttons) - the Firewall tab's status box is refreshed too, before the alert.
+function Invoke-UpdAction { param([string]$Title, [scriptblock]$Body, [switch]$Fw) Invoke-GuiAction $Title $Body; Update-UpdStatus; if ($Fw) { Refresh-FwStatus }; Sync-FwForeign; Show-GuiForeignAlert }
 $UpdStatusBtn.Add_Click({    Invoke-UpdAction 'Updates status' { Show-WHDUpdatesStatus } })
 # (the Firewall tab's status shows the gate position too, so it is refreshed as well)
-$UpdGateCloseBtn.Add_Click({ Invoke-UpdAction 'Update gate: CLOSE' { Close-WHDUpdateGate }; Refresh-FwStatus })
-$UpdGateProgBtn.Add_Click({  Invoke-UpdAction 'Update gate: PROGRAMS' { Close-WHDUpdateGate -Mode programs }; Refresh-FwStatus })
-$UpdGateOpenBtn.Add_Click({  Invoke-UpdAction 'Update gate: OPEN'  { Open-WHDUpdateGate }; Refresh-FwStatus })
+$UpdGateCloseBtn.Add_Click({ Invoke-UpdAction 'Update gate: CLOSE' { Close-WHDUpdateGate } -Fw })
+$UpdGateProgBtn.Add_Click({  Invoke-UpdAction 'Update gate: PROGRAMS' { Close-WHDUpdateGate -Mode programs } -Fw })
+$UpdGateOpenBtn.Add_Click({  Invoke-UpdAction 'Update gate: OPEN'  { Open-WHDUpdateGate } -Fw })
 $UpdDefenderBtn.Add_Click({  Invoke-UpdAction 'Defender: update definitions' { Invoke-WHDDefenderUpdateTest } })
 $UpdWuBtn.Add_Click({        Invoke-UpdAction $script:WHDUpdatePolicies[0].Name { Invoke-WHDUpdatePolicy -Item $script:WHDUpdatePolicies[0] } })
 $UpdDrvBtn.Add_Click({       Invoke-UpdAction $script:WHDUpdatePolicies[1].Name { Invoke-WHDUpdatePolicy -Item $script:WHDUpdatePolicies[1] } })
@@ -1134,13 +1351,16 @@ function Refresh-UndoGrid {
     $UndoGrid.ItemsSource = @(Get-WHDJournal -SessionPath $s.Path)
 }
 # One upfront Yes/No in EXECUTE, then auto-approve inside (same pattern as the firewall tab).
+# -Note: lines shown in the one question (what the action changes besides the obvious).
+# -Fw: the action can switch firewall rules (undo, re-apply, restore) - the status boxes and a loaded 'Rules from others' list follow.
 function Invoke-UndoAction {
-    param([string]$Title, [scriptblock]$Body)
+    param([string]$Title, [scriptblock]$Body, [string]$Note = '', [switch]$Fw, [switch]$NoAlert)
     Set-WHDStatus ("Working: $Title ...")
     Write-WHDLog ("=== $Title ($(if($script:WHDExecute){'EXECUTE'}else{'DRY-RUN'})) ===") 'ACT'
     $prev = $script:WHDConfirm
     if ($script:WHDExecute) {
-        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title`n`nProceed?", 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
+        $whdUaNote = ''; if ("$Note") { $whdUaNote = "`n`n$Note" }
+        $ok = ([System.Windows.MessageBox]::Show($win, "About to: $Title$whdUaNote`n`nProceed?", 'WinHardenDebloat - confirm', [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning, [System.Windows.MessageBoxResult]::No)) -eq 'Yes'
         if (-not $ok) { Write-WHDLog 'cancelled.' 'INFO'; Set-WHDStatus 'Cancelled.'; return }
         $script:WHDConfirm = { param($m) $true }
     }
@@ -1148,7 +1368,9 @@ function Invoke-UndoAction {
     finally { $script:WHDConfirm = $prev }
     Reset-WHDBusyBar
     Refresh-UndoSessions; Refresh-UndoGrid
+    if ($Fw) { try { Refresh-FwStatus; Update-UpdStatus; Sync-FwForeign } catch { } }
     Set-WHDStatus ("Ready. $Title finished.")
+    if ($Fw -and -not $NoAlert) { Show-GuiForeignAlert }      # (-NoAlert: the caller shows it after its own follow-up question)
 }
 $InvDiffBtn.Add_Click({
     Invoke-GuiAction 'Compare last two scans' {
@@ -1156,7 +1378,7 @@ $InvDiffBtn.Add_Click({
     }
 })
 $GuardRefreshBtn.Add_Click({ Invoke-GuiAction 'Refresh update guard' { Install-WHDUpdateGuard } })
-$ReApplyBtn.Add_Click({ Invoke-UndoAction 'Re-apply settings that changed back' { Invoke-WHDReApplyChanged } })
+$ReApplyBtn.Add_Click({ Invoke-UndoAction 'Re-apply settings that changed back' { Invoke-WHDReApplyChanged } -Fw })
 $ReRemoveBtn.Add_Click({ Invoke-UndoAction 'Re-remove apps that came back' { Invoke-WHDReRemoveReturned } })
 $VerAllBtn.Add_Click({  Invoke-GuiAction 'Verify all changes' { Invoke-WHDVerify -All | Out-Null } })
 $VerSessBtn.Add_Click({ $s = $UndoSession.SelectedItem; if ($s) { Invoke-GuiAction ('Verify session ' + $s.Stamp) { Invoke-WHDVerify -SessionPath $s.Path | Out-Null } } })
@@ -1166,10 +1388,24 @@ $UndoSession.Add_SelectionChanged({ Refresh-UndoGrid })
 $UndoSelBtn.Add_Click({
     $sel = @($UndoGrid.SelectedItems)
     if (-not $sel.Count) { Set-WHDStatus 'Select one or more rows first.'; return }
-    Invoke-UndoAction ("Undo {0} selected change(s)" -f $sel.Count) { Invoke-WHDUndo -Entries $sel }
+    Invoke-UndoAction ("Undo {0} selected change(s)" -f $sel.Count) { Invoke-WHDUndo -Entries $sel } -Fw
 })
-$UndoAllBtn.Add_Click({   $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoAction ('Undo session ' + $s.Stamp) { Invoke-WHDUndoSession -SessionPath $s.Path } } })
-$UndoFwBtn.Add_Click({    $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoAction ('Restore firewall from ' + $s.Stamp + ' (replaces the WHOLE firewall policy)') { Restore-WHDSessionFirewall -SessionPath $s.Path } } })
+$UndoAllBtn.Add_Click({   $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoAction ('Undo session ' + $s.Stamp) { Invoke-WHDUndoSession -SessionPath $s.Path } -Fw } })
+$UndoFwBtn.Add_Click({
+    $s = $UndoSession.SelectedItem
+    if (-not $s) { return }
+    # v1.5: a whole-policy import, like the Firewall tab's .wfw import - the question says what it does to the update gate,
+    # and when the gate was left without its rules its own question follows (asked for real, after this action).
+    $whdUfNote = ''
+    try { $whdUfN = Get-WHDCrossToolNote -Tool 'wfw'; if (@($whdUfN.Lines).Count) { $whdUfNote = (@($whdUfN.Lines) -join "`n`n") } } catch { $whdUfNote = '' }
+    $script:WHDFwToolStatus = ''
+    Invoke-UndoAction ('Restore firewall from ' + $s.Stamp + ' (replaces the WHOLE firewall policy)') { Restore-WHDSessionFirewall -SessionPath $s.Path -NoRepairOffer } -Note $whdUfNote -Fw -NoAlert
+    if ($script:WHDExecute -and "$($script:WHDFwToolStatus)" -eq 'done') {
+        try { Invoke-WHDGateRepairOffer -After 'the restore' } catch { Write-WHDLog ("error: " + $_.Exception.Message) 'ERR' }
+        try { Refresh-FwStatus; Update-UpdStatus; Sync-FwForeign } catch { }
+    }
+    Show-GuiForeignAlert
+})
 $UndoHostsBtn.Add_Click({ $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoAction ('Restore hosts file from ' + $s.Stamp) { Restore-WHDSessionHosts -SessionPath $s.Path } } })
 $UndoRegBtn.Add_Click({   $s = $UndoSession.SelectedItem; if ($s) { Invoke-UndoAction ('Import .reg backups from ' + $s.Stamp) { Import-WHDLegacyRegBackups -SessionPath $s.Path } } })
 Refresh-UndoSessions
@@ -1180,5 +1416,7 @@ Set-WHDStatus 'DRY-RUN mode - actions only preview.'
 try { Update-WHDGuardIfStale } catch { }
 try { Write-WHDAccountWarning } catch { }
 try { Write-WHDProtectedFolderWarning } catch { }
+# v1.5: once the window is on screen, say when an allow rule is ON that neither WHD nor you put in (one message)
+$win.Add_ContentRendered({ if (-not $script:WHDGuiShown) { $script:WHDGuiShown = $true; Show-GuiForeignAlert } })
 $win.ShowDialog() | Out-Null
 Stop-WHDTranscript

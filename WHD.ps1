@@ -133,6 +133,8 @@ if ($Export) {
 # ---- non-interactive: apply a profile, then exit ----------------------------
 if ($Apply) {
     Invoke-WHDApplyProfile -Path $Apply
+    # v1.5: say at the end when the update gate is not what its record says, or an allow rule WHD did not make is ON (read-only)
+    try { if (Get-Command Show-WHDFwAttentionLines -EA SilentlyContinue) { Show-WHDFwAttentionLines -AtStart } } catch {}
     Stop-WHDTranscript
     Write-WHDLog 'Apply finished. See logs\ for the full transcript.' 'OK'
     return
@@ -461,6 +463,14 @@ function Invoke-WHDUndoSubmenu {
 # ---- main loop --------------------------------------------------------------
 # Labeled loop so 'Q' can break the WHILE (a bare 'break' only exits the switch).
 try {
+    # v1.5: at the start, say when the update gate is not what its record says, and show + ask when an allow rule
+    # is ON that neither WHD nor you put in (the same check runs each time the Firewall or Updates menu opens).
+    try {
+        if (Get-Command Invoke-WHDFwAttentionAsk -EA SilentlyContinue) {
+            Show-WHDFwAttentionLines -AtStart
+            Invoke-WHDFwAttentionAsk | Out-Null
+        }
+    } catch { Write-WHDLog ("start check (firewall rules): {0}" -f $_.Exception.Message) 'WARN' }
     :mainloop while ($true) {
         Show-WHDMain
         $choice = (Read-Host '  Select').Trim()

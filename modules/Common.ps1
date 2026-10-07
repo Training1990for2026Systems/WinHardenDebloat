@@ -418,8 +418,10 @@ function Invoke-WHDChange {
         return (New-WHDResult -Action $Description -Status 'planned')
     }
     New-WHDRestorePoint
+    $script:WHDFwScanCache = $null      # v1.5: a change is being made - the short-lived look at the firewall rules (Firewall.ps1) is not reused
     try {
         & $Action
+        $script:WHDFwScanCache = $null
         Write-WHDLog ("done: {0}" -f $Description) 'OK'
         Add-WHDJournal -Description $Description -Data $Journal
         return (New-WHDResult -Action $Description -Status 'done')
@@ -571,7 +573,7 @@ function Add-WHDDeprovisionMark {
 function Invoke-WHDReApplyChanged {
     param([object[]]$Results)
     if (-not $Results) { $Results = @(Invoke-WHDVerify -All -Quiet) }
-    $auto = @('reg', 'service', 'task', 'pnpdev', 'deprov', 'fwlog', 'mppref', 'asr', 'tz')
+    $auto = @('reg', 'service', 'task', 'pnpdev', 'deprov', 'fwlog', 'mppref', 'asr', 'tz', 'fwoff')
     $bad  = @($Results | Where-Object { $_.Result -eq 'CHANGED' })
     $todo = @($bad | Where-Object { $auto -contains "$($_.Entry.Kind)" })
     $hand = @($bad | Where-Object { $auto -notcontains "$($_.Entry.Kind)" })
@@ -621,6 +623,16 @@ function Invoke-WHDReApplyChanged {
                              NewAllowed = $flA; NewBlocked = $flB; NewSizeKB = $flS }
                     Invoke-WHDChange -Description ("firewall log ({0}): allowed={1} dropped={2} size={3} KB" -f $flP, $flA, $flB, $flS) -Force -Journal $jr -Action {
                         Set-NetFirewallProfile -Name $flP -LogAllowed $flA -LogBlocked $flB -LogMaxSizeKilobytes $flS -EA Stop
+                    } | Out-Null
+                }
+                'fwoff' {
+                    # v1.5: a firewall rule WHD switched off (it was not made by WHD) is on again -> switch it off again
+                    $raRn = "$($e.RuleName)"; $raOn = ("$($e.NewEnabled)" -eq 'True')
+                    $jr = @{ Kind = 'fwoff'; RuleName = $raRn; RuleDisplay = "$($e.RuleDisplay)"; Direction = "$($e.Direction)"; OldEnabled = $(if ($raOn) { 'False' } else { 'True' }); NewEnabled = $(if ($raOn) { 'True' } else { 'False' }) }
+                    Invoke-WHDChange -Description ("firewall rule {0} -> {1}" -f "$($e.RuleDisplay)", $(if ($raOn) { 'switched on' } else { 'switched OFF' })) -Force -Journal $jr -Action {
+                        $raRule = @(Get-WHDFwRuleExact -Name $raRn)
+                        if (-not $raRule.Count) { throw 'the rule is no longer there' }
+                        $raRule | Set-NetFirewallRule -Enabled $(if ($raOn) { 'True' } else { 'False' }) -EA Stop
                     } | Out-Null
                 }
                 'mppref' { if (Get-Command Set-WHDMpPreference -EA SilentlyContinue) { Set-WHDMpPreference -Setting $e.Setting -Value ([int]$e.NewValue) | Out-Null } }
@@ -797,6 +809,7 @@ function Get-WHDUndoMode {
         'tz'      { 'auto' }
         'deprov'  { 'auto' }
         'fwlog'   { 'auto' }
+        'fwoff'   { 'auto' }
         default   { 'manual' }
     }
 }
@@ -934,6 +947,16 @@ function _WHDUndoOne {
                 Set-NetFirewallProfile -Name $flP -LogAllowed $flA -LogBlocked $flB -LogMaxSizeKilobytes $flS -EA Stop
             } | Out-Null
         }
+        'fwoff' {
+            # v1.5: a firewall rule not made by WHD that WHD switched off (or on) - put its switch back
+            $foRn = "$($Entry.RuleName)"; $foBack = ("$($Entry.OldEnabled)" -eq 'True')
+            $jr = @{ Kind = 'fwoff'; RuleName = $foRn; RuleDisplay = "$($Entry.RuleDisplay)"; Direction = "$($Entry.Direction)"; OldEnabled = "$($Entry.NewEnabled)"; NewEnabled = "$($Entry.OldEnabled)" }
+            Invoke-WHDChange -Description ("firewall rule {0} -> {1}" -f "$($Entry.RuleDisplay)", $(if ($foBack) { 'switched on' } else { 'switched OFF' })) -Force -Journal $jr -Action {
+                $foRule = @(Get-WHDFwRuleExact -Name $foRn)
+                if (-not $foRule.Count) { throw 'the rule is no longer there (removed since) - nothing to switch' }
+                $foRule | Set-NetFirewallRule -Enabled $(if ($foBack) { 'True' } else { 'False' }) -EA Stop
+            } | Out-Null
+        }
         'tz' {
             if (-not "$($Entry.OldId)") { Write-WHDLog 'old time zone unknown, cannot undo' 'ERR'; return }
             Set-WHDTimeZoneId -Id "$($Entry.OldId)"
@@ -1011,17 +1034,92 @@ function Invoke-WHDUndoSession {
     Invoke-WHDUndo -Entries @(Get-WHDJournal -SessionPath $SessionPath)
 }
 
+# v1.5: journal entries of kind 'fwoff' (a firewall rule not made by WHD that WHD switched off) that still stand on
+# this PC: rule name (lower case) -> its entries, oldest first. Entries that were undone are left out.
+function Get-WHDFwOffEntries {
+    $foMap = @{}
+    try {
+        foreach ($foS in @(Get-WHDUndoSessions | Sort-Object Stamp)) {
+            foreach ($foE in @(Get-WHDJournal -SessionPath $foS.Path)) {
+                if ("$($foE.Kind)" -ne 'fwoff' -or $foE.Undone) { continue }
+                $foK = "$($foE.RuleName)".ToLower()
+                if (-not $foMap.ContainsKey($foK)) { $foMap[$foK] = New-Object System.Collections.Generic.List[object] }
+                $foMap[$foK].Add($foE)
+            }
+        }
+    } catch { }
+    return $foMap
+}
+# The rule names (lower case) WHD still holds switched OFF: the latest standing entry says "off" and was not
+# written by an undo. Verify and the update guard report such a rule when it is ON again.
+function Get-WHDFwOffLive {
+    $flOut = @{}
+    $flMap = Get-WHDFwOffEntries
+    foreach ($flE in $flMap.GetEnumerator()) {      # (not .Keys: a rule could be named "Keys")
+        $flList = $flE.Value
+        $flLast = $flList[$flList.Count - 1]
+        if (-not $flLast.ByUndo -and "$($flLast.NewEnabled)" -ne 'True') { $flOut["$($flE.Key)"] = $true }
+    }
+    return $flOut
+}
+# Rule names (lower case) of firewall rules not made by WHD that you REMOVED with WHD on this PC (answer r in
+# "Rules WHD did not make"; the journal entry carries RemovedRule).
+function Get-WHDFwRemovedNames {
+    $rnOut = @{}
+    try {
+        foreach ($rnS in @(Get-WHDUndoSessions)) {
+            foreach ($rnE in @(_WHDReadJsonl (Join-Path $rnS.Path 'journal.jsonl'))) {
+                if ("$($rnE.RemovedRule)") { $rnOut["$($rnE.RemovedRule)".ToLower()] = $true }
+            }
+        }
+    } catch { }
+    return $rnOut
+}
+# You keep these rules ON from now on: their standing "switched off" entries are marked as undone, so Verify, the
+# update guard and re-apply no longer hold them off. Returns the number of entries marked.
+function Clear-WHDFwOffEntries {
+    param([string[]]$Names)
+    $cfN = 0
+    $cfMap = Get-WHDFwOffEntries
+    foreach ($cfName in @($Names | Where-Object { $_ })) {
+        $cfK = "$cfName".ToLower()
+        if (-not $cfMap.ContainsKey($cfK)) { continue }
+        foreach ($cfE in $cfMap[$cfK].ToArray()) {
+            if ("$($cfE.NewEnabled)" -eq 'True') { continue }
+            _WHDMarkUndone $cfE
+            $cfN++
+        }
+    }
+    return $cfN
+}
+
+# Puts back the firewall saved at the start of a session (a whole-policy import).
+# v1.5: it is the same kind of change as the Firewall menu's .wfw import, so it tells the same things: what it does to
+# the update gate (before the question), the gate's record is put right afterwards, the inbound rules it brings back
+# count as kept, and - unless -NoRepairOffer (the window version asks that itself) - the gate's own question follows
+# when the gate was left without its rules.
 function Restore-WHDSessionFirewall {
-    param([Parameter(Mandatory)][string]$SessionPath)
+    param([Parameter(Mandatory)][string]$SessionPath, [switch]$NoRepairOffer)
+    $script:WHDFwToolStatus = 'skipped'
     $f = Join-Path $SessionPath 'firewall-before.wfw'
     if (-not (Test-Path -LiteralPath $f)) { Write-WHDLog 'This session has no firewall backup.' 'WARN'; return }
     Write-WHDLog ("RESTORE FIREWALL from {0}" -f $f) 'ACT'
-    Write-WHDRisk 'hard' 'Replaces the ENTIRE current firewall policy with the one saved before that session. Later firewall changes are lost.'
-    if (-not (Confirm-WHDProceed 'replace the whole firewall policy with this backup')) { Write-WHDLog 'skipped.' 'WARN'; return }
-    Invoke-WHDChange -Description ("netsh advfirewall import {0}" -f $f) -Force -Action {
+    Write-WHDRisk 'hard' 'Replaces the ENTIRE current firewall policy with the one saved at the start of that session (before its first firewall change). Every later firewall change is lost - rules, the outbound setting and what the update gate set.'
+    $rfNote = [pscustomobject]@{ Ask = ''; Before = $null; Pending = @() }
+    if (Get-Command Write-WHDCrossToolNote -EA SilentlyContinue) { try { $rfNote = Write-WHDCrossToolNote -Tool 'wfw' } catch { } }
+    if (-not (Confirm-WHDProceed ('replace the whole firewall policy with this backup' + "$($rfNote.Ask)"))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $rfRes = Invoke-WHDChange -Description ("netsh advfirewall import {0}" -f $f) -Force -Action {
+        # the firewall as it is now is saved first, like before every other firewall change of a session (once per session)
+        if (Get-Command Backup-WHDFirewallOnce -EA SilentlyContinue) { Backup-WHDFirewallOnce }
         $ni = Invoke-WHDNative -Exe 'netsh.exe' -ArgList @('advfirewall', 'import', "$f")
         if ($ni.Code -ne 0) { throw ("netsh exit {0}: {1}" -f $ni.Code, ($ni.Out -join ' ')) }
-    } | Out-Null
+    } | Select-Object -Last 1
+    $script:WHDFwToolStatus = "$($rfRes.Status)"
+    if ($script:WHDExecute -and "$($rfRes.Status)" -eq 'done') {
+        if (Get-Command Update-WHDGateAfterFirewallChange -EA SilentlyContinue) { Update-WHDGateAfterFirewallChange -Before $rfNote.Before -What 'the restore' }
+        if (Get-Command Set-WHDFwKnownFromNow -EA SilentlyContinue) { Set-WHDFwKnownFromNow -Why 'restore' -Pending @($rfNote.Pending) }
+        if (-not $NoRepairOffer -and (Get-Command Invoke-WHDGateRepairOffer -EA SilentlyContinue)) { Invoke-WHDGateRepairOffer -After 'the restore' }
+    }
 }
 
 function Restore-WHDSessionHosts {
@@ -1198,6 +1296,17 @@ function Test-WHDJournalEntry {
             $r.Now = if ($n) { 'present' } else { 'missing' }
             $r.Result = if ($n) { 'PASS' } else { 'CHANGED' }
         }
+        'fwoff' {
+            # v1.5: a rule not made by WHD that WHD switched off. Gone = fine (nothing left to be on).
+            $r.Target = "firewall rule '$($Entry.RuleDisplay)' ($($Entry.Direction)) switched $(if ("$($Entry.NewEnabled)" -eq 'True') { 'on' } else { 'off' }) by WHD"
+            $fx = @(); if (Get-Command Get-WHDFwRuleExact -EA SilentlyContinue) { $fx = @(Get-WHDFwRuleExact -Name "$($Entry.RuleName)") }
+            if (-not $fx.Count) { $r.Now = '(rule is gone)'; $r.Result = 'PASS' }
+            else {
+                $fxOn = "$($fx[0].Enabled)"
+                $r.Now = if ($fxOn -eq 'True') { 'ON' } else { 'off' }
+                $r.Result = if ($fxOn -eq "$($Entry.NewEnabled)") { 'PASS' } else { 'CHANGED' }
+            }
+        }
         'file' {
             $r.Target = "file $($Entry.Path)"
             if (-not (Test-Path -LiteralPath $Entry.Path)) { $r.Now = '(missing)'; $r.Result = 'CHANGED' }
@@ -1323,6 +1432,7 @@ function _WHDVerifyKey {
         'auditpol'    { "audit|$($e.Guid)".ToLower() }
         'eventlog'    { "evt|$($e.LogName)".ToLower() }
         'fwrule'      { "fw|$($e.RuleName)".ToLower() }
+        'fwoff'       { "fwoff|$($e.RuleName)".ToLower() }
         'mppref'      { "mp|$($e.Setting)".ToLower() }
         'asr'         { "asr|$($e.RuleId)".ToLower() }
         'netacct'     { "pw|$($e.Setting)".ToLower() }

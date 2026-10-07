@@ -111,7 +111,16 @@ function Invoke-WHDApplyProfile {
     if ($p.win32.blockExe)         { _WHDProfSay ("   - Win32 block exe : {0}" -f (@($p.win32.blockExe) -join ', ')) }
     if ($p.network) {
         $nx = $p.network
-        if ($nx.firewallWipeFirst) { _WHDProfSay '   - Network: WIPE ALL firewall rules first (Windows defaults included; .wfw backup taken)' }
+        if ($nx.firewallWipeFirst) {
+            _WHDProfSay '   - Network: WIPE ALL firewall rules first (Windows defaults included; .wfw backup taken)'
+            # v1.5: the wipe also deletes the update gate's own rules - say what happens to a gate that is set now
+            $ppGateNow = ''
+            if (Get-Command Get-WHDGateState -EA SilentlyContinue) { try { $ppGs = Get-WHDGateState; if ($ppGs.Closed) { $ppGateNow = "$($ppGs.Mode)".ToUpper() } } catch { $ppGateNow = '' } }
+            if ($ppGateNow) {
+                if ($p.updates -and @('closed', 'programs') -contains "$($p.updates.gate)") { _WHDProfSay ("     The update gate is {0} now: the wipe deletes its rules and your program allows. The last step of this profile sets the gate again." -f $ppGateNow) 'Yellow' }
+                else { _WHDProfSay ("     The update gate is {0} now: the wipe deletes its rules and your program allows. After the network steps the gate is set to {0} again (no extra question - this profile's one approval covers it)." -f $ppGateNow) 'Yellow' }
+            }
+        }
         if ($nx.timeSync)          { _WHDProfSay ("   - Network: time sync {0}{1}" -f $nx.timeSync, $(if ($nx.timeSync -eq 'Cloudflare') { ' (UDP 123 pinned, 1 h jump limit)' } else { '' })) }
         if ($nx.firewallProfile)   { _WHDProfSay ("   - Network: firewall profile {0}" -f $nx.firewallProfile) }
         if ($nx.dns)               { _WHDProfSay ("   - Network: DNS {0}" -f $(if ($nx.dns -eq 'Cloudflare') { 'Cloudflare 1.1.1.2 + encrypted DoH' } else { $nx.dns })) }
@@ -144,6 +153,7 @@ function Invoke-WHDApplyProfile {
     $prevConfirm = $script:WHDConfirm
     $script:WHDConfirm = { param($Msg) $true }
     $applyAborted = $false
+    $script:WHDProfWiped = $false      # v1.5: set when this run wiped the firewall (see the safety net after the steps)
     try {
         # Action functions return result objects (recorded in WHDResults). Run
         # them inside a scriptblock piped to Out-Null so those objects don't leak
@@ -199,7 +209,12 @@ function Invoke-WHDApplyProfile {
             if ($p.network -and (Get-Command Invoke-WHDSetTimeSync -EA SilentlyContinue)) {
                 $nx = $p.network
                 # Time first, so the firewall profile keeps NTP pinned to Cloudflare.
-                if ($nx.firewallWipeFirst) { Invoke-WHDFirewallWipe }   # empty slate BEFORE any WHD rule is added
+                $whdPrWipe = ''
+                if ($nx.firewallWipeFirst) {
+                    Invoke-WHDFirewallWipe      # empty slate BEFORE any WHD rule is added
+                    $whdPrWipe = "$($script:WHDFwToolStatus)"
+                    if ($whdPrWipe -eq 'done') { $script:WHDProfWiped = $true }
+                }
                 if ($nx.timeSync) { Invoke-WHDSetTimeSync -Mode $nx.timeSync }
                 if ($nx.firewallProfile) {
                     $fp = "$($nx.firewallProfile)"
@@ -209,6 +224,11 @@ function Invoke-WHDApplyProfile {
                 if ($nx.dns -eq 'Cloudflare') { Invoke-WHDSetDns -Mode Cloudflare }
                 elseif ($nx.dns -eq 'Reset')  { Invoke-WHDSetDns -Mode Reset }
                 if ($nx.connectionLogging)    { Enable-WHDConnectionLogging }
+                # v1.5: a gate that was CLOSED / on PROGRAMS lost its rules with the wipe. When this profile does not set
+                # the gate itself (its last step), it is set again here in the same position - after DNS, which the gate checks.
+                if ($whdPrWipe -eq 'done' -and -not ($p.updates -and @('closed', 'programs') -contains "$($p.updates.gate)") -and (Get-Command Invoke-WHDGateRepairOffer -EA SilentlyContinue)) {
+                    Invoke-WHDGateRepairOffer -After 'the wipe'
+                }
             }
             if ($p.updates -and (Get-Command Invoke-WHDUpdatePolicy -EA SilentlyContinue)) {
                 $ux = $p.updates
@@ -236,7 +256,22 @@ function Invoke-WHDApplyProfile {
         } | Out-Null
     }
     catch   { $applyAborted = $true; Write-WHDLog ("apply error: {0}" -f $_.Exception.Message) 'ERR' }
-    finally { $script:WHDConfirm = $prevConfirm }
+    finally {
+        # v1.5 safety net: this run wiped the firewall while the update gate was CLOSED / on PROGRAMS, and the gate is
+        # still without its rules (the run stopped before the step that sets it again). Outbound is Block with nothing
+        # allowed then - not even DNS. Set the gate again in its position, under the profile's approval.
+        try {
+            if ($script:WHDExecute -and $script:WHDProfWiped -and (Get-Command Invoke-WHDGateRepairOffer -EA SilentlyContinue)) {
+                $ppH = Get-WHDGateHealth
+                if ($ppH.Closed -and $ppH.NeedsSet) {
+                    Write-WHDLog 'The firewall was wiped in this run and the update gate is still without its rules. Setting the gate again now, so that DHCP, Microsoft Defender and DNS to the pinned servers get out.' 'WARN'
+                    Invoke-WHDGateRepairOffer -After 'the wipe' | Out-Null
+                }
+            }
+        } catch { try { Write-WHDLog ("The update gate could not be set again after the wipe: {0}. Outbound is Block: set DNS (Firewall D) and the gate (Updates C or P), or revert default-deny (Firewall 8)." -f $_.Exception.Message) 'ERR' } catch { } }
+        $script:WHDProfWiped = $false
+        $script:WHDConfirm = $prevConfirm
+    }
 
     # ---- results summary: read the engine's running counters (no iteration) --
     try {

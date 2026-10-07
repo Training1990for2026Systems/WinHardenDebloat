@@ -211,6 +211,64 @@ Safety: if the current list can't be read, the refresh aborts without changing a
 - Unchanged: the question before the wipe, the warning when outbound is Block, and the baseline option.
 - Small fixes: `Remove-WHDFwGroup` prints no result row; the firewall log size is read only when the log file exists.
 
+### 1.5 (2026-10-06) - rules WHD did not make; the gate and the firewall tools tell each other's changes
+- **What counts** (`Get-WHDForeignRules`): a rule that is ON, is an Allow rule and is in none of WHD's groups
+  (`Get-WHDFwOwnGroups`: IPv6, AllowList, Blacklist, Baseline, AppAllow, UpdateGate) - inbound always, outbound only while
+  outbound is Block. Names on the kept list are left out. `Get-WHDForeignAttention` gives the rows that raise an alert:
+  the outbound ones (the leak) always, the inbound ones only while the inbound watch is on.
+- **Kept list + inbound switch:** `restore\update-guard\firewall-known.json` - `Names` (kept by you, answer k), `Base`
+  (inbound rules counted as kept at a start), `Inbound` (are inbound rules watched). `Get-WHDFwKnown` -> Exists,
+  Unreadable, Inbound, Own, Base, Names (Own + Base); `Save-WHDFwKnown -Names [-Base] [-Inbound]` (machine-tagged, written
+  in EXECUTE only, through a second file that is moved over the old one). Looking at the list writes nothing. The inbound
+  watch starts on an explicit answer (`Start-WHDFwInboundWatch [-CountPresent]`: with the switch the inbound rules present
+  go to Base, without it they are all listed) or with a wipe / reset / `.wfw` import / firewall restore that was done
+  (`Set-WHDFwKnownFromNow [-Pending]`: Own and Base names that still exist + every inbound allow rule not made by WHD that
+  is on then). Never taken into Base: rules WHD still holds switched off (`Get-WHDFwOffLive`), rules you removed
+  (`Get-WHDFwRemovedNames`; the removal's journal entry carries `RemovedRule`), rules that were listed as not decided
+  before the tool ran (`-Pending`), and outbound rules. `Clear-WHDFwKnown` (F) empties Own only.
+- **Answers** (`Invoke-WHDForeignRuleBatch -Rows -Action off|remove|keep|port [-Port]`, one question for the list; the
+  console view `Invoke-WHDForeignRulesView` and the window tab both call it):
+  - `off`: `Set-NetFirewallRule -Enabled False`, journaled as kind **`fwoff`** (RuleName, RuleDisplay, Direction, Old/New
+    Enabled): auto undo, Verify (`CHANGED` when it is on again, `PASS` when the rule is gone), one-key re-apply. The name
+    comes off the gate's remembered list (`Remove-WHDGateRemembered`), so opening the gate does not switch it back on.
+  - `remove`: deleted after the session's firewall backup; journaled as an action with an undo hint.
+  - `keep`: the name goes on the kept list. The gate leaves a kept outbound rule on (`Get-WHDGateOffCandidates`); kept
+    outbound rules that are ON while outbound is Block are named in the head lines, Status and the guard report
+    (`Get-WHDFwKeptOutText`; not an alert). Standing `fwoff` entries of a kept rule are marked undone
+    (`Clear-WHDFwOffEntries`), so Verify and re-apply no longer hold it off.
+  - `port`: only for an outbound rule that names one program file (not `svchost.exe`, not a service): one
+    `Add-WHDProgramAllow` per program (TCP, that remote port), then the wide rule is switched off as in `off`. When a WHD
+    allow of that name exists for another program file (same file name, other folder), the program is refused.
+  - A rule made by another program is looked up by comparing its exact name (`Get-WHDFwRuleExact`), never as a pattern,
+    and changed through the rule object - in these answers, in undo / Verify / re-apply, in the gate
+    (`_WHDGateSwitchRule`) and in the wipe.
+- **Where it shows:** `Show-WHDFwAttentionLines [-AtStart]` (WHD's start, the firewall summary, the Updates menu),
+  `Invoke-WHDFwAttentionAsk` (opens the list when a rule is there that was not shown yet in this session),
+  `Show-WHDUpdatesStatus`, `Get-WHDFirewallGuardReport` (the guard's report section; an alert), the window's status boxes.
+- **Gate health** (`Get-WHDGateHealth`, Updates.ps1): recorded as closed but outbound is Allow (`Stale`); CLOSED /
+  PROGRAMS with its own rules missing or switched off, the DNS / DHCP allows missing, the any-program web rules on, or
+  (CLOSED) program allows on (`NeedsSet`); CLOSED / PROGRAMS with Windows Firewall switched off for a profile; or recorded
+  as OPEN while outbound is Block, the gate's rules are on and the any-program web rule is there but switched off
+  (`Unrecorded` - a policy saved while the gate was closed came in; `Close-WHDUpdateGate` then takes outbound Allow as the
+  setting to go back to and remembers the web rules and the program allows that are off).
+  `Get-WHDGateState` now also returns `Recorded` (what the saved file says).
+- **Tools that change what the gate set** call `Write-WHDCrossToolNote` (text from `Get-WHDCrossToolNote -Tool reset | wipe |
+  wfw | dnsreset | appclear`): the lines are logged before the question, and where the tool changes what the gate lets
+  through a short clause is added to the question itself. After a reset / wipe / `.wfw` import / firewall restore that
+  was done (`$script:WHDFwToolStatus -eq 'done'`; a netsh error makes it `failed` and nothing else is touched)
+  `Update-WHDGateAfterFirewallChange` puts the gate's record right (OPEN after a reset; names of deleted rules come off
+  its remembered list - WHD's two web rules stay on it, the allow-list brings them back switched off). After a wipe, an
+  import or a restore `Invoke-WHDGateRepairOffer` runs (called by the menu / window handler; the console restore calls it
+  itself): when the gate is left incomplete, the gate's own question follows (`Close-WHDUpdateGate -Mode <same> -Why ...`).
+  In a profile run the offer runs after the network steps (DNS is set by then) under the profile's one approval, not when
+  the profile sets the gate itself, and once more at the end of a run that wiped and stopped early. `Restore-WHDSessionFirewall`
+  saves the current firewall first when the session has no backup yet (`Backup-WHDFirewallOnce`, once per session).
+- **Gate set / open:** before its question the gate lists the rules it will switch off (`Show-WHDGateOffPreview`) and
+  after it was set names a rule that is still on; opening names remembered rules that no longer exist; O with nothing
+  left to switch on puts a stale record right.
+- **Known limits:** decisions are keyed on the rule name only (no record of the rule's ports or program; a rule Windows
+  writes again under a new name is a new rule); the allow rules in the Group Policy store are not looked at.
+
 ## Safety behaviour of the firewall functions
 - The firewall backup (`restore\<session>\firewall-before.wfw`) is taken once per session, before the first firewall
   change. If the export fails, the change that needed it is reported FAILED and is not made.
