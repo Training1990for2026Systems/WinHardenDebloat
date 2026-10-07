@@ -150,8 +150,70 @@ function Get-WHDDefenderEvents {
             Time = $e.TimeCreated; Type = $kind[[int]$e.Id]
             Rule = $(if ($names.ContainsKey($id)) { $names[$id] } elseif ($id) { $id } else { '' })
             Program = "$($d['Process Name'])"; Target = "$($d['Path'])"
+            User = "$($d['User'])"; Data = $d
         }
     })
+}
+
+# The same events, one entry per (type, rule, program, target): how often, first and last time.
+# Newest first. Read-only. (A screen table cut off the Program and Target columns.)
+function Get-WHDDefenderEventGroups {
+    param([object[]]$Events)
+    $map = @{}; $keys = New-Object System.Collections.Generic.List[string]
+    foreach ($e in @($Events)) {
+        if ($null -eq $e) { continue }
+        $key = ('{0}|{1}|{2}|{3}' -f $e.Type, $e.Rule, $e.Program, $e.Target).ToLower()
+        if (-not $map.ContainsKey($key)) {
+            $map[$key] = [pscustomobject]@{ Type = "$($e.Type)"; Rule = "$($e.Rule)"; Program = "$($e.Program)"; Target = "$($e.Target)"
+                                            User = "$($e.User)"; Count = 0; First = $e.Time; Last = $e.Time; Data = $e.Data }
+            $keys.Add($key)
+        }
+        $g = $map[$key]
+        $g.Count = [int]$g.Count + 1
+        if ($e.Time -lt $g.First) { $g.First = $e.Time }
+        if ($e.Time -gt $g.Last)  { $g.Last = $e.Time; $g.User = "$($e.User)"; $g.Data = $e.Data }
+    }
+    $rows = @(foreach ($k in $keys) { $map[$k] })
+    @($rows | Sort-Object -Property @{ Expression = 'Last'; Descending = $true }, @{ Expression = 'Count'; Descending = $true }, Type, Program, Target)
+}
+
+# Menu E: every entry on its own short lines, so the program and the path are never cut off.
+#   -Events is for tests / callers that already have the list.
+function Show-WHDDefenderEvents {
+    param([int]$Days = 7, [object[]]$Events)
+    if (-not $PSBoundParameters.ContainsKey('Events')) { $Events = @(Get-WHDDefenderEvents -Days $Days) }
+    $ev = @($Events | Where-Object { $null -ne $_ })
+    if (-not $ev.Count) { Write-Host ('  (nothing caught in the last {0} days)' -f $Days) -ForegroundColor DarkGray; return }
+    $groups = @(Get-WHDDefenderEventGroups -Events $ev)
+    $fmt = 'yyyy-MM-dd HH:mm:ss'
+    Write-Host ''
+    Write-Host ('  What Defender caught in the last {0} days: {1} event(s), {2} different - newest first' -f $Days, $ev.Count, $groups.Count) -ForegroundColor White
+    Write-Host '  (program = what tried it; target = what it tried to reach or change)' -ForegroundColor DarkGray
+    $i = 0
+    foreach ($g in $groups) {
+        $i++
+        $color = 'Gray'
+        if ("$($g.Type)" -like '*block*') { $color = 'Yellow' }
+        $last = ''; $first = ''
+        try { $last = ([datetime]$g.Last).ToString($fmt, [Globalization.CultureInfo]::InvariantCulture) } catch { $last = "$($g.Last)" }
+        try { $first = ([datetime]$g.First).ToString($fmt, [Globalization.CultureInfo]::InvariantCulture) } catch { $first = "$($g.First)" }
+        if ([int]$g.Count -gt 1) { $when = ('x{0}   last {1}   first {2}' -f $g.Count, $last, $first) }
+        else                     { $when = ('x1   {0}' -f $last) }
+        Write-Host ''
+        Write-Host ('  {0,3}. {1,-14} {2}' -f $i, $g.Type, $when) -ForegroundColor $color
+        if ($g.Rule)    { Write-Host ('       rule    : {0}' -f $g.Rule) }
+        Write-Host ('       program : {0}' -f $(if ($g.Program) { $g.Program } else { '(not named in the event)' }))
+        Write-Host ('       target  : {0}' -f $(if ($g.Target)  { $g.Target }  else { '(not named in the event)' }))
+        if ($g.User)    { Write-Host ('       user    : {0}' -f $g.User) -ForegroundColor DarkGray }
+        if (-not $g.Program -and -not $g.Target -and $g.Data) {
+            # Neither field was filled: show everything the event carries, so nothing stays hidden.
+            foreach ($dk in @($g.Data.Keys | Sort-Object)) {
+                $dv = "$($g.Data[$dk])"
+                if ($dk -and $dv) { Write-Host ('       {0} = {1}' -f $dk, $dv) -ForegroundColor DarkGray }
+            }
+        }
+    }
+    Write-Host ''
 }
 
 # ---- Defender protections (PUA on; NP + CFA audit) ---------------------------
@@ -531,7 +593,7 @@ function Invoke-WHDSecuritySubmenu {
             '^5$'      { Invoke-WHDAsrGroups -Groups scripts }
             '^6$'      { Invoke-WHDAsrGroups -Groups office }
             '^[Ll]$'   { Get-WHDAsrState | Format-Table Group, Action, Name -AutoSize | Out-Host }
-            '^[Ee]$'   { $ev = @(Get-WHDDefenderEvents); if ($ev.Count) { $ev | Format-Table Time, Type, Rule, Program, Target -AutoSize -Wrap | Out-Host } else { Write-Host '  (nothing caught in the last 7 days)' -ForegroundColor DarkGray } }
+            '^[Ee]$'   { Show-WHDDefenderEvents }
             '^[Kk]$'   { Invoke-WHDAsrPromote }
             '^[Pp][1-4]$' { Invoke-WHDProtocolOff -Item $script:WHDProtocols[[int]$c.Substring(1) - 1] }
             '^[Pp][Aa]$'  { foreach ($it in $script:WHDProtocols) { Invoke-WHDProtocolOff -Item $it } }

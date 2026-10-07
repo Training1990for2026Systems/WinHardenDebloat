@@ -49,7 +49,11 @@ $script:WHDConsentHKLM = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Capabi
 function Get-WHDCapabilityValue {
     param([string]$Cap)
     $p = Join-Path $script:WHDConsentHKCU $Cap
-    try { (Get-ItemProperty -Path $p -Name Value -EA Stop).Value } catch { '(unset)' }
+    # No -EA Stop + catch here: a missing key or value is normal and left a TerminatingError line per switch in the log.
+    if (-not (Test-Path -LiteralPath $p)) { return '(unset)' }
+    $k = Get-Item -LiteralPath $p -EA SilentlyContinue
+    if (-not $k -or (@($k.GetValueNames()) -notcontains 'Value')) { return '(unset)' }
+    return "$($k.GetValue('Value'))"
 }
 
 function Set-WHDCapability {

@@ -1,7 +1,7 @@
 > **WinHardenDebloat (WHD)** - by **Training1990for2026Systems** - contact: t90018273@gmail.com
 > License: [MIT](LICENSE) - Security reports: see [SECURITY.md](SECURITY.md) - Built with Claude by Anthropic.
 
-**Version: Classic 1.4.2** (2026-10-04) - runs on Windows PowerShell 5.1, which is built into Windows.
+**Version: Classic 1.5** (2026-10-05, additions 2026-10-06; live-tested 2026-10-06 in the console menus - "v1.5 - live test" below says what was run and what was not; the last released version is 1.4.2, see Releases) - runs on Windows PowerShell 5.1, which is built into Windows.
 
 # WinHardenDebloat
 
@@ -211,7 +211,7 @@ use that session's firewall backup (**F** in the Undo center) and the reset opti
   *Edge: on-device AI model + AI themes*. The list shows each one as `on / partly / OFF(set)`.
   These are Microsoft policies documented for Pro/Enterprise; on Home they are best-effort, and Verify
   shows whether the values stuck. The OS AI platform (CoreAI, AI Fabric) still can't be removed.
-- **More privacy settings (menu 3 → S / GUI General tab):** activity history, clipboard history + sync,
+- **More privacy settings (menu 3 → S / GUI General tab; from 1.5 several at once, see v1.5):** activity history, clipboard history + sync,
   ads/suggestions/account nags, online speech + inking/typing data, Edge background/startup/shopping,
   Edge diagnostics/personalization. Profile key: `"privacy": ["activity", ...]` (empty by default).
 - **Usage history (menu 4 → 5 / GUI Permissions → Usage history):** which apps last used the camera,
@@ -254,7 +254,8 @@ Checks after Windows updates that nothing WHD set or removed has quietly come ba
   3. **Inventory scan only if Windows changed** (build/UBR or installed-update list; daily Defender
      signature updates don't count). Compares with the previous scan and flags **CAME BACK** apps.
      Keeps the last **5** guard-made scans (marked `.whd-guard`); your own scans are never touched.
-- **Alert:** the report is always written to `restore\update-guard\guard_<time>.txt`. It **opens in
+- **Alert:** the report is always written to `restore\update-guard\guard_<time>.txt` (from 1.5: under
+  `C:\ProgramData\WinHardenDebloat\guard-data` once the guard is installed, plus an alert window and an event log entry - see v1.5). It **opens in
   Notepad only if** a WHD change is CHANGED/RETURNED or a removed app CAME BACK. New apps from an
   update are listed but don't pop up. **GR** = run the check now, **GO** = open the last report.
 - Profile key `"security": { "updateGuard": true }` (default off). Journal kind `schtask`.
@@ -482,6 +483,171 @@ Issues found in that test, and where they stand in 1.4.2:
   closed; the start-up folder-protection warning appeared when WHD ran from Documents; closing the gate, the Updates status,
   Verify and the permission Lock check ran without errors. **Not yet run on Windows:** the new uninstall check (OneDrive had
   already been removed from the test PC) and the warning shown before 3B switches the protection to BLOCK.
+
+## v1.5 - improvements carried over from WHD Next (2026-10-05; checked with a PowerShell parser, simulated runs and two independent reviews, **live-tested 2026-10-06** - see "v1.5 - live test")
+
+WHD Next is the PowerShell 7 line of this project. These parts of it were merged by hand into Classic. Classic stays on
+Windows PowerShell 5.1 and still makes no web calls.
+
+- **Several items at once (menu 2 AI, menu 3 General apps, menu 3 -> S More privacy settings; window: AI and General tabs).**
+  Type a list instead of one number: `1,3,5`, a range `2-6`, or `*` for the recommended items (marked `*` on screen), also mixed
+  (`*,7`). WHD shows one list of what will happen, with each item's own note, and asks **once** for the whole list.
+  - AI menu: add the action letter - `1,3,5 r`, `2-6 f`, `* r`. Without a letter WHD asks r / f / c.
+  - **`r` in the AI menu changed:** it now removes the app **and** sets its off-switch; an item that cannot be removed (Recall,
+    Click to Do, the Edge and Paint / Notepad AI switches) is turned OFF instead. This also applies to a single item.
+  - `*` never includes Notepad, Paint, Photos or the "found on this PC" apps. General `A` is the same as `*` and asks once.
+  - Not accepted: `2 - 6` with spaces, numbers outside the list - the whole entry is refused, nothing is done.
+  - Window: "Select recommended (*)" on the AI tab, "Select all" for privacy; the one question shows the list.
+- **Update gate: third position PROGRAMS (Updates menu P; window button "PROGRAMS gate"; profile `"gate": "programs"`).**
+  Like CLOSED - Windows Update, Store and everything else stay offline - but the programs you allowed in Firewall **V** keep
+  working. A program you allow while the gate is CLOSED is saved **switched off** and comes on with PROGRAMS or OPEN.
+  Two more Defender programs are let out while the gate is closed (network inspection and the Defender core service; the core
+  service also sends Defender telemetry). The firewall screen and the Updates status show the gate position.
+  After an upgrade from 1.4.2, allows made while the gate was closed are still on: the status says so; press C or P once.
+- **Blocked connections (Firewall V; window: Firewall tab).** A program is named only if it was running before the logged
+  line, so a reused process number no longer shows the wrong name. Names are remembered for 7 days
+  (`restore\update-guard\blocked-programs.json`), so a program that has closed keeps its name. Each row says whether it can be
+  allowed (already allowed, covered by the allow-list, Windows itself, inbound, closed program). Allow several rows at once:
+  `1,3` or `1-3`, one question.
+- **Firewall wipe (W)** shows a count while it deletes, says how many rules could not be deleted, and no longer says
+  "Wipe complete" after a dry run.
+- **Update guard.** Once the guard is installed or refreshed (**GU** / G), its reports, status and its own scans are kept in
+  `C:\ProgramData\WinHardenDebloat\guard-data`, so ransomware folder protection on the WHD folder cannot stop it. Older guard
+  files are copied there once; nothing is deleted from the WHD folder. If a report still cannot be saved, the guard says so and
+  raises an alert instead of stopping silently. The guard status is tagged with the PC, so a copied WHD folder does not bring
+  another PC's status along. **On an alert** a small window shows the result ("Open the report" / "Close") and a Warning is
+  written to Windows Logs > Application (source `WinHardenDebloat`, event 1001).
+  - The change history, `update-gate.json` and `blocked-programs.json` stay in the WHD folder.
+  - Menu **D** (compare scans) no longer sees the guard's scans; the guard compares against its own.
+  - **GX** removes the task, the protected copy and the event log source; `guard-data` is kept.
+  - **The protected copy is locked more tightly.** A new `C:\ProgramData\WinHardenDebloat` folder is created already locked.
+    On a refresh the lock is set again without first resetting it, and nothing is changed unless the folder and every folder
+    inside it is WHD's own (owner Administrators / SYSTEM, nobody else may write, no link anywhere inside). If that is not
+    so, **GU refuses** and says which folder and why: look at it, delete or rename it as administrator, press GU again.
+    Hidden files in the script folder are removed on a refresh.
+- **Security+ E** (what the attack-surface rules caught) prints each item on its own lines with the full program and path;
+  identical events are grouped with a count.
+- **Safety fixes found while merging:** "Enable default-deny" (Firewall 6) does nothing while the update gate is CLOSED or on
+  PROGRAMS (before, its auto-rollback could set outbound back to Allow and so open the gate without a word); a JSON firewall
+  import keeps the web rules off while the gate is closed; the gate is recorded "open" only when the change succeeded.
+- **Window version:** every Yes / No question now has **No** as its default button (Cancel in the block-list question), so a
+  stray Enter no longer confirms a change.
+- **Small things:** no stray result tables in any menu; an error message also says which file and line; fewer error lines in
+  the log when reading permission switches and the firewall log size.
+- **Known limits of 1.5:** In the blocked-connections view, a second program with the same file name, protocol and port in
+  another folder is shown as "allowed already". The guard's check of the permissions on `C:\ProgramData\WinHardenDebloat`,
+  and creating that folder already locked, were built with stand-ins; in the live test the guard installed and refreshed
+  its protected copy on a real PC. If the check misreads a real folder, GU refuses to install or refresh the guard and
+  says why.
+
+### v1.5 - added on 2026-10-06: rules WHD did not make, and the gate and firewall tools tell each other's changes (checked with a PowerShell parser, simulated runs and independent reviews, **partly live-tested 2026-10-06** - see "v1.5 - live test")
+
+Found in the first run of 1.5 on a real PC (2026-10-06) and built the same day. The update
+gate switches other outbound allow rules off only at the moment it is set. Windows and program installers write firewall
+rules of their own afterwards - a Store rule came back after the wipe, and an installed desktop program brought wide allow
+rules with it - and such a rule lets its program out through a CLOSED or PROGRAMS gate. Nothing reported it.
+
+- **Rules WHD did not make (Firewall menu K, Updates menu K; window: Firewall tab > "Rules from others").** WHD looks for
+  allow rules that are ON and that it did not make. It raises an alert for:
+  - **outbound** rules while outbound is Block (gate CLOSED / PROGRAMS, or default-deny) - always. With outbound open, an
+    outbound allow rule changes nothing and is not listed.
+  - **inbound** rules - only after you switched their watch on (see "Inbound rules" below). Until then there is no alert
+    for them: a Windows install has a few hundred inbound rules of its own. K says how many there are and lists them when
+    you press `L`; the Firewall and Updates menus count them in a hint line when there is no alert.
+
+  The alert shows when WHD starts, at the top of the Firewall and Updates menus, in the Updates status and in the update
+  guard's report (alert window). When a rule is there that was not shown yet in this session, WHD opens the list and asks.
+  Looking at the list changes and starts nothing. Per rule you choose - `1,3 o`, `2 r`, `* k`, `4 p`:
+  - `o` **switch OFF** - the rule stays in Windows' rule list, switched off. The Undo center switches it on again; Verify
+    and the update guard report it if something switches it back on (V re-applies it). The update gate does not put a
+    rule you switched off here on its list, so opening the gate does not switch it back on.
+  - `r` **remove** - the rule is deleted. WHD saves the firewall once per session, before the session's first firewall
+    change; Undo center F puts that whole firewall back, with every later firewall change of that session reverted too.
+    Windows or the program may write the rule again; WHD then reports it again.
+  - `k` **keep** - the rule stays on and is not reported again. A kept outbound rule stays on through the gate; Status, the
+    menu head lines and the guard report name the kept outbound rules that are ON while outbound is Block. WHD keeps a
+    rule by its name: if the rule is changed later, or another rule gets that name, it still counts as kept. A rule you
+    had switched off earlier and keep now is no longer held off by Verify / the guard.
+  - `p` **one port only** - for an outbound rule that names one program file: WHD makes its own allow for that program (TCP,
+    one remote port, 443 unless you type another - the same kind of rule Firewall V makes) and switches the wide rule off.
+    The allow is tied to that exact file: when the program moves or updates into another folder, it is blocked again.
+    Allowing the new file then moves the allow to it when the old file is gone. A Store-type app, a service or an "any program" rule has no program file: use o, r or k. Two
+    programs with the same file name in different folders cannot both get a WHD allow on the same port (the rule name is
+    built from the file name): while both files exist the second one is refused and left as it is. Firewall V goes by
+    that rule name too, so it lists the second program as allowed already; undo the first allow (Undo center) to change it.
+  - **Inbound rules: `S` in K (window: the button "Watch inbound rules...").** Only in EXECUTE, and only when you say so.
+    WHD asks how to start: **N** = report only rules that appear from now on (the inbound rules present now count as
+    kept), or **A** = list all present ones too, until you keep, switch off or remove each one (in the window: Yes = N,
+    No = A with one more question, Cancel = do not start). A wipe, a reset, a `.wfw` import and a firewall restore (Undo
+    center F) that was done also switch the watch on - their own question does not say so, the log line after it does:
+    the **inbound** rules such a tool leaves behind count as kept. Not counted, so that you decide: a rule you had
+    switched off or removed with WHD that the tool brought back on, and rules that were listed as not decided before the
+    tool ran. Outbound rules are never counted as kept by a tool.
+  - `F` in K (window: "Forget kept rules") forgets the rules **you** kept with `k`; they are listed again. The inbound
+    rules that were counted as kept at a start stay counted. Everything is stored in
+    `restore\update-guard\firewall-known.json` (this PC only); deleting that file puts it all back to the start (inbound
+    rules not watched, nothing kept).
+- **The gate names what it switches off.** Before its question, C and P list the outbound allow rules of other tools and
+  programs the gate will switch off (the first 12, then a count), and say which rules stay on because you kept them (in
+  the window version this list is written to the log pane; the question itself does not repeat it). After it was set, the
+  gate names a rule that is still ON. O says which remembered rules no longer exist instead of counting them as put back.
+- **The Firewall-menu tools say what they change of the gate** - in lines right before their question, and where the
+  tool changes what gets out, in the question itself (the window version puts all these lines in the question):
+  - **R** Reset: the gate will be OPEN afterwards (outbound back to Allow). Its record is put right.
+  - **W** Wipe: the gate's own rules and your program allows are deleted too; outbound stays Block, so nothing gets out
+    until the gate is set again. After a wipe that was done WHD asks whether to set the gate again. In a profile run there
+    is no extra question: the profile's step list says it, and the gate is set again in the same position after the
+    network steps (or by the profile's own last step, when it sets the gate; if the run stops before that, WHD still
+    sets the gate again at the end). A gate that lost its rules is rebuilt even when an adapter is not on the pinned DNS
+    servers - WHD says that its name lookups stay blocked until DNS is set. With plain default-deny (no gate) the wipe says that there is no network afterwards.
+  - **I** import of a `.wfw` file, and **Undo center F** (restore the firewall backup): they replace every rule and the
+    outbound setting. Afterwards WHD reads where the gate stands, puts its record right and, if the gate lost its rules,
+    asks whether to set it again. If the file was saved while the gate was closed and the gate is open now, WHD says that
+    outbound is Block again although the gate is recorded as OPEN; C or P then sets the gate properly, and O afterwards
+    opens it (outbound Allow, web rules on - also when default-deny was set by hand before). Program allows that come in
+    switched on while the gate is CLOSED, or switched off without being on the gate's list, are reported. Undo center F
+    saves the current firewall first when this session has no firewall backup yet (one backup per session).
+  - **U** DNS back to automatic while outbound is Block: name lookups stop (DNS is only allowed to the pinned servers).
+  - **G** Remove program allows: on PROGRAMS these are the programs the gate lets out; on CLOSED they come off the gate's
+    list.
+  - A reset or import that Windows refuses (netsh reports an error) is reported as failed; nothing else is changed then.
+- **Status tells when the gate is not what its record says** (top of the Firewall and Updates menus, Updates status, window
+  status boxes, update guard): its own rules are gone or switched off, the DNS / DHCP allows are missing, the any-program web
+  rules are on, program allows are on while the gate is CLOSED, Windows Firewall is switched off for a profile, something
+  set outbound back to Allow behind the gate (Updates O then puts the record right), or the firewall is as a closed gate
+  leaves it while the gate is recorded as OPEN.
+- **Copilot off-switch (AI menu 1) also sets two Edge Update policies** - `Install{C50565E9-CCCF-44B4-BA15-5AC5C6569197}` = 0
+  and `Update{...same ID...}` = 0 under `HKLM\SOFTWARE\Policies\Microsoft\EdgeUpdate` (Microsoft Learn: "Microsoft Copilot
+  update policies for Windows"). Microsoft documents that the Copilot app can be installed and updated through Microsoft
+  Edge Update, so an Edge update could bring a removed Copilot back. Documented as Edge Update policies; on Home they are
+  tried. If the off-switch was applied with an earlier version, apply it once more to set the two values.
+- **Limits:** WHD looks for such rules when it is used and in the guard (10 minutes after sign-in) - not all the time in
+  between. A rule that is switched off is not reported. Block rules made by others are
+  not reported (they only restrict). Decisions are tied to the rule's name: when Windows writes a rule again under a new
+  name (it does that for some app rules), the new rule is reported as new.
+
+### v1.5 - live test (2026-10-06)
+
+Fresh Windows 11 Home 26H2 image, console menus (`WHD.ps1`), Windows PowerShell 5.1, DRY-RUN and EXECUTE.
+
+- **1.5 as of 2026-10-05** was run first in the console menus. It worked. The run showed the gap the additions of
+  2026-10-06 close: rules that were written after the update gate had been set got through it.
+- **The additions of 2026-10-06** were run the same evening, without errors in the logs:
+  - the alert at WHD's start and in the Firewall and Updates menus, and the list that opens by itself;
+  - the answers `r` (remove) and `k` (keep); `p` on a service rule was left out, as described;
+  - a wipe with the gate on PROGRAMS: the note in the question, the gate's record put right, the gate's own question and
+    the gate rebuilt;
+  - a reset with the gate on PROGRAMS: the gate recorded as OPEN, Windows' own inbound rules counted as kept;
+  - gate P and O, the Updates status, program allows from Firewall V;
+  - the Copilot off-switch with the two Edge Update policy values;
+  - the update guard: its protected copy refreshed itself with the changed files, and GU installed it again.
+- **Not yet run on Windows:**
+  - the window version (`WHD-GUI.ps1`) of the additions;
+  - the answers `o` (switch OFF) and `p` on a program's rule, `S` (watch inbound rules) and `F`;
+  - Undo, Verify and re-apply for a rule that was switched off;
+  - the update guard's report after a sign-in, with its new firewall section;
+  - `.wfw` import, Undo center F, DNS reset and "remove program allows" while the gate is set;
+  - a profile run with a wipe while the gate is set.
 
 ## Menu
 ```
