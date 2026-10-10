@@ -61,7 +61,7 @@ param(
 
 $ErrorActionPreference = 'Continue'
 $script:WHDStartBuild   = 'build step 12f'
-$script:WHDStartVersion = 'Next 2.0 preview 1'                 # the published version name (README, release tag next-2.0-preview1)
+$script:WHDStartVersion = 'Next 2.0'                           # the published version name (README, release tag next-2.0)
 $script:WHDStartNextDir = $PSScriptRoot                       # ...\WHD-Next\next  (or the protected guard copy)
 $script:WHDStartRoot    = Split-Path -Parent $PSScriptRoot    # ...\WHD-Next
 $script:WHDStartPs51    = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'

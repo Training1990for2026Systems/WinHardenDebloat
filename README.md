@@ -1,7 +1,7 @@
 > **WHD Next** - by **Training1990for2026Systems** - contact: t90018273@gmail.com
 > License: [MIT](LICENSE) - Security reports: see [SECURITY.md](SECURITY.md) - Built with Claude by Anthropic.
 
-**Version: Next 2.0 preview 1** (2026-10-05) - the PowerShell 7.6 line of WinHardenDebloat (WHD). Still in development.
+**Version: Next 2.0** (2026-10-10) - the PowerShell 7.6 line of WinHardenDebloat (WHD). Known problems are listed below.
 
 # WHD Next
 
@@ -93,6 +93,44 @@ These were found and fixed in WHD Classic 1.4.1, 1.4.2 and 1.5. **They are still
 - **English Windows only** for Devices (N) and the password rules (Security+ W): both match English names.
 
 Guides in `docs\`: `firewall-module.md`, `standard-reimage.md`, `radio-group-test.md`, `update-review-2026-09-29.md`, `theme.md`.
+
+## Next 2.0 (2026-10-10)
+
+What changed since Next 2.0 preview 1:
+
+- **Time sync (Firewall T):** the Windows Time service is now set to **Automatic** (preview 1: Automatic, delayed start),
+  and **Windows' own start triggers are taken off it** - Microsoft Learn, "W32Time doesn't start on a workgroup computer",
+  Method 1. Windows shows one of those triggers as `DOMAIN JOINED STATUS ... [DOMAIN JOINED]`. It never meant that the
+  PC is joined to a domain, but in the time status it read that way. A copy of the triggers is saved in the session's
+  `restore` folder first (`W32Time-TriggerInfo.reg`); when no copy can be saved, nothing is taken off.
+- **Putting them back:** the **Undo center** and **Firewall N** (Windows default time) import the saved copy. Windows
+  reads it when it starts, so the triggers count again **after a restart**. N leaves the start type of the service alone.
+- **Verify and re-apply** know the item (journal kind `svctrigger`): Verify reports when the triggers are on the service again.
+- **Undo of a service start type** can put "Automatic (delayed start)" back, also in SAFE mode.
+- **Time status (Firewall S)** and the firewall screen say what the triggers are, or "none".
+
+### Next 2.0 - live test (2026-10-08 and 2026-10-09)
+
+Run by the author on a test PC: Windows 11 Home 26H2 (build 26300), installed fresh on 2026-10-08; PowerShell 7.6.6 was
+installed by the launcher through winget. 15 sessions in FULL mode, all with the files of preview 1. From the logs:
+
+- **Ran and reported done:** theme (everything on, 4 of 4); update guard install and refresh; switching off WHD Classic's
+  guard task; AI debloat (12 items); general apps (23 selected, 4 were on the PC and were removed); privacy / telemetry
+  and DiagTrack; firewall wipe, allow-list, default-deny with rollback and "keep"; update gate OPEN and PROGRAMS;
+  29 program allows from the blocked-connections view; IP block list (1,875 entries); policy export and import
+  (35 rules); IPv6 off; DNS + DoH; time sync (twice); Defender definitions; 13 restore points; 2 inventory scans and
+  their comparison.
+- **Ran and found nothing to change** (the PC was already set that way): More privacy settings, permission Lock,
+  services off, protocols off, the Updates policies, Devices.
+- **One value was refused by Windows:** the Widgets button (`TaskbarDa`). WHD Next skipped it with a warning.
+- **Not run in that test:** Verify in FULL mode, the Undo center, Apply a profile, Win32 programs (5), Component store (6),
+  hosts sinkhole (Firewall H), Windows default time (Firewall N), the time zone menu, the window version.
+- **The 2.0 change itself** (start type Automatic, start triggers off, putting them back) was written after that test.
+  **Run on Windows on 2026-10-10** (the same test PC, PowerShell 7.6.6): T changed the start type from Automatic (delayed
+  start) to Automatic and took the 2 triggers off, and the status read "start triggers: none". The Undo center put both
+  triggers and the delayed start back; after a restart Windows used both triggers again. T then took them off again. The
+  two saved copies are identical. Not run on Windows: Firewall N, and Verify / re-apply for this item - those were
+  checked with simulated runs only (91 checks against stand-ins for `sc.exe`, `reg.exe` and the service).
 
 ---
 
@@ -249,7 +287,7 @@ Every change made in EXECUTE mode is now recorded, one line per change, in
 - **M / O**: Windows Firewall log on/off (default file, dropped + allowed, 32,767 KB; v1.3).
 - **V**: view blocked connections and allow a program on that port (outbound only; Windows
   services and inbound are refused). **G** removes all program allows.
-- **T / N / S**: time sync to time.cloudflare.com (UDP 123 pinned **+ 1 h time-jump limit**, refused jumps alerted by the update guard) / Windows default (and default time settings) / status. NTS (authenticated time) is not part of this version: the Windows Time service does not support it.
+- **T / N / S**: time sync to time.cloudflare.com (UDP 123 pinned **+ 1 h time-jump limit**, refused jumps alerted by the update guard; the Windows Time service is set to Automatic and Windows' own start triggers are taken off it, a copy saved first) / Windows default (and default time settings; the saved triggers are put back and count again after a restart) / status. NTS (authenticated time) is not part of this version: the Windows Time service does not support it.
 - **F**: refresh the IP blocklist from files in `profiles\incoming` (preview → merge or replace →
   optionally rebuild rules). GUI: Firewall tab, including a "Blocked connections" sub-tab.
 - **Block lists are not included in this repository** (they are other people's data). Put your own `blacklist-ip.txt` in

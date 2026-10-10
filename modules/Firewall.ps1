@@ -60,6 +60,15 @@ $script:WHDW32TimeKey  = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Parame
 $script:WHDW32TimeCfgKey   = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\Config'
 $script:WHDTimeJumpLimit   = 3600
 $script:WHDTimeJumpDefault = 54000
+# WHD Next 2.0 (owner decisions 2026-10-10): T sets the Windows Time service to Automatic
+# (no delay) and takes Windows' own start triggers off it - Microsoft Learn, "W32Time doesn't
+# start on a workgroup computer", Method 1 (sc triggerinfo w32time delete + start type
+# Automatic). One of the triggers prints as "DOMAIN JOINED STATUS ... [DOMAIN JOINED]" and reads
+# as if the PC had been joined to a domain. sc.exe deletes all triggers of a service at once, so
+# the registry key that holds them is exported to the session's restore folder first; the Undo
+# center and option N import that file, and Windows reads it again at its next start-up.
+$script:WHDW32TimeSvcKey     = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time'
+$script:WHDW32TimeTriggerBak = 'W32Time-TriggerInfo.reg'
 
 # Phase 6 blocked-connection logging: advanced-audit subcategory "Filtering
 # Platform Connection" (by GUID so it works in any Windows language) -> event
@@ -270,11 +279,11 @@ function Show-WHDFirewallSummary {
     Write-Host ('   {0,-24} {1}' -f 'Secure Time Seeding', $(if ($tj.Seeding) { 'on' } else { 'off' })) -ForegroundColor Gray
     $svc = Get-Service -Name w32time -EA SilentlyContinue
     if ($svc) {
-        $dl = Get-WHDRegValueState -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time' -Name 'DelayedAutostart'
-        $stTxt = "$($svc.StartType)"
-        if ($stTxt -eq 'Automatic' -and $dl.Exists -and [int]$dl.Value -eq 1) { $stTxt = 'Automatic (delayed)' }
+        $stTxt = _WHDTimeStartText (Get-WHDTimeServiceStart)
+        $tts = Get-WHDTimeTriggerState
+        $trTxt = if ($tts.Active) { "$($tts.Active) Windows start trigger(s)" } elseif ($tts.Saved) { 'start triggers back after a restart' } else { 'no start triggers' }
         $svcCol = if ($svc.Status -eq 'Running') { 'Green' } else { 'Yellow' }
-        Write-Host ('   {0,-24} {1}, {2}' -f 'Windows Time service', $svc.Status, $stTxt) -ForegroundColor $svcCol
+        Write-Host ('   {0,-24} {1}, {2}, {3}' -f 'Windows Time service', $svc.Status, $stTxt, $trTxt) -ForegroundColor $svcCol
     }
     if ($svc -and $svc.Status -eq 'Running') {
         $src = Invoke-WHDNative -Exe 'w32tm.exe' -ArgList @('/query', '/source')
@@ -1436,9 +1445,9 @@ function Invoke-WHDSetTimeSync {
         Write-WHDLog 'TIME SYNC -> Windows default (time.windows.com); firewall UDP 123 open to any' 'ACT'
     }
     if ($Mode -eq 'Cloudflare') {
-        Write-WHDRisk 'reversible' ("Changes the Windows Time server + the NTP allow rule, and limits automatic time jumps to {0} (Windows default 15 h): a bigger correction - e.g. a forged NTP reply - is refused and logged; the update guard alerts. If the clock is ever really that far off, set it by hand once (Settings > Time & language > Date & time), then Sync now. Registry values are journaled (Undo center)." -f (_WHDSecText $script:WHDTimeJumpLimit))
+        Write-WHDRisk 'reversible' ("Changes the Windows Time server + the NTP allow rule, and limits automatic time jumps to {0} (Windows default 15 h): a bigger correction - e.g. a forged NTP reply - is refused and logged; the update guard alerts. If the clock is ever really that far off, set it by hand once (Settings > Time & language > Date & time), then Sync now. The Windows Time service is set to Automatic, and Windows' own start triggers are taken off it (one of them is named DOMAIN JOINED - the PC is not joined to a domain, by that trigger or by this change); a copy of the triggers is saved first. Everything is journaled: the Undo center or option N puts it back - the triggers then count again after a restart." -f (_WHDSecText $script:WHDTimeJumpLimit))
     } else {
-        Write-WHDRisk 'reversible' 'Changes the Windows Time server + the NTP allow rule, and puts the time-jump limit (15 h) and Secure Time Seeding back to Windows defaults. Registry values are journaled (Undo center).'
+        Write-WHDRisk 'reversible' 'Changes the Windows Time server + the NTP allow rule, and puts the time-jump limit (15 h) and Secure Time Seeding back to Windows defaults. If WHD took Windows'' own start triggers off the Windows Time service, the saved copy is put back (they count again after a restart). The start type of the service stays as it is. Everything is journaled (Undo center).'
     }
     if (-not (Confirm-WHDProceed ("set time source to {0}" -f $peer))) { Write-WHDLog 'skipped.' 'WARN'; return }
     Set-WHDRegistryValue -Path $script:WHDW32TimeKey -Name 'NtpServer' -Value $peer -Type String | Out-Null
@@ -1448,9 +1457,12 @@ function Invoke-WHDSetTimeSync {
     if ($raddr) { $p['RemoteAddress'] = $raddr; $p['DisplayName'] = 'WHD Next Allow NTP (UDP 123, time.cloudflare.com)' }
     else        { $p['DisplayName'] = 'WHD Next Allow NTP (UDP 123)' }
     New-WHDFwRule $p
-    # User decision 2026-09-23: keep Windows Time running (Automatic, delayed start)
-    # so it actually syncs; on a non-domain PC it is trigger-start and stops again.
-    if ($Mode -eq 'Cloudflare') { Set-WHDTimeServiceAutomatic }
+    # User decision 2026-09-23: keep Windows Time running so it actually syncs; on a
+    # non-domain PC it is trigger-start and stops again. Owner decisions 2026-10-10:
+    # start type Automatic without the delay, and Windows' own start triggers off
+    # (Microsoft's Method 1). N puts the triggers back; it leaves the start type alone.
+    if ($Mode -eq 'Cloudflare') { Set-WHDTimeServiceAutomatic; Remove-WHDTimeTriggers | Out-Null }
+    else { Restore-WHDTimeTriggers -NoBackupIsFine | Out-Null }
     if ($Mode -eq 'Cloudflare') { Set-WHDTimeJumpLimit -Seconds $script:WHDTimeJumpLimit }
     else { Set-WHDTimeJumpLimit -Seconds $script:WHDTimeJumpDefault -RestoreSeeding }
     Invoke-WHDChange -Description 'apply time settings (w32tm /config /update) and resync' -Force -Action {
@@ -1464,20 +1476,106 @@ function Invoke-WHDSetTimeSync {
     Show-WHDTimeStatus
 }
 
-# Windows Time -> Automatic (delayed start) + running. Journaled as a 'service'
-# change, so the Undo center puts back the previous start type.
+# Start type of the Windows Time service: 'Automatic', 'AutomaticDelayedStart', 'Manual',
+# 'Disabled' ... ($null = no such service). Read-only.
+function Get-WHDTimeServiceStart {
+    $svc = Get-Service -Name w32time -EA SilentlyContinue
+    if (-not $svc) { return $null }
+    $st = "$($svc.StartType)"
+    if ($st -eq 'Automatic') {
+        $dl = Get-WHDRegValueState -Path $script:WHDW32TimeSvcKey -Name 'DelayedAutostart'
+        if ($dl.Exists -and [int]$dl.Value -eq 1) { $st = 'AutomaticDelayedStart' }
+    }
+    return $st
+}
+function _WHDTimeStartText {
+    param([string]$Start)
+    if ($Start -eq 'AutomaticDelayedStart') { return 'Automatic (delayed start)' }
+    return $Start
+}
+
+# Windows Time -> Automatic (no delay) + running. Journaled as a 'service' change, so the
+# Undo center puts back the previous start type (delayed start included).
 function Set-WHDTimeServiceAutomatic {
     $svc = Get-Service -Name w32time -EA SilentlyContinue
     if (-not $svc) { Write-WHDLog 'Windows Time service (w32time) not found.' 'ERR'; return }
-    if ("$($svc.StartType)" -eq 'Automatic' -and $svc.Status -eq 'Running') {
+    $cur = Get-WHDTimeServiceStart
+    if ($cur -eq 'Automatic' -and $svc.Status -eq 'Running') {
         Write-WHDLog 'Windows Time service already Automatic and running.' 'INFO'; return
     }
-    $jr = @{ Kind = 'service'; Service = 'W32Time'; OldStartType = "$($svc.StartType)"; NewStartType = 'Automatic' }
-    Invoke-WHDChange -Description ("Windows Time service: start type {0} -> Automatic (delayed start), start it" -f $svc.StartType) -Force -Journal $jr -Action {
-        $r = Invoke-WHDNative -Exe 'sc.exe' -ArgList @('config', 'w32time', 'start=', 'delayed-auto')
+    $jr = @{ Kind = 'service'; Service = 'W32Time'; OldStartType = $cur; NewStartType = 'Automatic' }
+    Invoke-WHDChange -Description ("Windows Time service: start type {0} -> Automatic, start it" -f (_WHDTimeStartText $cur)) -Force -Journal $jr -Action {
+        $r = Invoke-WHDNative -Exe 'sc.exe' -ArgList @('config', 'w32time', 'start=', 'auto')
         if ($r.Code -ne 0) { throw ("sc config exit {0}: {1}" -f $r.Code, (($r.Out | Where-Object { $_ }) -join ' ')) }
+        # Read it back: the delay must be gone too. Second try through Set-Service, then give up loudly.
+        if ((Get-WHDTimeServiceStart) -ne 'Automatic') { Set-Service -Name w32time -StartupType Automatic -EA Stop }
+        $now = Get-WHDTimeServiceStart
+        if ($now -ne 'Automatic') { throw ("read-back mismatch: the start type is {0}" -f (_WHDTimeStartText $now)) }
         if ((Get-Service -Name w32time).Status -ne 'Running') { Start-Service -Name w32time -EA Stop }
     } | Out-Null
+}
+
+# Takes Windows' own start triggers off the Windows Time service (sc triggerinfo w32time delete).
+# The registry key that holds them is exported to this session's restore folder first: no copy,
+# no delete. Journaled as kind 'svctrigger' (Undo center: automatic; Verify: still off?).
+# Returns 'done', 'planned', 'present' (nothing to take off), 'skipped' or 'failed'.
+function Remove-WHDTimeTriggers {
+    $ts = Get-WHDTimeTriggerState
+    if (-not $ts.Active -and -not $ts.Saved) { Write-WHDLog "Windows Time service: no start triggers on it - nothing to take off." 'INFO'; return 'present' }
+    $n = [Math]::Max([int]$ts.Active, [int]$ts.Saved)
+    if (-not $script:WHDRestore) { Initialize-WHDPaths }
+    $bak = Join-Path $script:WHDRestore $script:WHDW32TimeTriggerBak
+    $jr = @{ Kind = 'svctrigger'; Service = 'W32Time'; NewState = 'off'; Backup = $bak; OldCount = $n; OldTriggers = @($ts.Lines) }
+    $res = Invoke-WHDChange -Description ("Windows Time service: take Windows' own start triggers off ({0}; a copy is saved first)" -f $n) -Force -Journal $jr -Action {
+        if (-not (Test-Path -LiteralPath $script:WHDW32TimeTriggerKey)) { throw 'the registry key with the triggers was not found, so no copy can be saved - the triggers are left as they are' }
+        $regKey = $script:WHDW32TimeTriggerKey -replace '^HKLM:\\', 'HKLM\'
+        $x = Invoke-WHDNative -Exe 'reg.exe' -ArgList @('export', $regKey, $bak, '/y')
+        $kept = 0
+        if (Test-Path -LiteralPath $bak) { $kept = @(Get-Content -LiteralPath $bak -EA SilentlyContinue | Where-Object { $_ -match '\\TriggerInfo\\[^\]]+\]\s*$' }).Count }
+        if ($x.Code -ne 0 -or $kept -lt 1) { throw ("no copy of the triggers could be saved (reg export exit {0}, {1} trigger(s) in the file) - they are left as they are" -f $x.Code, $kept) }
+        $d = Invoke-WHDNative -Exe 'sc.exe' -ArgList @('triggerinfo', 'w32time', 'delete')
+        if ($d.Code -ne 0) { throw ("sc triggerinfo w32time delete exit {0}: {1}" -f $d.Code, (($d.Out | Where-Object { $_ }) -join ' ')) }
+        $after = Get-WHDTimeTriggerState
+        # Put back earlier and Windows not restarted since: none is in use, the registry copy has to go again.
+        if (-not $after.Active -and $after.Saved) { Remove-Item -LiteralPath $script:WHDW32TimeTriggerKey -Recurse -Force -EA Stop; $after = Get-WHDTimeTriggerState }
+        if ($after.Active -or $after.Saved) { throw ("read-back mismatch: {0} trigger(s) still in use, {1} still in the registry" -f $after.Active, $after.Saved) }
+    }
+    return "$($res.Status)"
+}
+
+# Newest saved copy of the triggers in this PC's change history (restore\<session>\W32Time-TriggerInfo.reg).
+function Get-WHDTimeTriggerBackup {
+    foreach ($s in @(Get-WHDUndoSessions | Sort-Object Stamp -Descending)) {
+        $f = Join-Path $s.Path $script:WHDW32TimeTriggerBak
+        if (Test-Path -LiteralPath $f) { return $f }
+    }
+    return $null
+}
+
+# Puts the saved triggers back (reg import). Windows reads them at its next start-up, so they
+# count again after a restart. Used by the Undo center (kind 'svctrigger'), by re-apply and by
+# option N. Returns 'done', 'planned', 'present' (nothing to put back), 'nobackup', 'skipped' or 'failed'.
+function Restore-WHDTimeTriggers {
+    param([string]$Backup, [switch]$NoBackupIsFine)
+    $ts = Get-WHDTimeTriggerState
+    if ($ts.Active) { Write-WHDLog ("Windows Time service: its {0} start trigger(s) are in place - nothing to put back." -f $ts.Active) 'INFO'; return 'present' }
+    if ($ts.Saved)  { Write-WHDLog ("Windows Time service: {0} start trigger(s) are back in the registry already - they count again after a restart." -f $ts.Saved) 'INFO'; return 'present' }
+    if (-not $Backup -or -not (Test-Path -LiteralPath $Backup)) { $Backup = Get-WHDTimeTriggerBackup }
+    if (-not $Backup) {
+        # Nothing saved = WHD never took them off on this PC (they were off before, or the history was cleaned up).
+        $lvl = if ($NoBackupIsFine) { 'INFO' } else { 'WARN' }
+        Write-WHDLog "Windows Time service: it has no start triggers, and WHD's change history holds no saved copy of them - nothing put back. By hand, in an administrator window: sc triggerinfo w32time start/domainjoin  (that writes the DOMAIN JOINED trigger)." $lvl
+        return 'nobackup'
+    }
+    $jr = @{ Kind = 'svctrigger'; Service = 'W32Time'; NewState = 'on'; Backup = $Backup }
+    $res = Invoke-WHDChange -Description ("Windows Time service: put Windows' own start triggers back from the saved copy {0}" -f $Backup) -Force -Journal $jr -Action {
+        $i = Invoke-WHDNative -Exe 'reg.exe' -ArgList @('import', $Backup)
+        if ($i.Code -ne 0) { throw ("reg import exit {0}: {1}" -f $i.Code, (($i.Out | Where-Object { $_ }) -join ' ')) }
+        $after = Get-WHDTimeTriggerState
+        if (-not $after.Active -and -not $after.Saved) { throw 'read-back mismatch: the triggers are not in the registry' }
+    }
+    if ("$($res.Status)" -eq 'done') { Write-WHDLog '  The triggers are back in the registry. Windows reads them when it starts: restart the PC for them to count.' 'WARN' }
+    return "$($res.Status)"
 }
 
 function _WHDSecText {
@@ -1532,21 +1630,25 @@ function Show-WHDTimeStatus {
     else { Write-WHDLog '  refused time jumps (7 days): none' 'INFO' }
     $svc = Get-Service -Name w32time -EA SilentlyContinue
     if ($svc) {
-        $dl = (Get-WHDRegValueState -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time' -Name 'DelayedAutostart')
-        $stTxt = "$($svc.StartType)"; if ($stTxt -eq 'Automatic' -and $dl.Exists -and [int]$dl.Value -eq 1) { $stTxt = 'Automatic (delayed start)' }
+        $stTxt = _WHDTimeStartText (Get-WHDTimeServiceStart)
         $lvl = if ($svc.Status -eq 'Running') { 'OK' } else { 'WARN' }
         Write-WHDLog ("Windows Time service: {0}, start type {1}" -f $svc.Status, $stTxt) $lvl
-        # Diagnostics (read-only): uptime - delayed start fires ~2 min after boot -
-        # and the service's built-in start/stop triggers.
+        # Diagnostics (read-only): uptime - a delayed start fires ~2 min after boot -
+        # and Windows' own start/stop triggers of the service.
         try {
             $boot = (Get-CimInstance Win32_OperatingSystem -EA Stop).LastBootUpTime
             $up = (Get-Date) - $boot
             Write-WHDLog ("  PC up for            : {0:N0} min (since {1})" -f $up.TotalMinutes, $boot.ToString('HH:mm')) 'INFO'
         } catch {}
-        $tr = Invoke-WHDNative -Exe 'sc.exe' -ArgList @('qtriggerinfo', 'w32time')
-        $trLines = @($tr.Out | ForEach-Object { $_.Trim() } | Where-Object { $_ -and $_ -notmatch 'QueryServiceConfig2|SERVICE_NAME' })
-        if ($trLines.Count) { foreach ($l in $trLines) { Write-WHDLog ("  trigger: {0}" -f $l) 'INFO' } }
-        else { Write-WHDLog '  trigger: (none)' 'INFO' }
+        $tts = Get-WHDTimeTriggerState
+        if ($tts.Active) {
+            Write-WHDLog ("  start triggers       : {0}, Windows' own - the PC is not joined to a domain by them; Firewall T takes them off" -f $tts.Active) 'INFO'
+            foreach ($l in $tts.Lines) { Write-WHDLog ("    trigger: {0}" -f $l) 'INFO' }
+        } elseif ($tts.Saved) {
+            Write-WHDLog ("  start triggers       : none in use now; {0} are back in the registry and count again after a restart" -f $tts.Saved) 'INFO'
+        } else {
+            Write-WHDLog '  start triggers       : none - the service starts with Windows, not on a trigger' 'OK'
+        }
     }
     $src = Invoke-WHDNative -Exe 'w32tm.exe' -ArgList @('/query', '/source')
     Write-WHDLog ("Source in use       : {0}" -f (($src.Out | Where-Object { $_.Trim() }) -join ' ')) 'INFO'
@@ -1784,8 +1886,8 @@ function Show-WHDFirewallMenu {
     Write-WHDMenuItem 'V' 'View blocked connections / allow a program'
     Write-WHDMenuItem 'G' 'Remove all per-program allows'
     Write-Host '  Time sync' -ForegroundColor DarkGray
-    Write-WHDMenuItem 'T' 'Use time.cloudflare.com' '(UDP 123 pinned + 1 h time-jump limit)'
-    Write-WHDMenuItem 'N' 'Use Windows default time server' '(and default time settings)'
+    Write-WHDMenuItem 'T' 'Use time.cloudflare.com' '(UDP 123 pinned + 1 h time-jump limit; service Automatic, Windows start triggers off)'
+    Write-WHDMenuItem 'N' 'Use Windows default time server' '(and default time settings; start triggers back)'
     Write-WHDMenuItem 'S' 'Time + logging status'
     Write-WHDMenuItem 'Z' 'Time zone + date/time' '(same as main menu T)'
     Write-Host '  Policy files' -ForegroundColor DarkGray

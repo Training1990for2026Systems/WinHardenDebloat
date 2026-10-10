@@ -80,10 +80,22 @@ Windows' time service speaks NTP only (no NTS). **T** sets
 allow rule `WHD-Allow-NTP` to Cloudflare's published NTP addresses **162.159.200.1, 162.159.200.123**
 (IPv6 omitted — IPv6 is suppressed). `0x8` = client mode on Windows' normal poll interval (~17 min–9 h)
 instead of `0x1`'s weekly interval. **N** goes back to `time.windows.com,0x9` and reopens UDP 123 to any.
-**T** also sets the **Windows Time service to Automatic (delayed start)** and starts it (user decision
-2026-09-23 after the live test showed it was trigger-start and not running, so the clock was never syncing);
-journaled as a `service` change, so the Undo center restores the previous start type.
-**S** shows the setting, the service state/start type, the source in use, last sync, a direct reachability
+**T** also sets the **Windows Time service to Automatic** and starts it (user decision 2026-09-23 after the live
+test showed it was trigger-start and not running, so the clock was never syncing; since Next 2.0 without the
+delayed start); journaled as a `service` change, so the Undo center restores the previous start type.
+
+**Start triggers (Next 2.0, 2026-10-10).** Windows ships the time service with its own start triggers; `sc qtriggerinfo
+w32time` shows one of them as `DOMAIN JOINED STATUS ... [DOMAIN JOINED]`, which reads as if the PC had been joined to a
+domain (it has not). **T** takes them off the way Microsoft Learn describes in "W32Time doesn't start on a workgroup
+computer", Method 1: `sc triggerinfo w32time delete`, start type Automatic. `sc.exe` deletes all triggers of a service
+at once, so the registry key that holds them (`HKLM\SYSTEM\CurrentControlSet\Services\W32Time\TriggerInfo`) is exported
+first to `restore\<session>\W32Time-TriggerInfo.reg`; when that copy cannot be written, nothing is deleted. Journal
+kind `svctrigger`: the **Undo center** and **N** import the copy (`reg import`). Windows reads the key when it starts,
+so the triggers count again after a restart; until then **S** says "back in the registry". **Verify** reports CHANGED
+when triggers are on the service again (for example after a Windows update), and re-apply takes them off again.
+**N** leaves the start type of the service as it is. When the change history holds no saved copy, nothing is put back;
+by hand, `sc triggerinfo w32time start/domainjoin` writes the DOMAIN JOINED trigger.
+**S** shows the setting, the service state/start type, its start triggers, the source in use, last sync, a direct reachability
 test (`w32tm /stripchart /computer:time.cloudflare.com /samples:2`, works even if the service is stopped)
 and the NTP rule. The allow-list (menu 5) and the
 baseline profile keep NTP pinned automatically while the time source is Cloudflare.

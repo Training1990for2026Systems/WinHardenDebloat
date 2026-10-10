@@ -127,7 +127,7 @@ $xaml = @'
               <Button x:Name="FwLogOffBtn"   Content="Logging OFF"/>
               <Button x:Name="FwAppClearBtn" Content="Remove all program allows"/>
               <TextBlock Text="Time sync" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>
-              <Button x:Name="FwTimeCfBtn"   Content="Use time.cloudflare.com" ToolTip="UDP 123 pinned to Cloudflare + time jumps limited to 1 h (bigger corrections refused and logged)"/>
+              <Button x:Name="FwTimeCfBtn"   Content="Use time.cloudflare.com" ToolTip="UDP 123 pinned to Cloudflare + time jumps limited to 1 h (bigger corrections refused and logged). The Windows Time service is set to Automatic and Windows' own start triggers are taken off it (a copy is saved; Undo or 'Windows default' puts them back)"/>
               <Button x:Name="FwTimeWinBtn"  Content="Use Windows default" ToolTip="time.windows.com + Windows default time settings (15 h jump limit, Secure Time Seeding on)"/>
               <Button x:Name="FwTimeStatBtn" Content="Time + logging status"/>
               <TextBlock Text="Time zone + date/time" Foreground="#7CC4FF" FontWeight="Bold" Margin="2,8,2,2"/>

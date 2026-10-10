@@ -776,7 +776,7 @@ function Invoke-WHDReApplyChanged {
     param([object[]]$Results)
     if ($script:WHDSafeMode -and [int]$script:WHDSafeAllow -le 0) { $whdSafeArgs = $PSBoundParameters; Invoke-WHDSafeAllowed { Invoke-WHDReApplyChanged @whdSafeArgs }; return }   # WHD Next: allowed in SAFE mode
     if (-not $Results) { $Results = @(Invoke-WHDVerify -All -Quiet) }
-    $auto = @('reg', 'service', 'task', 'pnpdev', 'deprov', 'fwlog', 'mppref', 'asr', 'tz')
+    $auto = @('reg', 'service', 'task', 'pnpdev', 'deprov', 'fwlog', 'mppref', 'asr', 'tz', 'svctrigger')
     $bad  = @($Results | Where-Object { $_.Result -eq 'CHANGED' })
     $todo = @($bad | Where-Object { $auto -contains "$($_.Entry.Kind)" })
     $hand = @($bad | Where-Object { $auto -notcontains "$($_.Entry.Kind)" })
@@ -819,6 +819,11 @@ function Invoke-WHDReApplyChanged {
                 }
                 'deprov' { Add-WHDDeprovisionMark -Pfn "$($e.Pfn)" }
                 'tz'     { Set-WHDTimeZoneId -Id "$($e.NewId)" }
+                'svctrigger' {
+                    if (Get-Command Remove-WHDTimeTriggers -EA SilentlyContinue) {
+                        if ("$($e.NewState)" -eq 'on') { Restore-WHDTimeTriggers -Backup "$($e.Backup)" | Out-Null } else { Remove-WHDTimeTriggers | Out-Null }
+                    } else { Write-WHDLog 're-apply by hand (Firewall menu T): the Windows Time start triggers' 'WARN' }
+                }
                 'fwlog' {
                     $flP = "$($e.Profile)"; $flA = "$($e.NewAllowed)"; $flB = "$($e.NewBlocked)"; $flS = [int64]$e.NewSizeKB
                     $cur = @(Get-NetFirewallProfile -Name $flP -EA SilentlyContinue)[0]
@@ -991,6 +996,7 @@ function Get-WHDUndoMode {
         'tz'      { 'auto' }
         'deprov'  { 'auto' }
         'fwlog'   { 'auto' }
+        'svctrigger' { 'auto' }
         default   { 'manual' }
     }
 }
@@ -1090,8 +1096,23 @@ function _WHDUndoOne {
         'service' {
             $jr = @{ Kind = 'service'; Service = $Entry.Service; OldStartType = $Entry.NewStartType; NewStartType = $Entry.OldStartType }
             Invoke-WHDChange -Description ("service {0}: start type -> {1}" -f $Entry.Service, $Entry.OldStartType) -Force -Journal $jr -Action {
-                Set-Service -Name $Entry.Service -StartupType $Entry.OldStartType -EA Stop
+                if ("$($Entry.OldStartType)" -eq 'AutomaticDelayedStart') {
+                    # Set-Service on Windows PowerShell 5.1 (SAFE mode) has no word for delayed start - sc.exe has.
+                    $sd = Invoke-WHDNative -Exe 'sc.exe' -ArgList @('config', "$($Entry.Service)", 'start=', 'delayed-auto')
+                    if ($sd.Code -ne 0) { throw ("sc config exit {0}: {1}" -f $sd.Code, (($sd.Out | Where-Object { $_ }) -join ' ')) }
+                } else {
+                    Set-Service -Name $Entry.Service -StartupType $Entry.OldStartType -EA Stop
+                }
             } | Out-Null
+        }
+        'svctrigger' {
+            # Windows' own start triggers of the Windows Time service (Firewall.ps1). 'off' = WHD took them
+            # off -> put the saved copy back; 'on' = WHD put them back (option N) -> take them off again.
+            if (-not (Get-Command Restore-WHDTimeTriggers -EA SilentlyContinue)) { Write-WHDLog 'Firewall.ps1 is not loaded - the start triggers cannot be undone from here.' 'ERR'; return }
+            if ("$($Entry.NewState)" -eq 'on') { $stu = Remove-WHDTimeTriggers }
+            else { $stu = Restore-WHDTimeTriggers -Backup "$($Entry.Backup)" }
+            # Already in the wanted state (nothing was written): the entry still counts as undone.
+            if ("$stu" -eq 'present' -and $script:WHDExecute) { _WHDMarkUndone $Entry; return }
         }
         'regkey' {
             # an empty key WHD removed during an undo - recreate it (empty)
@@ -1283,6 +1304,13 @@ function Test-WHDJournalEntry {
                 $st = "$($svc.StartType)"; $r.Now = $st
                 $r.Result = if ($st -eq "$($Entry.NewStartType)") { 'PASS' } else { 'CHANGED' }
             }
+        }
+        'svctrigger' {
+            $r.Target = "service $($Entry.Service): Windows' own start triggers"
+            $ts = Get-WHDTimeTriggerState
+            $r.Now = if ($ts.Active) { "$($ts.Active) in use" } elseif ($ts.Saved) { "none in use, $($ts.Saved) in the registry (count after a restart)" } else { 'none' }
+            if ("$($Entry.NewState)" -eq 'on') { $r.Result = if ($ts.Active -or $ts.Saved) { 'PASS' } else { 'CHANGED' } }
+            else { $r.Result = if ($ts.Active -or $ts.Saved) { 'CHANGED' } else { 'PASS' } }
         }
         'feature' {
             $r.Target = "feature $($Entry.Feature)"
@@ -1621,6 +1649,7 @@ function _WHDVerifyKey {
         'deprov'      { "deprov|$($e.Pfn)".ToLower() }
         'fwlog'       { "fwlog|$($e.Profile)".ToLower() }
         'tz'          { 'tz|system' }
+        'svctrigger'  { "svctrig|$($e.Service)".ToLower() }
         'file'        { "file|$($e.Path)".ToLower() }
         default       { "act|$($e.Id)" }
     }
@@ -1668,6 +1697,26 @@ function Invoke-WHDNative {
     } catch {
         return [pscustomobject]@{ Code = 1; Out = @("$($_.Exception.Message)") }
     } finally { $ErrorActionPreference = $prev }
+}
+
+# WHD Next 2.0: start / stop triggers of the Windows Time service (read-only; used by the time
+# status, Verify and the update guard).
+#   Active = what Windows uses now. sc.exe prints one line with a GUID per trigger, so counting
+#            those lines works in any Windows language.
+#   Saved  = trigger entries in the service's registry key - what Windows reads at its next start-up.
+#   Lines  = sc.exe's own text, for the status screen.
+$script:WHDW32TimeTriggerKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\W32Time\TriggerInfo'
+function Get-WHDTimeTriggerState {
+    $q = Invoke-WHDNative -Exe 'sc.exe' -ArgList @('qtriggerinfo', 'w32time')
+    $lines = @($q.Out | ForEach-Object { "$_".Trim() } | Where-Object { $_ -and $_ -notmatch 'QueryServiceConfig2|SERVICE_NAME' })
+    $guid = '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}'
+    $active = @($lines | Where-Object { $_ -match $guid }).Count
+    $saved = 0
+    if (Test-Path -LiteralPath $script:WHDW32TimeTriggerKey) {
+        $saved = @(Get-ChildItem -LiteralPath $script:WHDW32TimeTriggerKey -EA SilentlyContinue).Count
+    }
+    if (-not $active) { $lines = @() }
+    [pscustomobject]@{ Active = [int]$active; Saved = [int]$saved; Lines = @($lines) }
 }
 
 # Advanced audit policy for one subcategory (by GUID, so it works in any language).
