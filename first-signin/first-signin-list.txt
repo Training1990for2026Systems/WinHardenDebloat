@@ -1,0 +1,111 @@
+# WHD USB Image - what the first sign-in script does on the freshly installed PC.
+# Read by WHD-FirstSignIn.ps1. Build-HomeUsbFromIso.ps1 copies both files into the image.
+# This is an EXAMPLE: a part of what the WHD Classic "standard" profile does on the running Windows.
+# What the profile does and this list does not is in README.md.
+# Change it to your own choice BEFORE you run Build-HomeUsbFromIso.ps1: the copy inside the image is the one used.
+# A line that starts with # is a comment.
+#
+# Line types:
+#   part:<name> on|off
+#   asr:<rule id>|<action>|<name>             one attack-surface rule; action = block, audit, warn or off
+#   password:<setting>|<value>                one switch of "net accounts"
+#   dns:<IPv4 address>                        a DNS server (part dns)
+#   doh:<template>                            the encrypted-DNS (DoH) address for those servers
+#   fw-allow:<name>|<display name>|<direction>|<protocol>|<local port>|<remote port>|<remote addresses>
+#                                             one allow rule (part firewall); leave a field empty for "any";
+#                                             several addresses are separated by commas
+#
+# Everything is written to C:\ProgramData\WHD-Image\FirstSignIn.log on the installed PC.
+# WHD Classic and WHD Next do not know about these changes: their Undo and Verify do not cover them.
+
+# ------------------------------------------------------------------------------------------------------
+# Microsoft Defender (WHD Classic: Security+ 1, 2B, 3B, 4 to 6 and K). Only when Defender is the active
+# antivirus. Set through Defender's own commands.
+# ------------------------------------------------------------------------------------------------------
+# Block potentially unwanted apps
+part:defender-pua on
+# Network protection = Block
+part:defender-network-protection on
+# Ransomware folder protection (Controlled folder access) = Block. Only trusted apps may change files in
+# Documents, Pictures, Videos, Music and Favorites. Allow an app in Windows Security > Ransomware protection.
+part:defender-folder-protection on
+# Attack-surface rules. Action: block, audit (log only), warn or off.
+part:defender-asr on
+asr:56a863a9-875e-4185-98a7-b882c64b5ce5|block|Block abuse of exploited vulnerable signed drivers
+asr:9e6c4e1f-7d60-472f-ba1a-a39ef669e4b2|block|Block credential stealing from LSASS
+asr:e6db77e5-3df2-4cf1-b95a-636979351e5b|block|Block persistence through WMI event subscription
+asr:5beb7efe-fd9a-4556-801d-275e5ffc04cc|block|Block execution of potentially obfuscated scripts
+asr:d3e037e1-3eb8-44c8-a917-57927947596d|block|Block JavaScript/VBScript launching downloaded executables
+asr:c0033c00-d16d-4114-a5a0-dc9b3a7d2ceb|block|Block use of copied or impersonated system tools
+asr:c1db55ab-c21a-4637-bb3f-a12568109d35|block|Use advanced protection against ransomware
+asr:7674ba52-37eb-4a4f-a9a1-f0f9a1619a2c|block|Block Adobe Reader from creating child processes
+asr:d4f940ab-401b-4efc-aadc-ad5f3c50688a|block|Block all Office apps from creating child processes
+asr:be9ba2d9-53ea-4cdc-84e5-9b1eeee46550|block|Block executable content from email client and webmail
+asr:3b576869-a4ec-4529-8536-b80a7769e899|block|Block Office apps from creating executable content
+asr:75668c1f-73b5-4cf0-bb93-3ecf5cb7cc84|block|Block Office apps from injecting code into other processes
+asr:26190899-1602-49e8-8b27-eb1d0a1ce869|block|Block Office communication app from creating child processes
+asr:92e97fa1-2edf-4476-bdd6-9dd0b4dddc7b|block|Block Win32 API calls from Office macros
+
+# ------------------------------------------------------------------------------------------------------
+# Password and lockout rules for LOCAL accounts (WHD Classic: Security+ W), set with "net accounts".
+# A Microsoft-account password is governed online. The current password keeps working; the minimum length
+# applies the next time a password is changed. 3 wrong passwords lock the account for 10 minutes.
+# ------------------------------------------------------------------------------------------------------
+part:password-rules on
+password:minpwlen|14
+password:uniquepw|5
+password:maxpwage|unlimited
+password:lockoutthreshold|3
+password:lockoutduration|10
+password:lockoutwindow|10
+
+# ------------------------------------------------------------------------------------------------------
+# NetBIOS over TCP/IP off on every adapter (WHD Classic: Security+ P2). Takes full effect after a restart.
+# ------------------------------------------------------------------------------------------------------
+part:netbios-off on
+
+# ------------------------------------------------------------------------------------------------------
+# DNS on every adapter that is up (WHD Classic: Firewall D): Cloudflare's malware-filtering resolver,
+# encrypted (DNS over HTTPS), no fall-back to plain DNS. Other pairs:
+#   1.1.1.1 / 1.0.0.1  https://cloudflare-dns.com/dns-query            (no filter)
+#   1.1.1.3 / 1.0.0.3  https://family.cloudflare-dns.com/dns-query     (malware + adult content)
+# ------------------------------------------------------------------------------------------------------
+part:dns on
+dns:1.1.1.2
+dns:1.0.0.2
+doh:https://security.cloudflare-dns.com/dns-query
+
+# ------------------------------------------------------------------------------------------------------
+# OneDrive (WHD Classic: Win32 programs, uninstall "Microsoft OneDrive"). Windows installs OneDrive for a
+# new user right after the first sign-in. This part takes away the entry that starts that install and,
+# when OneDrive is already installed for this user, runs OneDrive's own uninstaller.
+# ------------------------------------------------------------------------------------------------------
+part:onedrive-remove on
+
+# ------------------------------------------------------------------------------------------------------
+# Firewall (WHD Classic: Firewall W, then 5). A backup of the whole firewall policy is saved first
+# (C:\ProgramData\WHD-Image\firewall-before-first-signin.wfw). Then EVERY rule is deleted, Windows' own
+# included, and the allow rules below are added, in WHD's own group so WHD Classic sees them as its own.
+# The default actions are only read, not set: on a fresh Windows inbound is Block and outbound is Allow.
+# The part does nothing when outbound is already set to Block.
+# This is the wipe and the allow-list only. The rest of WHD Classic's firewall baseline (firewall log, IPv6
+# rules, time-server pin, update gate) stays with WHD Classic.
+# Windows and apps add rules of their own again later. WHD Classic lists them under Firewall K; inbound
+# ones only after you switch its inbound watch on there (K, then S).
+# An inbound rule needs a local port: a line that would open every inbound port is refused.
+# To put everything back:  netsh advfirewall import "C:\ProgramData\WHD-Image\firewall-before-first-signin.wfw"
+# ------------------------------------------------------------------------------------------------------
+part:firewall on
+fw-allow:WHD-Allow-DNS-UDP|WHD Allow DNS (UDP 53)|Outbound|UDP||53|1.1.1.2,1.0.0.2
+fw-allow:WHD-Allow-DNS-TCP|WHD Allow DNS (TCP 53)|Outbound|TCP||53|1.1.1.2,1.0.0.2
+fw-allow:WHD-Allow-DHCP-Out|WHD Allow DHCP request (UDP out 68->67)|Outbound|UDP|68|67|
+fw-allow:WHD-Allow-DHCP-In|WHD Allow DHCP reply (UDP in <-67)|Inbound|UDP|68|67|
+fw-allow:WHD-Allow-NTP|WHD Allow NTP (UDP 123)|Outbound|UDP||123|
+fw-allow:WHD-Allow-HTTPS|WHD Allow HTTPS (TCP 443)|Outbound|TCP||443|
+fw-allow:WHD-Allow-HTTP|WHD Allow HTTP (TCP 80)|Outbound|TCP||80|
+
+# ------------------------------------------------------------------------------------------------------
+# UAC "Always notify" on the dimmed desktop (WHD Classic: Security+ U). Done as the very last step, so
+# that it is not yet in force while Windows Setup starts this script.
+# ------------------------------------------------------------------------------------------------------
+part:uac-always-notify on

@@ -1,0 +1,51 @@
+# WHD USB Image - what to take out of the Home-only image. Read by Build-HomeUsbFromIso.ps1.
+# This is an EXAMPLE: the list used for the one test install. Change it to your own choice before you run the script.
+# Run List-HomeImage.ps1 first to see what your own image contains.
+# One item per line:  app:<display name>   feature:<feature name>   capability:<capability name>   service-off:<service name>
+# What is SET in the image (registry values, more services) is in image-settings.txt.
+# A line that starts with # is a comment.
+
+# --- bundled apps (29) ---
+app:Microsoft.Copilot
+app:Microsoft.BingSearch
+app:Microsoft.BingNews
+app:Microsoft.BingWeather
+app:MicrosoftWindows.Client.WebExperience
+app:Microsoft.PowerAutomateDesktop
+app:Microsoft.GamingApp
+app:Microsoft.XboxGamingOverlay
+app:Microsoft.XboxIdentityProvider
+app:Microsoft.XboxSpeechToTextOverlay
+app:Microsoft.Xbox.TCUI
+app:Microsoft.OutlookForWindows
+app:MSTeams
+app:Microsoft.YourPhone
+app:MicrosoftWindows.CrossDevice
+app:MicrosoftCorporationII.QuickAssist
+app:MicrosoftCorporationII.MicrosoftFamily
+app:Clipchamp.Clipchamp
+app:Microsoft.MicrosoftSolitaireCollection
+app:Microsoft.Todos
+app:Microsoft.MicrosoftStickyNotes
+app:Microsoft.WindowsFeedbackHub
+app:Microsoft.GetHelp
+app:Microsoft.Windows.DevHome
+app:Microsoft.Paint
+app:Microsoft.Windows.Photos
+app:Microsoft.WindowsAlarms
+app:Microsoft.WindowsSoundRecorder
+app:Microsoft.ZuneMusic
+
+# --- optional features to switch off (4) ---
+feature:WorkFolders-Client
+feature:Printing-Foundation-InternetPrinting-Client
+feature:MSRDC-Infrastructure
+feature:WindowsMediaPlayer
+
+# --- capabilities to remove (none) ---
+# List-HomeImage.ps1 writes the installed capabilities to image-contents.txt. A line looks like this:
+# capability:App.StepsRecorder~~~~0.0.1.0
+
+# --- services to switch off (2) ---
+service-off:LanmanWorkstation
+service-off:LanmanServer

@@ -1,0 +1,17 @@
+# WHD USB Image (ISO build) - never commit Windows image files, PC-specific data or work files
+
+# Windows image files (Microsoft's files - not ours to publish)
+*.iso
+*.wim
+*.swm
+*.esd
+usb-custom/
+usb-custom_old_*/
+mount/
+mount_*/
+
+# what the scripts write on this PC
+*.log
+install-source.txt
+image-contents.txt
+test-results/

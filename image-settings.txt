@@ -1,0 +1,287 @@
+# WHD USB Image - settings that are written into the image before Windows is installed.
+# Read by Build-HomeUsbFromIso.ps1. remove-list.txt says what is taken OUT of the image; this file says what is SET in it.
+# This is an EXAMPLE: most of the machine-wide registry part of the WHD Classic "standard" profile. Change
+# it to your own choice. What the profile does and this file does not is listed in README.md.
+# A line that starts with # is a comment.
+#
+# Line types:
+#   part:<name> on|off         a whole part of the work (the three parts are listed just below)
+#   group:<name> on|off        starts a group; the reg: and service-off: lines below it belong to it
+#   reg:<hive>|<key>|<value name>|<type>|<data>
+#        hive  SOFTWARE or SYSTEM
+#        key   for SOFTWARE: the key below HKLM\SOFTWARE
+#              for SYSTEM:   the key below the control set (starts with Services\ or Control\)
+#        type  dword (data = a whole number) or string
+#   service-off:<service>      sets the service to "disabled" (Start = 4); skipped when it is not in the image
+#
+# Every value here is machine-wide (HKEY_LOCAL_MACHINE). Per-user settings are not in this file.
+# Microsoft documents most of the policy values for Pro / Enterprise / Education. On Home they do no harm,
+# but only a test install shows which of them Windows keeps to.
+# WHD Classic and WHD Next do not know about values set here: their Undo, Verify and update guard work from
+# their own change history. The file WHD-Image-applied.txt inside the image is the record of this run.
+
+# ------------------------------------------------------------------------------------------------------
+# The three parts
+# ------------------------------------------------------------------------------------------------------
+# machine-settings   the groups in this file
+# removed-app-marks  for every app that remove-list.txt takes out, write Windows' "deprovisioned" mark,
+#                    which tells Windows not to put that app back at a Windows update
+# first-signin       copy first-signin\WHD-FirstSignIn.ps1 and first-signin-list.txt into the image, and the
+#                    answer file as Windows\Panther\unattend.xml, so the script runs once at the first sign-in
+part:machine-settings on
+part:removed-app-marks on
+part:first-signin on
+
+# ------------------------------------------------------------------------------------------------------
+# AI off-switches (WHD Classic: AI menu, profile ai.featureOff)
+# ------------------------------------------------------------------------------------------------------
+group:ai-copilot on
+reg:SOFTWARE|Policies\Microsoft\Windows\WindowsCopilot|TurnOffWindowsCopilot|dword|1
+# Copilot comes with Microsoft Edge Update: install off, update off (Microsoft Learn, Copilot update policies)
+reg:SOFTWARE|Policies\Microsoft\EdgeUpdate|Install{C50565E9-CCCF-44B4-BA15-5AC5C6569197}|dword|0
+reg:SOFTWARE|Policies\Microsoft\EdgeUpdate|Update{C50565E9-CCCF-44B4-BA15-5AC5C6569197}|dword|0
+
+group:ai-recall on
+reg:SOFTWARE|Policies\Microsoft\Windows\WindowsAI|AllowRecallEnablement|dword|0
+
+group:ai-click-to-do on
+reg:SOFTWARE|Policies\Microsoft\Windows\WindowsAI|DisableClickToDo|dword|1
+reg:SOFTWARE|Policies\Microsoft\Windows\WindowsAI|DisableSettingsAgent|dword|1
+
+group:ai-recall-snapshots on
+reg:SOFTWARE|Policies\Microsoft\Windows\WindowsAI|DisableAIDataAnalysis|dword|1
+
+group:ai-paint on
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\Policies\Paint|DisableCocreator|dword|1
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\Policies\Paint|DisableImageCreator|dword|1
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\Policies\Paint|DisableGenerativeFill|dword|1
+
+group:ai-notepad on
+reg:SOFTWARE|Policies\WindowsNotepad|DisableAIFeatures|dword|1
+
+group:ai-edge on
+reg:SOFTWARE|Policies\Microsoft\Edge|EdgeCopilotEnabled|dword|0
+reg:SOFTWARE|Policies\Microsoft\Edge|HubsSidebarEnabled|dword|0
+reg:SOFTWARE|Policies\Microsoft\Edge|Microsoft365CopilotChatIconEnabled|dword|0
+
+group:ai-edge-local-model on
+reg:SOFTWARE|Policies\Microsoft\Edge|GenAILocalFoundationalModelSettings|dword|1
+reg:SOFTWARE|Policies\Microsoft\Edge|AIGenThemesEnabled|dword|0
+
+# Widgets policy. Not in the "standard" profile (there the Widgets app is removed instead), so it is off here.
+group:widgets-policy off
+reg:SOFTWARE|Policies\Microsoft\Dsh|AllowNewsAndInterests|dword|0
+
+# ------------------------------------------------------------------------------------------------------
+# Store suggestions and privacy (WHD Classic: Store suppression, privacy hardening, General D = DiagTrack,
+# More privacy settings)
+# ------------------------------------------------------------------------------------------------------
+group:consumer-features-off on
+reg:SOFTWARE|Policies\Microsoft\Windows\CloudContent|DisableWindowsConsumerFeatures|dword|1
+
+group:telemetry on
+reg:SOFTWARE|Policies\Microsoft\Windows\DataCollection|AllowTelemetry|dword|0
+reg:SOFTWARE|Policies\Microsoft\Windows\DataCollection|DoNotShowFeedbackNotifications|dword|1
+
+# Connected User Experiences and Telemetry service
+group:diagtrack-service-off on
+service-off:DiagTrack
+
+group:activity-history-off on
+reg:SOFTWARE|Policies\Microsoft\Windows\System|EnableActivityFeed|dword|0
+reg:SOFTWARE|Policies\Microsoft\Windows\System|PublishUserActivities|dword|0
+reg:SOFTWARE|Policies\Microsoft\Windows\System|UploadUserActivities|dword|0
+
+group:clipboard-history-off on
+reg:SOFTWARE|Policies\Microsoft\Windows\System|AllowClipboardHistory|dword|0
+reg:SOFTWARE|Policies\Microsoft\Windows\System|AllowCrossDeviceClipboard|dword|0
+
+group:input-personalization-off on
+reg:SOFTWARE|Policies\Microsoft\InputPersonalization|AllowInputPersonalization|dword|0
+
+group:edge-background-off on
+reg:SOFTWARE|Policies\Microsoft\Edge|BackgroundModeEnabled|dword|0
+reg:SOFTWARE|Policies\Microsoft\Edge|StartupBoostEnabled|dword|0
+reg:SOFTWARE|Policies\Microsoft\Edge|EdgeShoppingAssistantEnabled|dword|0
+
+group:edge-diagnostic-data-off on
+reg:SOFTWARE|Policies\Microsoft\Edge|DiagnosticData|dword|0
+reg:SOFTWARE|Policies\Microsoft\Edge|PersonalizationReportingEnabled|dword|0
+
+# ------------------------------------------------------------------------------------------------------
+# Old network protocols (WHD Classic: Security+ P1, P3, P4). NetBIOS (P2) is set per adapter and is
+# done by the first sign-in script.
+# ------------------------------------------------------------------------------------------------------
+group:llmnr-off on
+reg:SOFTWARE|Policies\Microsoft\Windows NT\DNSClient|EnableMulticast|dword|0
+
+group:wpad-off on
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\Internet Settings\WinHttp|DisableWpad|dword|1
+
+group:remote-assistance-off on
+reg:SYSTEM|Control\Remote Assistance|fAllowToGetHelp|dword|0
+reg:SYSTEM|Control\Remote Assistance|fAllowFullControl|dword|0
+
+# ------------------------------------------------------------------------------------------------------
+# Network services (WHD Classic: Security+ N2, N3, N4, N6).
+# Workstation and Server (N1) are the two service-off lines in remove-list.txt.
+# NEVER add WinHttpAutoProxySvc here: with that service disabled Wi-Fi stayed "dormant" in WHD's tests.
+# These services have been switched off on a running PC, never before during Windows Setup.
+# ------------------------------------------------------------------------------------------------------
+# SMB 1/2/3 server off, SMB client drivers off. No Windows file sharing in either direction.
+# WHD Classic also switches the optional feature SMB1Protocol off when it is on. A stock Windows 11 image
+# has it off; to be sure, add the line  feature:SMB1Protocol  to remove-list.txt.
+group:smb-off on
+reg:SYSTEM|Services\LanmanServer\Parameters|SMB1|dword|0
+reg:SYSTEM|Services\LanmanServer\Parameters|SMB2|dword|0
+service-off:mrxsmb20
+service-off:mrxsmb10
+
+# (Security+ N5, the "Automatically detect settings" proxy switch, is a per-user value and is not here.)
+# Dial-up and the built-in VPN. If Wi-Fi or Ethernet misbehaves after the install, switch this group off first.
+group:dialup-vpn-off on
+service-off:RasMan
+service-off:RasAuto
+service-off:SstpSvc
+service-off:RemoteAccess
+service-off:TapiSrv
+
+group:ipsec-keying-off on
+service-off:IKEEXT
+service-off:PolicyAgent
+
+group:fax-phone-off on
+service-off:Fax
+service-off:PhoneSvc
+
+# ------------------------------------------------------------------------------------------------------
+# Account (WHD Classic: Security+ U). UAC "Always notify" on the dimmed desktop.
+# OFF here on purpose: the first sign-in script sets the same three values as its last step (part
+# uac-always-notify in first-signin-list.txt). Set in the image, "Always notify" would already be in force
+# when Windows Setup starts that script, and Microsoft does not say whether Setup can then still start it
+# without a question on screen. Switch it on here only if you do not use the first sign-in script.
+# ------------------------------------------------------------------------------------------------------
+group:uac-always-notify off
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\Policies\System|EnableLUA|dword|1
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\Policies\System|ConsentPromptBehaviorAdmin|dword|2
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\Policies\System|PromptOnSecureDesktop|dword|1
+
+# ------------------------------------------------------------------------------------------------------
+# Updates (WHD Classic: Updates 1 to 4 and E). Installing security updates is then up to you.
+# ------------------------------------------------------------------------------------------------------
+group:windows-update-no-auto on
+reg:SOFTWARE|Policies\Microsoft\Windows\WindowsUpdate\AU|NoAutoUpdate|dword|1
+
+# Windows does not fetch drivers or manufacturer apps when hardware appears. Have your own drivers ready.
+group:driver-search-off on
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\DriverSearching|SearchOrderConfig|dword|0
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\Device Metadata|PreventDeviceMetadataFromNetwork|dword|1
+reg:SOFTWARE|Policies\Microsoft\Windows\Device Metadata|PreventDeviceMetadataFromNetwork|dword|1
+
+group:no-drivers-in-updates on
+reg:SOFTWARE|Policies\Microsoft\Windows\WindowsUpdate|ExcludeWUDriversInQualityUpdate|dword|1
+
+group:store-auto-update-off on
+reg:SOFTWARE|Policies\Microsoft\WindowsStore|AutoDownload|dword|2
+
+# The Edge Update services. WHD Classic finds them on the running PC by name (edgeupdate*); these are the two
+# usual names. If they are not in the image yet, the log shows them as "skipped (not in the image)" and
+# this group does nothing. The Edge Update scheduled tasks are NOT covered here: they can only be disabled
+# on the running Windows (WHD Classic: Updates E).
+group:edge-update-services-off on
+service-off:edgeupdate
+service-off:edgeupdatem
+
+# ------------------------------------------------------------------------------------------------------
+# Devices (WHD Classic: Devices 2 and 3). The Bluetooth network part (Devices 1) is per adapter and is
+# not done here.
+# The device-install deny list has never been in place during Windows Setup. Microsoft lists the policy
+# for Pro and up; on Home it is tried.
+# WHD Classic also disables the Wi-Fi Direct adapters and removes the WAN Miniports that are present on the
+# running PC. That step is not done here: if Windows Home does not keep to the deny list, do it with
+# WHD Classic (Devices 2 and 3).
+# ------------------------------------------------------------------------------------------------------
+# Wi-Fi Direct: no Mobile hotspot, no casting to a TV (Miracast), no Nearby sharing, no Phone Link.
+group:wifi-direct-off on
+service-off:WFDSConMgrSvc
+service-off:icssvc
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions|DenyDeviceIDs|dword|1
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs|1|string|{5d624f94-8850-40c3-a3fa-a4fd2080baf3}\vwifimp_wfd
+
+# WAN Miniports are only for dial-up, the built-in VPN and PPPoE. Keep dialup-vpn-off on with this group:
+# the RasMan service creates them again.
+group:wan-miniports-off on
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions|DenyDeviceIDs|dword|1
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs|2|string|ms_agilevpnminiport
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs|3|string|ms_ndiswanip
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs|4|string|ms_ndiswanipv6
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs|5|string|ms_l2tpminiport
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs|6|string|ms_ndiswanbh
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs|7|string|ms_pppoeminiport
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs|8|string|ms_pptpminiport
+reg:SOFTWARE|Policies\Microsoft\Windows\DeviceInstall\Restrictions\DenyDeviceIDs|9|string|ms_sstpminiport
+
+# ------------------------------------------------------------------------------------------------------
+# App permissions (WHD Classic: Permissions, profile "Lock"), machine-wide half only.
+# WHD Classic writes every switch for the PC and for the signed-in user (and, where Windows has it, the
+# user's "desktop apps" switch). Only the PC half can go into the image this way; the per-user half is left
+# to WHD Classic on the running Windows.
+# ------------------------------------------------------------------------------------------------------
+# Policy "Force Deny": Settings shows these 11 switches OFF and greyed out.
+# Camera, microphone, radios and location are deliberately not locked.
+group:permissions-policy-lock on
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsAccessContacts|dword|2
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsAccessCalendar|dword|2
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsAccessCallHistory|dword|2
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsAccessEmail|dword|2
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsAccessMessaging|dword|2
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsAccessAccountInfo|dword|2
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsAccessPhone|dword|2
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsSyncWithDevices|dword|2
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsAccessTasks|dword|2
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsAccessNotifications|dword|2
+reg:SOFTWARE|Policies\Microsoft\Windows\AppPrivacy|LetAppsAccessMotion|dword|2
+
+# The 20 "Let apps access ..." switches for the PC = Deny (off, not locked). This includes camera,
+# microphone, radios and location, so it is in place while Windows Setup runs: a camera sign-in (Windows
+# Hello) offered during setup may not work until the switch is turned on in Settings.
+group:permissions-switches-off on
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\location|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\contacts|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\appointments|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\phoneCallHistory|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\email|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\chat|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\userAccountInformation|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\phoneCall|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\radios|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\bluetoothSync|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\cellularData|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\userDataTasks|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\userNotificationListener|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\activity|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\documentsLibrary|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\picturesLibrary|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\videosLibrary|Value|string|Deny
+reg:SOFTWARE|Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\broadFileSystemAccess|Value|string|Deny
+
+# ------------------------------------------------------------------------------------------------------
+# Network items of the "standard" profile that WHD Classic sets together with firewall rules. Both are off
+# here; they stay with WHD Classic (Firewall T and Firewall A).
+# ------------------------------------------------------------------------------------------------------
+# Windows Time from time.cloudflare.com, automatic time jumps limited to 1 hour (WHD Classic: Firewall T).
+# WHD Classic also sets the Windows Time service to automatic (delayed start) and narrows the NTP allow rule
+# to Cloudflare's two addresses; those steps are not in this file. If you switch this group on, change the
+# WHD-Allow-NTP line in first-signin\first-signin-list.txt to the same addresses (162.159.200.1,162.159.200.123).
+group:time-cloudflare off
+reg:SYSTEM|Services\W32Time\Parameters|NtpServer|string|time.cloudflare.com,0x8
+reg:SYSTEM|Services\W32Time\Parameters|Type|string|NTP
+reg:SYSTEM|Services\W32Time\Config|MaxPosPhaseCorrection|dword|3600
+reg:SYSTEM|Services\W32Time\Config|MaxNegPhaseCorrection|dword|3600
+
+# IPv6 off in the registry (255 = all IPv6 interfaces except loopback; WHD Classic: firewall baseline).
+# WHD Classic also unbinds IPv6 from every adapter and adds block rules; those steps need the running Windows.
+group:ipv6-off off
+reg:SYSTEM|Services\Tcpip6\Parameters|DisabledComponents|dword|255
