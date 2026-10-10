@@ -162,6 +162,53 @@ function Write-WHDProtectedFolderWarning {
     } catch {}
 }
 
+# ---- "1,3,5-7" style selections ----------------------------------------------
+# Numbers separated by commas or spaces, ranges like 5-7, and * for the recommended set ($Star).
+# Returns the sorted, unique numbers (all within 1..$Max), or $null when the text is not understood.
+# A piece must be a number of 1-9 digits, a range of two such numbers, or *; anything else makes the
+# whole entry invalid (so a very long number can never overflow). [0-9] on purpose: \d also matches digits of
+# other scripts, which [int] cannot convert. Never throws.
+function ConvertFrom-WHDSelection {
+    param([string]$Text, [int]$Max, [int[]]$Star = @())
+    $t = "$Text".Trim()
+    if (-not $t) { return $null }
+    $out = New-Object System.Collections.Generic.List[int]
+    foreach ($tok in @($t -split '[,\s]+' | Where-Object { $_ })) {
+        if ($tok -eq '*') {
+            foreach ($s in @($Star)) { if ([int]$s -ge 1 -and [int]$s -le $Max -and -not $out.Contains([int]$s)) { $out.Add([int]$s) } }
+            continue
+        }
+        if ($tok -match '^([0-9]{1,9})-([0-9]{1,9})$') {
+            $a = [int]$Matches[1]; $b = [int]$Matches[2]
+            if ($a -gt $b) { $x = $a; $a = $b; $b = $x }
+            if ($a -lt 1 -or $b -gt $Max) { return $null }
+            for ($n = $a; $n -le $b; $n++) { if (-not $out.Contains($n)) { $out.Add($n) } }
+            continue
+        }
+        if ($tok -match '^[0-9]{1,9}$') {
+            $n = [int]$tok
+            if ($n -lt 1 -or $n -gt $Max) { return $null }
+            if (-not $out.Contains($n)) { $out.Add($n) }
+            continue
+        }
+        return $null
+    }
+    return ,@($out.ToArray() | Sort-Object)
+}
+
+# ---- progress for slow loops -------------------------------------------------
+# A progress bar in the console plus a log line every $Every steps, so a long action is seen working
+# (the log lines also reach the window version's log box).
+# The window version may set $script:WHDProgressHook = { param($Activity, $Done, $Total) ... } to move its own progress bar.
+if (-not (Get-Variable -Name WHDProgressHook -Scope Script -EA SilentlyContinue)) { $script:WHDProgressHook = $null }
+function Write-WHDProgressStep {
+    param([string]$Activity, [int]$Done, [int]$Total, [int]$Every = 25)
+    try { Write-Progress -Activity $Activity -Status ('{0} of {1}' -f $Done, $Total) -PercentComplete ([math]::Min(100, [int](100 * $Done / [math]::Max(1, $Total)))) } catch {}
+    if ($Done -ge $Total) { try { Write-Progress -Activity $Activity -Completed } catch {} }
+    if ($script:WHDProgressHook) { try { & $script:WHDProgressHook $Activity $Done $Total } catch {} }
+    if ($Done -ge $Total -or ($Every -gt 0 -and ($Done % $Every) -eq 0)) { Write-WHDLog ('  {0}: {1} of {2}' -f $Activity, $Done, $Total) 'INFO' }
+}
+
 # ---- risk labelling ---------------------------------------------------------
 function Write-WHDRisk {
     param([ValidateSet('reversible','caution','hard')]$Tier, [string]$Text)
@@ -169,6 +216,133 @@ function Write-WHDRisk {
     Write-Host ("    [{0}] " -f $Tier.ToUpper()) -ForegroundColor $map[$Tier] -NoNewline
     Write-Host $Text
     if ($script:WHDLogSink) { try { & $script:WHDLogSink ("    [{0}] {1}" -f $Tier.ToUpper(), $Text) 'INFO' } catch {} }
+}
+
+# =============================================================================
+#  Alerts: a small window + a Windows event log entry
+# -----------------------------------------------------------------------------
+#  Used by the update guard next to its .txt report.
+#  The event source is registered when the guard is INSTALLED and removed when
+#  the guard is removed - a guard CHECK itself only writes an entry, it never registers.
+#  None of these helpers throws to its caller.
+# =============================================================================
+$script:WHDEventSource = 'WinHardenDebloat'
+$script:WHDEventLog    = 'Application'
+
+function Test-WHDEventSource {
+    # Looks at the registration itself. (EventLog.SourceExists also searches the Security log and throws when not elevated.)
+    try { return [bool](Test-Path -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\{0}\{1}' -f $script:WHDEventLog, $script:WHDEventSource)) }
+    catch { return $false }
+}
+# Registers the source (needs an elevated session; writes one key under
+# HKLM\SYSTEM\CurrentControlSet\Services\EventLog\Application). Safe to call again: an existing source is left alone.
+# Nothing is done in DRY-RUN. No output; a failure is one WARN line - Test-WHDEventSource tells whether it is there.
+function Register-WHDEventSource {
+    try {
+        if (Test-WHDEventSource) { return }
+        if (-not $script:WHDExecute) { Write-WHDLog ("would: register Windows event log source '{0}' ({1} log)" -f $script:WHDEventSource, $script:WHDEventLog) 'DRY'; return }
+        [System.Diagnostics.EventLog]::CreateEventSource($script:WHDEventSource, $script:WHDEventLog)
+    } catch {
+        try { Write-WHDLog ("Windows event log source '{0}' could not be registered (alerts still show the window and the report): {1}" -f $script:WHDEventSource, $_.Exception.Message) 'WARN' } catch { }
+    }
+}
+# Removes the source again. Safe to call when it is not registered. Nothing is done in DRY-RUN.
+function Unregister-WHDEventSource {
+    try {
+        if (-not (Test-WHDEventSource)) { return }
+        if (-not $script:WHDExecute) { Write-WHDLog ("would: remove Windows event log source '{0}'" -f $script:WHDEventSource) 'DRY'; return }
+        [System.Diagnostics.EventLog]::DeleteEventSource($script:WHDEventSource)
+    } catch {
+        try { Write-WHDLog ("Windows event log source '{0}' could not be removed: {1}" -f $script:WHDEventSource, $_.Exception.Message) 'WARN' } catch { }
+    }
+}
+# Writes one entry (Event Viewer > Windows Logs > Application, source "WinHardenDebloat"). Never throws.
+# Returns $true when it was written, $false when the source is not registered or writing failed.
+# Writing an entry changes no setting, so it also works in DRY-RUN (the guard check runs that way).
+function Write-WHDEventLog {
+    param([Parameter(Mandatory)][string]$Message,
+          [ValidateSet('Information','Warning','Error')][string]$Type = 'Information', [int]$EventId = 1000)
+    try {
+        if (-not (Test-WHDEventSource)) { return $false }
+        $et = [System.Diagnostics.EventLogEntryType]::$Type
+        if ($Message.Length -gt 30000) { $Message = $Message.Substring(0, 30000) + ' ...' }
+        [System.Diagnostics.EventLog]::WriteEntry($script:WHDEventSource, $Message, $et, $EventId)
+        return $true
+    } catch { return $false }
+}
+
+# A small always-on-top window with a few lines and two buttons. Blocks until it is closed.
+# Built from plain WPF objects. Never throws: returns $true when the window was shown and closed,
+# $false when it could not be shown (no desktop session, WPF not available) so the caller can fall back.
+function Show-WHDAlertWindow {
+    param([string]$Title = 'WinHardenDebloat', [string]$Heading = '', [string[]]$Lines = @(), [string]$ReportPath = '')
+    try {
+        if (-not [Environment]::UserInteractive) { return $false }   # nobody could close it
+        Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase -ErrorAction Stop
+        $win = New-Object System.Windows.Window
+        $win.Title = $Title
+        $win.Width = 620
+        $win.SizeToContent = [System.Windows.SizeToContent]::Height
+        $win.MaxHeight = 520
+        $win.Topmost = $true
+        $win.ResizeMode = [System.Windows.ResizeMode]::NoResize
+        $win.WindowStartupLocation = [System.Windows.WindowStartupLocation]::CenterScreen
+
+        $root = New-Object System.Windows.Controls.StackPanel
+        $root.Margin = New-Object System.Windows.Thickness(16)
+
+        if ($Heading) {
+            $h = New-Object System.Windows.Controls.TextBlock
+            $h.Text = $Heading
+            $h.FontSize = 16
+            $h.FontWeight = [System.Windows.FontWeights]::Bold
+            $h.TextWrapping = [System.Windows.TextWrapping]::Wrap
+            $h.Margin = New-Object System.Windows.Thickness(0, 0, 0, 10)
+            [void]$root.Children.Add($h)
+        }
+
+        $body = New-Object System.Windows.Controls.TextBox
+        $body.Text = (@($Lines) -join "`r`n")
+        $body.IsReadOnly = $true
+        $body.TextWrapping = [System.Windows.TextWrapping]::Wrap
+        $body.VerticalScrollBarVisibility = [System.Windows.Controls.ScrollBarVisibility]::Auto
+        $body.MaxHeight = 320
+        $body.BorderThickness = New-Object System.Windows.Thickness(0)
+        $body.FontFamily = New-Object System.Windows.Media.FontFamily('Consolas')
+        [void]$root.Children.Add($body)
+
+        $buttons = New-Object System.Windows.Controls.StackPanel
+        $buttons.Orientation = [System.Windows.Controls.Orientation]::Horizontal
+        $buttons.HorizontalAlignment = [System.Windows.HorizontalAlignment]::Right
+        $buttons.Margin = New-Object System.Windows.Thickness(0, 14, 0, 0)
+
+        if ($ReportPath) {
+            $open = New-Object System.Windows.Controls.Button
+            $open.Content = 'Open the report'
+            $open.Padding = New-Object System.Windows.Thickness(12, 4, 12, 4)
+            $open.Margin = New-Object System.Windows.Thickness(0, 0, 8, 0)
+            $whdAlertReport = $ReportPath
+            # Opened through the desktop shell, so the report shows in a normal (non-admin) window.
+            $open.Add_Click({ try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('"{0}"' -f $whdAlertReport) } catch { } }.GetNewClosure())
+            [void]$buttons.Children.Add($open)
+        }
+        $close = New-Object System.Windows.Controls.Button
+        $close.Content = 'Close'
+        $close.IsDefault = $true
+        $close.IsCancel = $true
+        $close.Padding = New-Object System.Windows.Thickness(12, 4, 12, 4)
+        $whdAlertWin = $win
+        $close.Add_Click({ try { $whdAlertWin.Close() } catch { } }.GetNewClosure())
+        [void]$buttons.Children.Add($close)
+        [void]$root.Children.Add($buttons)
+
+        $win.Content = $root
+        [void]$win.ShowDialog()
+        return $true
+    } catch {
+        try { Write-WHDLog ("alert window could not be shown: {0}" -f $_.Exception.Message) 'WARN' } catch { }
+        return $false
+    }
 }
 
 # ---- restore point + registry backup (before first real change) ------------
@@ -244,8 +418,10 @@ function Invoke-WHDChange {
         return (New-WHDResult -Action $Description -Status 'planned')
     }
     New-WHDRestorePoint
+    $script:WHDFwScanCache = $null      # v1.5: a change is being made - the short-lived look at the firewall rules (Firewall.ps1) is not reused
     try {
         & $Action
+        $script:WHDFwScanCache = $null
         Write-WHDLog ("done: {0}" -f $Description) 'OK'
         Add-WHDJournal -Description $Description -Data $Journal
         return (New-WHDResult -Action $Description -Status 'done')
@@ -397,7 +573,7 @@ function Add-WHDDeprovisionMark {
 function Invoke-WHDReApplyChanged {
     param([object[]]$Results)
     if (-not $Results) { $Results = @(Invoke-WHDVerify -All -Quiet) }
-    $auto = @('reg', 'service', 'task', 'pnpdev', 'deprov', 'fwlog', 'mppref', 'asr', 'tz')
+    $auto = @('reg', 'service', 'task', 'pnpdev', 'deprov', 'fwlog', 'mppref', 'asr', 'tz', 'fwoff')
     $bad  = @($Results | Where-Object { $_.Result -eq 'CHANGED' })
     $todo = @($bad | Where-Object { $auto -contains "$($_.Entry.Kind)" })
     $hand = @($bad | Where-Object { $auto -notcontains "$($_.Entry.Kind)" })
@@ -447,6 +623,16 @@ function Invoke-WHDReApplyChanged {
                              NewAllowed = $flA; NewBlocked = $flB; NewSizeKB = $flS }
                     Invoke-WHDChange -Description ("firewall log ({0}): allowed={1} dropped={2} size={3} KB" -f $flP, $flA, $flB, $flS) -Force -Journal $jr -Action {
                         Set-NetFirewallProfile -Name $flP -LogAllowed $flA -LogBlocked $flB -LogMaxSizeKilobytes $flS -EA Stop
+                    } | Out-Null
+                }
+                'fwoff' {
+                    # v1.5: a firewall rule WHD switched off (it was not made by WHD) is on again -> switch it off again
+                    $raRn = "$($e.RuleName)"; $raOn = ("$($e.NewEnabled)" -eq 'True')
+                    $jr = @{ Kind = 'fwoff'; RuleName = $raRn; RuleDisplay = "$($e.RuleDisplay)"; Direction = "$($e.Direction)"; OldEnabled = $(if ($raOn) { 'False' } else { 'True' }); NewEnabled = $(if ($raOn) { 'True' } else { 'False' }) }
+                    Invoke-WHDChange -Description ("firewall rule {0} -> {1}" -f "$($e.RuleDisplay)", $(if ($raOn) { 'switched on' } else { 'switched OFF' })) -Force -Journal $jr -Action {
+                        $raRule = @(Get-WHDFwRuleExact -Name $raRn)
+                        if (-not $raRule.Count) { throw 'the rule is no longer there' }
+                        $raRule | Set-NetFirewallRule -Enabled $(if ($raOn) { 'True' } else { 'False' }) -EA Stop
                     } | Out-Null
                 }
                 'mppref' { if (Get-Command Set-WHDMpPreference -EA SilentlyContinue) { Set-WHDMpPreference -Setting $e.Setting -Value ([int]$e.NewValue) | Out-Null } }
@@ -555,6 +741,20 @@ function Get-WHDSessionOwner {
     return 'legacy-this'
 }
 
+# Does a saved update-guard status (state.json content) belong to THIS PC / this Windows install?
+# Tagged status: the MachineId decides. Untagged (older) status: a last check older than this Windows
+# install = another PC / an earlier install. No status at all counts as this PC's. Read-only.
+function Test-WHDGuardStateIsThisPC {
+    param($State)
+    if (-not $State) { return $true }
+    if ("$($State.MachineId)") { return ("$($State.MachineId)".ToLower() -eq (Get-WHDMachineId)) }
+    $inst = Get-WHDWindowsInstallDate
+    $lc = $null
+    try { $lc = [datetime]::ParseExact("$($State.LastCheck)", 'yyyy-MM-dd HH:mm', $null) } catch { $lc = $null }
+    if ($inst -and $lc -and $lc -lt $inst) { return $false }
+    return $true
+}
+
 function Add-WHDJournal {
     param([string]$Description, [hashtable]$Data)
     try {
@@ -609,6 +809,7 @@ function Get-WHDUndoMode {
         'tz'      { 'auto' }
         'deprov'  { 'auto' }
         'fwlog'   { 'auto' }
+        'fwoff'   { 'auto' }
         default   { 'manual' }
     }
 }
@@ -746,6 +947,16 @@ function _WHDUndoOne {
                 Set-NetFirewallProfile -Name $flP -LogAllowed $flA -LogBlocked $flB -LogMaxSizeKilobytes $flS -EA Stop
             } | Out-Null
         }
+        'fwoff' {
+            # v1.5: a firewall rule not made by WHD that WHD switched off (or on) - put its switch back
+            $foRn = "$($Entry.RuleName)"; $foBack = ("$($Entry.OldEnabled)" -eq 'True')
+            $jr = @{ Kind = 'fwoff'; RuleName = $foRn; RuleDisplay = "$($Entry.RuleDisplay)"; Direction = "$($Entry.Direction)"; OldEnabled = "$($Entry.NewEnabled)"; NewEnabled = "$($Entry.OldEnabled)" }
+            Invoke-WHDChange -Description ("firewall rule {0} -> {1}" -f "$($Entry.RuleDisplay)", $(if ($foBack) { 'switched on' } else { 'switched OFF' })) -Force -Journal $jr -Action {
+                $foRule = @(Get-WHDFwRuleExact -Name $foRn)
+                if (-not $foRule.Count) { throw 'the rule is no longer there (removed since) - nothing to switch' }
+                $foRule | Set-NetFirewallRule -Enabled $(if ($foBack) { 'True' } else { 'False' }) -EA Stop
+            } | Out-Null
+        }
         'tz' {
             if (-not "$($Entry.OldId)") { Write-WHDLog 'old time zone unknown, cannot undo' 'ERR'; return }
             Set-WHDTimeZoneId -Id "$($Entry.OldId)"
@@ -823,17 +1034,92 @@ function Invoke-WHDUndoSession {
     Invoke-WHDUndo -Entries @(Get-WHDJournal -SessionPath $SessionPath)
 }
 
+# v1.5: journal entries of kind 'fwoff' (a firewall rule not made by WHD that WHD switched off) that still stand on
+# this PC: rule name (lower case) -> its entries, oldest first. Entries that were undone are left out.
+function Get-WHDFwOffEntries {
+    $foMap = @{}
+    try {
+        foreach ($foS in @(Get-WHDUndoSessions | Sort-Object Stamp)) {
+            foreach ($foE in @(Get-WHDJournal -SessionPath $foS.Path)) {
+                if ("$($foE.Kind)" -ne 'fwoff' -or $foE.Undone) { continue }
+                $foK = "$($foE.RuleName)".ToLower()
+                if (-not $foMap.ContainsKey($foK)) { $foMap[$foK] = New-Object System.Collections.Generic.List[object] }
+                $foMap[$foK].Add($foE)
+            }
+        }
+    } catch { }
+    return $foMap
+}
+# The rule names (lower case) WHD still holds switched OFF: the latest standing entry says "off" and was not
+# written by an undo. Verify and the update guard report such a rule when it is ON again.
+function Get-WHDFwOffLive {
+    $flOut = @{}
+    $flMap = Get-WHDFwOffEntries
+    foreach ($flE in $flMap.GetEnumerator()) {      # (not .Keys: a rule could be named "Keys")
+        $flList = $flE.Value
+        $flLast = $flList[$flList.Count - 1]
+        if (-not $flLast.ByUndo -and "$($flLast.NewEnabled)" -ne 'True') { $flOut["$($flE.Key)"] = $true }
+    }
+    return $flOut
+}
+# Rule names (lower case) of firewall rules not made by WHD that you REMOVED with WHD on this PC (answer r in
+# "Rules WHD did not make"; the journal entry carries RemovedRule).
+function Get-WHDFwRemovedNames {
+    $rnOut = @{}
+    try {
+        foreach ($rnS in @(Get-WHDUndoSessions)) {
+            foreach ($rnE in @(_WHDReadJsonl (Join-Path $rnS.Path 'journal.jsonl'))) {
+                if ("$($rnE.RemovedRule)") { $rnOut["$($rnE.RemovedRule)".ToLower()] = $true }
+            }
+        }
+    } catch { }
+    return $rnOut
+}
+# You keep these rules ON from now on: their standing "switched off" entries are marked as undone, so Verify, the
+# update guard and re-apply no longer hold them off. Returns the number of entries marked.
+function Clear-WHDFwOffEntries {
+    param([string[]]$Names)
+    $cfN = 0
+    $cfMap = Get-WHDFwOffEntries
+    foreach ($cfName in @($Names | Where-Object { $_ })) {
+        $cfK = "$cfName".ToLower()
+        if (-not $cfMap.ContainsKey($cfK)) { continue }
+        foreach ($cfE in $cfMap[$cfK].ToArray()) {
+            if ("$($cfE.NewEnabled)" -eq 'True') { continue }
+            _WHDMarkUndone $cfE
+            $cfN++
+        }
+    }
+    return $cfN
+}
+
+# Puts back the firewall saved at the start of a session (a whole-policy import).
+# v1.5: it is the same kind of change as the Firewall menu's .wfw import, so it tells the same things: what it does to
+# the update gate (before the question), the gate's record is put right afterwards, the inbound rules it brings back
+# count as kept, and - unless -NoRepairOffer (the window version asks that itself) - the gate's own question follows
+# when the gate was left without its rules.
 function Restore-WHDSessionFirewall {
-    param([Parameter(Mandatory)][string]$SessionPath)
+    param([Parameter(Mandatory)][string]$SessionPath, [switch]$NoRepairOffer)
+    $script:WHDFwToolStatus = 'skipped'
     $f = Join-Path $SessionPath 'firewall-before.wfw'
     if (-not (Test-Path -LiteralPath $f)) { Write-WHDLog 'This session has no firewall backup.' 'WARN'; return }
     Write-WHDLog ("RESTORE FIREWALL from {0}" -f $f) 'ACT'
-    Write-WHDRisk 'hard' 'Replaces the ENTIRE current firewall policy with the one saved before that session. Later firewall changes are lost.'
-    if (-not (Confirm-WHDProceed 'replace the whole firewall policy with this backup')) { Write-WHDLog 'skipped.' 'WARN'; return }
-    Invoke-WHDChange -Description ("netsh advfirewall import {0}" -f $f) -Force -Action {
+    Write-WHDRisk 'hard' 'Replaces the ENTIRE current firewall policy with the one saved at the start of that session (before its first firewall change). Every later firewall change is lost - rules, the outbound setting and what the update gate set.'
+    $rfNote = [pscustomobject]@{ Ask = ''; Before = $null; Pending = @() }
+    if (Get-Command Write-WHDCrossToolNote -EA SilentlyContinue) { try { $rfNote = Write-WHDCrossToolNote -Tool 'wfw' } catch { } }
+    if (-not (Confirm-WHDProceed ('replace the whole firewall policy with this backup' + "$($rfNote.Ask)"))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $rfRes = Invoke-WHDChange -Description ("netsh advfirewall import {0}" -f $f) -Force -Action {
+        # the firewall as it is now is saved first, like before every other firewall change of a session (once per session)
+        if (Get-Command Backup-WHDFirewallOnce -EA SilentlyContinue) { Backup-WHDFirewallOnce }
         $ni = Invoke-WHDNative -Exe 'netsh.exe' -ArgList @('advfirewall', 'import', "$f")
         if ($ni.Code -ne 0) { throw ("netsh exit {0}: {1}" -f $ni.Code, ($ni.Out -join ' ')) }
-    } | Out-Null
+    } | Select-Object -Last 1
+    $script:WHDFwToolStatus = "$($rfRes.Status)"
+    if ($script:WHDExecute -and "$($rfRes.Status)" -eq 'done') {
+        if (Get-Command Update-WHDGateAfterFirewallChange -EA SilentlyContinue) { Update-WHDGateAfterFirewallChange -Before $rfNote.Before -What 'the restore' }
+        if (Get-Command Set-WHDFwKnownFromNow -EA SilentlyContinue) { Set-WHDFwKnownFromNow -Why 'restore' -Pending @($rfNote.Pending) }
+        if (-not $NoRepairOffer -and (Get-Command Invoke-WHDGateRepairOffer -EA SilentlyContinue)) { Invoke-WHDGateRepairOffer -After 'the restore' }
+    }
 }
 
 function Restore-WHDSessionHosts {
@@ -1010,6 +1296,17 @@ function Test-WHDJournalEntry {
             $r.Now = if ($n) { 'present' } else { 'missing' }
             $r.Result = if ($n) { 'PASS' } else { 'CHANGED' }
         }
+        'fwoff' {
+            # v1.5: a rule not made by WHD that WHD switched off. Gone = fine (nothing left to be on).
+            $r.Target = "firewall rule '$($Entry.RuleDisplay)' ($($Entry.Direction)) switched $(if ("$($Entry.NewEnabled)" -eq 'True') { 'on' } else { 'off' }) by WHD"
+            $fx = @(); if (Get-Command Get-WHDFwRuleExact -EA SilentlyContinue) { $fx = @(Get-WHDFwRuleExact -Name "$($Entry.RuleName)") }
+            if (-not $fx.Count) { $r.Now = '(rule is gone)'; $r.Result = 'PASS' }
+            else {
+                $fxOn = "$($fx[0].Enabled)"
+                $r.Now = if ($fxOn -eq 'True') { 'ON' } else { 'off' }
+                $r.Result = if ($fxOn -eq "$($Entry.NewEnabled)") { 'PASS' } else { 'CHANGED' }
+            }
+        }
         'file' {
             $r.Target = "file $($Entry.Path)"
             if (-not (Test-Path -LiteralPath $Entry.Path)) { $r.Now = '(missing)'; $r.Result = 'CHANGED' }
@@ -1135,6 +1432,7 @@ function _WHDVerifyKey {
         'auditpol'    { "audit|$($e.Guid)".ToLower() }
         'eventlog'    { "evt|$($e.LogName)".ToLower() }
         'fwrule'      { "fw|$($e.RuleName)".ToLower() }
+        'fwoff'       { "fwoff|$($e.RuleName)".ToLower() }
         'mppref'      { "mp|$($e.Setting)".ToLower() }
         'asr'         { "asr|$($e.RuleId)".ToLower() }
         'netacct'     { "pw|$($e.Setting)".ToLower() }

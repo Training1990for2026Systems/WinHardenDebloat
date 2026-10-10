@@ -132,7 +132,7 @@ function Show-WHDPrivacyMenu {
         Write-Host ("[{0}]" -f $st) -ForegroundColor $col
     }
     Write-Host '  ----------------------------------------------------------------'
-    Write-Host '   #  apply one      A. apply all      B. back'
+    Write-Host '   #  apply one      several: 1,3,5 or 2-4 (one y/N for the list)      A. apply all      B. back'
     Write-Host '   (Undo: main menu U. Policy values are documented for Pro+; best-effort on Home.)' -ForegroundColor DarkGray
 }
 
@@ -148,6 +148,58 @@ function Invoke-WHDGeneralRemove {
     if (-not (Confirm-WHDProceed ("remove {0}" -f $Entry.Name))) { Write-WHDLog 'skipped.' 'WARN'; return }
     Remove-WHDAppxAllUsers -NameLike $Entry.Package
     Remove-WHDProvisioned  -NameLike $Entry.Package
+}
+
+# ---- several at once: one plan list, one y/N ---------------------------------
+# The per-item functions (Invoke-WHDGeneralRemove / Invoke-WHDPrivacyItem) do the work, exactly as for a
+# single item; the batch shows every item's own note first and asks ONCE for the whole list.
+function Invoke-WHDGeneralBatch {
+    param([object[]]$Entries)
+    $Entries = @($Entries | Where-Object { $_ })
+    if (-not $Entries.Count) { Write-WHDLog 'Nothing selected.' 'WARN'; return }
+    Write-WHDLog ("GENERAL APPS - remove {0} selected app(s)" -f $Entries.Count) 'ACT'
+    foreach ($whdGbE in $Entries) {
+        Write-WHDLog ("   {0}   ({1})" -f $whdGbE.Name, $whdGbE.Package) 'INFO'
+        Write-WHDRisk $whdGbE.Risk $whdGbE.Note
+    }
+    $whdGbTier = 'reversible'
+    if (@($Entries | Where-Object { "$($_.Risk)" -ne 'reversible' }).Count) { $whdGbTier = 'caution' }
+    Write-WHDRisk $whdGbTier "Store apps are removed for ALL users of the PC and the app's local data is deleted; undo = reinstall from the Store."
+    if (-not (Confirm-WHDProceed ("remove the {0} app(s) listed above" -f $Entries.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $whdGbF0 = [int]$script:WHDCounts['failed']; $whdGbS0 = [int]$script:WHDCounts['skipped']
+    $whdGbPrevC = $script:WHDConfirm; $script:WHDConfirm = { param($m) $true }
+    try { foreach ($whdGbE in $Entries) { Invoke-WHDGeneralRemove -Entry $whdGbE | Out-Null } }
+    finally { $script:WHDConfirm = $whdGbPrevC }
+    $whdGbBad = ([int]$script:WHDCounts['failed'] - $whdGbF0) + ([int]$script:WHDCounts['skipped'] - $whdGbS0)
+    if ($script:WHDExecute -and $whdGbBad -gt 0) { Write-WHDLog ("GENERAL APPS - batch finished ({0} app(s)), but {1} step(s) FAILED or were blocked - see the lines above." -f $Entries.Count, $whdGbBad) 'WARN' }
+    elseif ($script:WHDExecute) { Write-WHDLog ("GENERAL APPS - batch finished ({0} app(s))." -f $Entries.Count) 'OK' }
+    else                    { Write-WHDLog ("GENERAL APPS - dry-run only: {0} app(s) previewed, nothing was changed." -f $Entries.Count) 'DRY' }
+}
+function Invoke-WHDPrivacyBatch {
+    param([object[]]$Items)
+    $Items = @($Items | Where-Object { $_ })
+    if (-not $Items.Count) { Write-WHDLog 'Nothing selected.' 'WARN'; return }
+    Write-WHDLog ("PRIVACY - apply {0} selected setting(s)" -f $Items.Count) 'ACT'
+    $whdPbTodo = New-Object System.Collections.Generic.List[object]
+    foreach ($whdPbIt in $Items) {
+        if ((Get-WHDRegOpsState -Ops @($whdPbIt.Ops)) -eq 'set') { Write-WHDLog ("   {0}   [already set - nothing to change]" -f $whdPbIt.Name) 'INFO'; continue }
+        Write-WHDLog ("   {0}" -f $whdPbIt.Name) 'INFO'
+        Write-WHDRisk $whdPbIt.Risk $whdPbIt.Note
+        $whdPbTodo.Add($whdPbIt)
+    }
+    if (-not $whdPbTodo.Count) { Write-WHDLog 'Every selected setting is already set - nothing to change.' 'OK'; return }
+    $whdPbTier = 'reversible'
+    if (@($whdPbTodo | Where-Object { "$($_.Risk)" -ne 'reversible' }).Count) { $whdPbTier = 'caution' }
+    Write-WHDRisk $whdPbTier 'Registry values only (Undo center puts the old values back).'
+    if (-not (Confirm-WHDProceed ("apply the {0} privacy setting(s) listed above" -f $whdPbTodo.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $whdPbF0 = [int]$script:WHDCounts['failed']; $whdPbS0 = [int]$script:WHDCounts['skipped']
+    $whdPbPrevC = $script:WHDConfirm; $script:WHDConfirm = { param($m) $true }
+    try { foreach ($whdPbIt in $whdPbTodo) { Invoke-WHDPrivacyItem -Item $whdPbIt | Out-Null } }
+    finally { $script:WHDConfirm = $whdPbPrevC }
+    $whdPbBad = ([int]$script:WHDCounts['failed'] - $whdPbF0) + ([int]$script:WHDCounts['skipped'] - $whdPbS0)
+    if ($script:WHDExecute -and $whdPbBad -gt 0) { Write-WHDLog ("PRIVACY - batch finished ({0} setting(s)), but {1} step(s) FAILED or were blocked - see the lines above." -f $whdPbTodo.Count, $whdPbBad) 'WARN' }
+    elseif ($script:WHDExecute) { Write-WHDLog ("PRIVACY - batch finished ({0} setting(s))." -f $whdPbTodo.Count) 'OK' }
+    else                    { Write-WHDLog ("PRIVACY - dry-run only: {0} setting(s) previewed, nothing was changed." -f $whdPbTodo.Count) 'DRY' }
 }
 
 function Invoke-WHDRemoveRecommended {
@@ -257,6 +309,8 @@ function Show-WHDGeneralMenu {
     if (-not $foundHdr) { Write-Host '  -- Found on this PC (not made by Microsoft): none --' -ForegroundColor DarkGray }
     Write-Host '  ----------------------------------------------------------------'
     Write-Host '   * = recommended for a lean debloat'
+    Write-Host '   One app    : its number'
+    Write-Host '   Several    : 1,3,5   2-6   *   *,3,7     (* = every recommended app; one y/N for the whole list)'
     Write-Host '   A. Remove ALL recommended (*)          P. Privacy/telemetry hardening'
     Write-Host '   D. Disable DiagTrack telemetry service  S. More privacy settings'
     Write-Host '   B. Back'

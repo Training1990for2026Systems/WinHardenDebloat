@@ -17,6 +17,8 @@
  Decisions locked with the user (2026-09-21):
    D1 terminal module now      D2 adapter+registry + firewall block rules (keep ::1)
    D3 export BOTH json + .wfw   D4 design toward default-deny outbound
+ v1.5 (2026-10-06): the tools here say in their own question what they change of the
+   update gate (Updates.ps1), and section 11 finds allow rules WHD did not make.
 
  NetSecurity / NetAdapter cmdlets used here ship on Windows 11 Home; no
  AppLocker / gpedit / secpol dependency. All operations work with no internet.
@@ -143,7 +145,7 @@ function Remove-WHDFwGroup {
     Invoke-WHDChange -Description ("remove {0} firewall rule(s) in group '{1}'" -f $rules.Count, $Group) -Action {
         Backup-WHDFirewallOnce
         Get-NetFirewallRule -Group $Group -EA Stop | Remove-NetFirewallRule -EA Stop
-    }
+    } | Out-Null      # no result row on the screen (no caller uses it)
 }
 
 # Create a rule idempotently (remove same-named first), routed through the engine.
@@ -167,6 +169,23 @@ function New-WHDFwRule {
         $p['ErrorAction'] = 'Stop'
         New-NetFirewallRule @p | Out-Null
     } | Out-Null
+}
+
+# v1.5: what a tool of this menu is about to change of the update gate (text from Updates.ps1; empty when
+# that module is not loaded or there is nothing to say). The lines are logged here; Ask goes into the question.
+function Write-WHDCrossToolNote {
+    param([string]$Tool)
+    $ctOut = [pscustomobject]@{ Ask = ''; Before = $null; Pending = @() }
+    # (inbound rules listed as not decided now: a wipe / reset / import / restore must not count them as kept)
+    try { if ((Get-Command Get-WHDFwKnown -EA SilentlyContinue) -and (Get-WHDFwKnown).Inbound) { $ctOut.Pending = @(Get-WHDForeignRules | Where-Object { -not $_.Leak } | ForEach-Object { "$($_.Name)" }) } } catch { }
+    try {
+        if (-not (Get-Command Get-WHDCrossToolNote -EA SilentlyContinue)) { return $ctOut }
+        $ctOut.Before = Get-WHDGateState
+        $ctN = Get-WHDCrossToolNote -Tool $Tool
+        foreach ($ctL in @($ctN.Lines)) { Write-WHDLog $ctL 'WARN' }
+        $ctOut.Ask = "$($ctN.Ask)"
+    } catch { }
+    return $ctOut
 }
 
 # =============================================================================
@@ -246,10 +265,16 @@ function Show-WHDFirewallSummary {
     Write-Host ('  Rules: {0} total, {1} enabled' -f $all.Count, $en.Count) -ForegroundColor White
     Write-Host ('   inbound  {0,4}   |  allow {1,4}' -f @($all | ? {$_.Direction -eq 'Inbound'}).Count, @($all | ? {$_.Action -eq 'Allow'}).Count)
     Write-Host ('   outbound {0,4}   |  block {1,4}' -f @($all | ? {$_.Direction -eq 'Outbound'}).Count, @($all | ? {$_.Action -eq 'Block'}).Count)
-    foreach ($g in @($script:WHDFwGroupIPv6,$script:WHDFwGroupAllow,$script:WHDFwGroupBlock,$script:WHDFwGroupBase,$script:WHDFwGroupApp)) {
+    foreach ($g in @(Get-WHDFwOwnGroups)) {      # v1.5: the update gate's own rules are counted too
         $c = @(Get-NetFirewallRule -Group $g -EA SilentlyContinue).Count
         if ($c -gt 0) { Write-Host ('   {0,-28} {1} rule(s)' -f $g, $c) -ForegroundColor Cyan }
     }
+    # The update gate position (read-only; reading it creates nothing).
+    if (Get-Command Get-WHDGateState -EA SilentlyContinue) {
+        try { Write-Host ('   Update gate   : {0}' -f (Get-WHDGateState).Text) -ForegroundColor Gray } catch { }
+    }
+    # v1.5: the gate is not what its record says / an allow rule that WHD did not make is ON (read-only)
+    Show-WHDFwAttentionLines
     # Live DNS readout so you can confirm the adapter is on the pinned resolver.
     $dns = @(Get-DnsClientServerAddress -AddressFamily IPv4 -EA SilentlyContinue | Where-Object { @($_.ServerAddresses).Count -gt 0 })
     if ($dns.Count) {
@@ -344,16 +369,26 @@ function Invoke-WHDFirewallReset {
     param([switch]$ApplyBaseline)
     Write-WHDLog 'Reset firewall to Windows defaults (clean slate).' 'ACT'
     Write-WHDRisk 'hard' 'netsh advfirewall reset - removes ALL custom rules; a .wfw backup is taken first.'
-    if (-not (Confirm-WHDProceed 'reset the firewall to Windows defaults (removes ALL custom rules)')) { Write-WHDLog 'skipped.' 'WARN'; return }
-    Invoke-WHDChange -Description 'netsh advfirewall reset (restore default policy)' -Action {
+    $script:WHDFwToolStatus = 'skipped'
+    $whdRsNote = Write-WHDCrossToolNote -Tool 'reset'      # v1.5: says what this does to the update gate / default-deny
+    if (-not (Confirm-WHDProceed ('reset the firewall to Windows defaults (removes ALL custom rules)' + $whdRsNote.Ask))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $whdRsRes = Invoke-WHDChange -Description 'netsh advfirewall reset (restore default policy)' -Action {
         Backup-WHDFirewallOnce
-        & netsh advfirewall reset 1>$null 2>$null
-    } | Out-Null
+        $whdRsN = Invoke-WHDNative -Exe 'netsh.exe' -ArgList @('advfirewall', 'reset')
+        if ($whdRsN.Code -ne 0) { throw ("netsh advfirewall reset failed (exit {0}): {1}" -f $whdRsN.Code, ((@($whdRsN.Out) | Where-Object { $_ }) -join ' ')) }
+    } | Select-Object -Last 1
+    $script:WHDFwToolStatus = "$($whdRsRes.Status)"
+    if ($script:WHDExecute -and "$($whdRsRes.Status)" -ne 'done') { Write-WHDLog 'Firewall reset NOT done - see the line above. Nothing else was changed.' 'ERR'; return }
     Invoke-WHDChange -Description 'enable firewall on all profiles; inbound Block / outbound Allow' -Action {
         Set-NetFirewallProfile -All -Enabled True -DefaultInboundAction Block -DefaultOutboundAction Allow -Confirm:$false -EA Stop
     } | Out-Null
     if ($ApplyBaseline) { Invoke-WHDFirewallAllowList -NoConfirm; Invoke-WHDDisableIPv6 -NoConfirm }
-    Write-WHDLog 'Firewall reset complete.' 'OK'
+    if ($script:WHDExecute -and "$($whdRsRes.Status)" -eq 'done') {
+        # v1.5: the gate's record is put right (a reset opens the gate), and Windows' own rules count as put in by you
+        if (Get-Command Update-WHDGateAfterFirewallChange -EA SilentlyContinue) { Update-WHDGateAfterFirewallChange -Before $whdRsNote.Before -What 'the firewall reset' }
+        Set-WHDFwKnownFromNow -Why 'reset' -Pending $whdRsNote.Pending
+    }
+    if ($script:WHDExecute) { Write-WHDLog 'Firewall reset complete.' 'OK' } else { Write-WHDLog 'DRY-RUN: preview only - the firewall was not reset.' 'DRY' }
 }
 
 # Empty slate: delete EVERY rule (Microsoft defaults included) so only what you
@@ -361,26 +396,58 @@ function Invoke-WHDFirewallReset {
 # This is different from RESET (which repopulates Windows' stock rules).
 function Invoke-WHDFirewallWipe {
     param([switch]$ApplyBaseline)
+    $script:WHDFwToolStatus = 'skipped'
     $all = @(Get-NetFirewallRule -EA SilentlyContinue)
     Write-WHDLog ('WIPE ALL firewall rules (empty slate) - {0} rule(s) present.' -f $all.Count) 'ACT'
     Write-WHDRisk 'hard' 'Deletes EVERY inbound/outbound rule, Windows defaults included. The firewall stays ON and the default inbound/outbound actions are not changed. A .wfw backup is taken first; protected rules are skipped.'
-    if (-not $ApplyBaseline -and (@(Get-WHDFwProfiles | ForEach-Object { "$($_.DefaultOutboundAction)" }) -contains 'Block')) {
+    # (with the update gate CLOSED / on PROGRAMS the gate's own note below says this, and more)
+    $whdWpGate = $false
+    if (Get-Command Test-WHDGateClosed -EA SilentlyContinue) { try { $whdWpGate = [bool](Test-WHDGateClosed) } catch { $whdWpGate = $false } }
+    if (-not $ApplyBaseline -and -not $whdWpGate -and -not (Get-Command Get-WHDCrossToolNote -EA SilentlyContinue) -and (@(Get-WHDFwProfiles | ForEach-Object { "$($_.DefaultOutboundAction)" }) -contains 'Block')) {
         Write-WHDLog 'Outbound is Block (default-deny) now: wiping also deletes the WHD allow rules, so there is NO network until the allow-list is applied again (Firewall 5) or default-deny is reverted (Firewall 8; Updates O if the update gate is closed).' 'WARN'
     }
+    $whdWpNote = Write-WHDCrossToolNote -Tool 'wipe'       # v1.5: says what this does to the update gate and the program allows
     $what = if ($ApplyBaseline) { 'delete ALL firewall rules, then apply the WHD baseline' } else { 'delete ALL firewall rules (empty slate)' }
-    if (-not (Confirm-WHDProceed $what)) { Write-WHDLog 'skipped.' 'WARN'; return }
-    Invoke-WHDChange -Description ("delete ALL {0} firewall rule(s) - empty slate" -f $all.Count) -Action {
+    $whdWpAsk = "$($whdWpNote.Ask)"
+    if ($ApplyBaseline -and $whdWpAsk -match 'NO network') { $whdWpAsk = '' }      # (the baseline right after the wipe puts the allow-list back)
+    if (-not (Confirm-WHDProceed ($what + $whdWpAsk))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $script:WHDFwWipeKept = 0
+    $whdWipeRes = Invoke-WHDChange -Description ("delete ALL {0} firewall rule(s) - empty slate" -f $all.Count) -Action {
         Backup-WHDFirewallOnce
-        foreach ($r in @(Get-NetFirewallRule -EA SilentlyContinue)) {
-            try { Remove-NetFirewallRule -Name $r.Name -EA Stop } catch {}
+        # Deleting several hundred rules one by one takes a while: show progress.
+        $whdWipeRules = @(Get-NetFirewallRule -EA SilentlyContinue)
+        $whdWipeN = 0; $whdWipeKept = 0
+        if ($whdWipeRules.Count -gt 50) { Write-WHDLog ('  deleting {0} rule(s) one by one - this can take several minutes; progress is shown' -f $whdWipeRules.Count) 'INFO' }
+        foreach ($r in $whdWipeRules) {
+            $whdWipeN++
+            try { $r | Remove-NetFirewallRule -EA Stop } catch { $whdWipeKept++ }      # (the rule itself, not its name: -Name would read * ? [ ] in a name as a pattern)
+            try { Write-WHDProgressStep -Activity 'Deleting firewall rules' -Done $whdWipeN -Total $whdWipeRules.Count -Every 50 } catch { }
         }
-    } | Out-Null
+        $script:WHDFwWipeKept = $whdWipeKept
+        if ($whdWipeKept) { Write-WHDLog ('  {0} rule(s) could not be deleted and were left in place' -f $whdWipeKept) 'INFO' }
+    } | Select-Object -Last 1
+    $script:WHDFwToolStatus = "$($whdWipeRes.Status)"
     if ($ApplyBaseline) {
         $p = Join-Path $script:WHDRoot 'profiles\firewall-baseline.json'
         if (Test-Path $p) { Invoke-WHDApplyFirewallProfile -Path $p -NoConfirm }
         else { Write-WHDLog 'firewall-baseline.json not found; wipe only.' 'WARN' }
     }
-    Write-WHDLog 'Wipe complete. Only rules added after this exist.' 'OK'
+    if ($script:WHDExecute -and "$($whdWipeRes.Status)" -eq 'done') {
+        # v1.5: the gate's list of switched-off rules is brought in line (they are deleted), the gate says what it is
+        # missing now, and the kept list starts fresh: what is left after a wipe is what you put in.
+        # (The question "set the gate again" is asked by the caller: Invoke-WHDGateRepairOffer.)
+        if (Get-Command Update-WHDGateAfterFirewallChange -EA SilentlyContinue) { Update-WHDGateAfterFirewallChange -Before $whdWpNote.Before -What 'the wipe' }
+        Set-WHDFwKnownFromNow -Why 'wipe' -Pending $whdWpNote.Pending
+    }
+    # A dry run must not say the wipe happened; a wipe that left rules in place says so.
+    switch ("$($whdWipeRes.Status)") {
+        'done'    {
+            if ([int]$script:WHDFwWipeKept -gt 0) { Write-WHDLog ('Wipe complete, except {0} rule(s) that could not be deleted and were left in place. Apart from those, only rules added after this exist.' -f $script:WHDFwWipeKept) 'OK' }
+            else { Write-WHDLog 'Wipe complete. Only rules added after this exist.' 'OK' }
+        }
+        'planned' { Write-WHDLog 'DRY-RUN: preview only - nothing was deleted. Switch to EXECUTE to wipe for real.' 'DRY' }
+        default   { Write-WHDLog 'Wipe NOT done - see the lines above.' 'WARN' }
+    }
 }
 
 # =============================================================================
@@ -423,14 +490,26 @@ function Import-WHDFirewallPolicy {
         [Parameter(Mandatory)][string]$Path,
         [ValidateSet('Json','Wfw')]$Mode = 'Json'
     )
+    $script:WHDFwToolStatus = 'skipped'
     if (-not (Test-Path $Path)) { Write-WHDLog ("import file not found: {0}" -f $Path) 'ERR'; return }
     $what = if ($Mode -eq 'Wfw') { "replace the ENTIRE firewall policy with {0}" -f $Path } else { "create or replace the firewall rules listed in {0}" -f $Path }
-    if (-not (Confirm-WHDProceed $what)) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $whdImNote = [pscustomobject]@{ Ask = ''; Before = $null; Pending = @() }
+    if ($Mode -eq 'Wfw') { $whdImNote = Write-WHDCrossToolNote -Tool 'wfw' }      # v1.5: says what this does to the update gate
+    if (-not (Confirm-WHDProceed ($what + $whdImNote.Ask))) { Write-WHDLog 'skipped.' 'WARN'; return }
     if ($Mode -eq 'Wfw') {
-        Invoke-WHDChange -Description ("import firewall policy blob: {0}" -f $Path) -Action {
+        $whdImRes = Invoke-WHDChange -Description ("import firewall policy blob: {0}" -f $Path) -Action {
             Backup-WHDFirewallOnce
-            & netsh advfirewall import "$Path" 1>$null 2>$null
-        } | Out-Null
+            $whdImN = Invoke-WHDNative -Exe 'netsh.exe' -ArgList @('advfirewall', 'import', "$Path")
+            if ($whdImN.Code -ne 0) { throw ("netsh advfirewall import failed (exit {0}): {1}" -f $whdImN.Code, ((@($whdImN.Out) | Where-Object { $_ }) -join ' ')) }
+        } | Select-Object -Last 1
+        $script:WHDFwToolStatus = "$($whdImRes.Status)"
+        if ($script:WHDExecute -and "$($whdImRes.Status)" -ne 'done') { Write-WHDLog 'Import NOT done - see the line above. The firewall is as it was.' 'ERR' }
+        if ($script:WHDExecute -and "$($whdImRes.Status)" -eq 'done') {
+            # v1.5: read where the gate stands now and put its record right; the imported rules count as put in by you.
+            # (The question "set the gate again" is asked by the caller: Invoke-WHDGateRepairOffer.)
+            if (Get-Command Update-WHDGateAfterFirewallChange -EA SilentlyContinue) { Update-WHDGateAfterFirewallChange -Before $whdImNote.Before -What 'the import' }
+            Set-WHDFwKnownFromNow -Why 'import' -Pending $whdImNote.Pending
+        }
         return
     }
     $doc = Get-Content -Path $Path -Raw | ConvertFrom-Json
@@ -443,6 +522,19 @@ function Import-WHDFirewallPolicy {
         if (@($r.remoteAddress) -and @($r.remoteAddress).Count){ $p['RemoteAddress'] = @($r.remoteAddress) }
         if ($r.program)       { $p['Program']       = $r.program }
         New-WHDFwRule $p
+    }
+    # v1.5: an imported file may switch on rules the update gate keeps off. Put that right, as the allow-list does.
+    if ((Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) {
+        $whdImpMode = "$((Get-WHDGateState).Mode)"
+        $whdImpApps = @()
+        if ($whdImpMode -ne 'programs') {
+            $whdImpApps = @(Get-NetFirewallRule -Group $script:WHDFwGroupApp -EA SilentlyContinue | Where-Object { "$($_.Enabled)" -eq 'True' } | ForEach-Object { "$($_.Name)" })
+        }
+        Invoke-WHDChange -Description ("update gate is {0}: keep WHD-Allow-HTTPS / WHD-Allow-HTTP switched off{1}" -f $whdImpMode.ToUpper(), $(if ($whdImpApps.Count) { " and switch off {0} imported program allow(s)" -f $whdImpApps.Count } else { '' })) -Force -Action {
+            foreach ($rn in @('WHD-Allow-HTTPS','WHD-Allow-HTTP')) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
+            foreach ($rn in $whdImpApps) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
+            if ($whdImpApps.Count -and (Get-Command Add-WHDGateRemembered -EA SilentlyContinue)) { Add-WHDGateRemembered -Names $whdImpApps }
+        } | Out-Null
     }
     Write-WHDLog ("imported {0} rule(s) from {1}" -f @($doc.rules).Count, $Path) 'OK'
 }
@@ -481,12 +573,13 @@ function Invoke-WHDFirewallAllowList {
         if ($a.raddr) { $p['RemoteAddress'] = $a.raddr }
         New-WHDFwRule $p
     }
-    # v1.1: with the update gate closed, the any-program web rules stay OFF.
+    # v1.1: with the update gate CLOSED or on PROGRAMS, the any-program web rules stay OFF.
     if ((Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) {
-        Invoke-WHDChange -Description 'update gate is closed: keep WHD-Allow-HTTPS / WHD-Allow-HTTP switched off' -Force -Action {
+        $whdGateName = "$((Get-WHDGateState).Mode)".ToUpper()
+        Invoke-WHDChange -Description ("update gate is {0}: keep WHD-Allow-HTTPS / WHD-Allow-HTTP switched off" -f $whdGateName) -Force -Action {
             foreach ($rn in @('WHD-Allow-HTTPS','WHD-Allow-HTTP')) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
         } | Out-Null
-        Write-WHDLog 'Allow-list applied (update gate CLOSED: HTTP/HTTPS stay off except Defender + DoH).' 'OK'
+        Write-WHDLog ("Allow-list applied (update gate {0}: the any-program HTTP/HTTPS rules stay off)." -f $whdGateName) 'OK'
         return
     }
     Write-WHDLog 'Allow-list applied. DHCP in+out, DNS pinned, HTTP/HTTPS open. Re-apply rebuilds this group.' 'OK'
@@ -502,6 +595,7 @@ function Invoke-WHDSetDns {
     if (-not $adapters.Count) { Write-WHDLog 'no up network adapters found.' 'WARN'; return }
     $hasDoH = [bool](Get-Command Add-DnsClientDohServerAddress -EA SilentlyContinue)
     $what = if ($Mode -eq 'Cloudflare') { "set system DNS to {0} on {1} up adapter(s)" -f ($script:WHDDnsServers -join ', '), $adapters.Count } else { "reset system DNS to automatic (DHCP) on {0} up adapter(s)" -f $adapters.Count }
+    if ($Mode -eq 'Reset') { $what += (Write-WHDCrossToolNote -Tool 'dnsreset').Ask }      # v1.5: with outbound Block, name lookups stop
     if (-not (Confirm-WHDProceed $what)) { Write-WHDLog 'skipped.' 'WARN'; return }
 
     if ($Mode -eq 'Cloudflare') {
@@ -575,6 +669,13 @@ function Enable-WHDDefaultDenyOutbound {
         Write-WHDLog ("auto-rollback minutes must be 1 to 720 (got {0}) - using 10." -f $RollbackMinutes) 'WARN'
         $RollbackMinutes = 10
     }
+    # v1.5: while the update gate is CLOSED or on PROGRAMS, outbound is already default-deny and the gate keeps it
+    # that way. Arming the auto-rollback here would set outbound back to Allow after the minutes ran out and so
+    # open the gate without a word. Nothing to do.
+    if ((Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) {
+        Write-WHDLog ("The update gate is {0}: outbound is already default-deny and the gate keeps it that way. Nothing was changed and no auto-rollback was armed. To change it, use the Updates menu (O = open the gate)." -f "$((Get-WHDGateState).Mode)".ToUpper()) 'INFO'
+        return
+    }
     Write-WHDRisk 'hard' ("Sets DefaultOutboundAction=Block. Anything not in the allow-list is cut. Auto-rollback in {0} min unless you confirm keep." -f $RollbackMinutes)
     if (-not $NoConfirm -and -not (Confirm-WHDProceed ("enable default-deny outbound (auto-rollback in {0} min)" -f $RollbackMinutes))) { Write-WHDLog 'skipped.' 'WARN'; return }
     # make sure the essential allow rules (DNS + DHCP) exist and are enabled first
@@ -637,13 +738,21 @@ function Confirm-WHDDefaultDenyKeep {
 
 function Disable-WHDDefaultDenyOutbound {
     if ((Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) {
-        Write-WHDLog 'The update gate is CLOSED - use Updates menu (W) -> O to open it; that also puts back the rules it switched off.' 'WARN'
+        Write-WHDLog ("The update gate is {0} - use Updates menu (W) -> O to open it; that also puts back the rules it switched off." -f "$((Get-WHDGateState).Mode)".ToUpper()) 'WARN'
         return
     }
-    if (-not (Confirm-WHDProceed 'revert default-deny (set outbound back to Allow on all profiles)')) { Write-WHDLog 'skipped.' 'WARN'; return }
+    # v1.5: a policy saved while the gate was closed came in (the gate is recorded as OPEN): its any-program web rules are
+    # off because of that gate. They are switched on again with this, or a later default-deny would have no web.
+    $whdDdWeb = @()
+    if (Get-Command Get-WHDGateHealth -EA SilentlyContinue) {
+        try { if ((Get-WHDGateHealth).Unrecorded) { $whdDdWeb = @(@('WHD-Allow-HTTPS', 'WHD-Allow-HTTP') | Where-Object { @(Get-NetFirewallRule -Name $_ -EA SilentlyContinue | Where-Object { "$($_.Enabled)" -ne 'True' }).Count }) } } catch { $whdDdWeb = @() }
+    }
+    if ($whdDdWeb.Count) { Write-WHDLog ("The firewall is as a closed update gate leaves it (an imported / restored policy): the any-program web rule(s) {0} are switched off. They are switched ON again with this." -f ($whdDdWeb -join ' / ')) 'WARN' }
+    if (-not (Confirm-WHDProceed ('revert default-deny (set outbound back to Allow on all profiles)' + $(if ($whdDdWeb.Count) { ' and switch the any-program web rules back on' } else { '' })))) { Write-WHDLog 'skipped.' 'WARN'; return }
     if ($script:WHDExecute) { Remove-WHDRollbackTask }
-    Invoke-WHDChange -Description 'set DefaultOutboundAction = Allow (revert to permissive)' -Action {
+    Invoke-WHDChange -Description ('set DefaultOutboundAction = Allow (revert to permissive)' + $(if ($whdDdWeb.Count) { '; any-program web rules on' } else { '' })) -Action {
         Set-NetFirewallProfile -All -DefaultOutboundAction Allow -Confirm:$false -EA Stop
+        foreach ($whdDdN in $whdDdWeb) { Set-NetFirewallRule -Name $whdDdN -Enabled True -EA SilentlyContinue }
     } | Out-Null
     Write-WHDLog 'Reverted to default-allow outbound.' 'OK'
 }
@@ -794,7 +903,7 @@ function Invoke-WHDApplyFirewallProfile {
         }
     }
     if ($cfg.allowList -and (Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) {
-        Invoke-WHDChange -Description 'update gate is closed: keep WHD-Allow-HTTPS / WHD-Allow-HTTP switched off' -Force -Action {
+        Invoke-WHDChange -Description ("update gate is {0}: keep WHD-Allow-HTTPS / WHD-Allow-HTTP switched off" -f "$((Get-WHDGateState).Mode)".ToUpper()) -Force -Action {
             foreach ($rn in @('WHD-Allow-HTTPS','WHD-Allow-HTTP')) { Set-NetFirewallRule -Name $rn -Enabled False -EA SilentlyContinue }
         } | Out-Null
     }
@@ -827,7 +936,8 @@ function Invoke-WHDApplyFirewallProfile {
 #  (32,767 KB; Windows then starts a new file and keeps one .old). WHD's older
 #  Security-log / event 5157 method is replaced (its old journal lines still undo).
 #  The firewall log has no program path; where it records a process id (pid), WHD
-#  names the program if that process is still running.
+#  names the program if that process is still running and started before the log
+#  line, or from the names it remembered (see "remembered program names" below).
 # =============================================================================
 $script:WHDFwLogMaxKB = 32767
 $script:WHDFwLogDefault = '%systemroot%\system32\LogFiles\Firewall\pfirewall.log'
@@ -841,7 +951,8 @@ function Get-WHDConnectionLoggingState {
     $on = ($pr.Count -gt 0)
     foreach ($p in $pr) { if ("$($p.LogAllowed)" -ne 'True' -or "$($p.LogBlocked)" -ne 'True' -or [int64]$p.LogMaxSizeKilobytes -ne $script:WHDFwLogMaxKB) { $on = $false } }
     $file = Get-WHDFirewallLogFile
-    $sz = $null; try { $sz = [math]::Round((Get-Item -LiteralPath $file -EA Stop).Length / 1KB) } catch { }
+    # Test-Path first: a log file that does not exist yet must not leave a TerminatingError line in the transcript.
+    $sz = $null; if (Test-Path -LiteralPath $file) { try { $sz = [math]::Round((Get-Item -LiteralPath $file -EA Stop).Length / 1KB) } catch { } }
     [pscustomobject]@{ On = $on; File = $file; UsedKB = $sz
         Profiles = @($pr | ForEach-Object { "{0}: allowed={1} dropped={2} {3} KB" -f $_.Name, $_.LogAllowed, $_.LogBlocked, $_.LogMaxSizeKilobytes }) }
 }
@@ -905,43 +1016,220 @@ function Read-WHDFirewallLog {
     }
     $rows.ToArray()
 }
+# ---- remembered program names ----------------------------------------------------
+# The firewall log only records a process id. While that process runs WHD can name it; once it has
+# closed, the id means nothing - and Windows may give the same id to ANOTHER program later. So:
+#   1. a running process is used only if it started BEFORE the log line was written;
+#   2. every name WHD resolves is remembered for this PC (id + start time + path + when it was last
+#      seen running), so the lines of a program that has closed since keep their name.
+# File: restore\update-guard\blocked-programs.json - WHD's own cache (like a log), dates as invariant
+# text. The view writes it in DRY-RUN too; when it cannot be written the view goes on without it.
+$script:WHDFwNamesName = 'blocked-programs.json'
+$script:WHDFwNamesKeepDays = 7
+$script:WHDFwNamesMax = 400
+$script:WHDFwNamesNoWrite = $false
+function _WHDFwNamesPath { Join-Path $script:WHDRoot ('restore\update-guard\' + $script:WHDFwNamesName) }
+function Read-WHDFwNames {
+    $whdNf = _WHDFwNamesPath
+    $out = New-Object System.Collections.Generic.List[object]
+    if (-not (Test-Path -LiteralPath $whdNf)) { return @() }
+    try {
+        $j = Get-Content -LiteralPath $whdNf -Raw -Encoding UTF8 | ConvertFrom-Json
+        if ("$($j.MachineId)".ToLower() -ne (Get-WHDMachineId)) { return @() }      # another PC's file
+        $whdNi = [Globalization.CultureInfo]::InvariantCulture
+        foreach ($n in @($j.Names)) {
+            $st = [datetime]::MinValue; $se = [datetime]::MinValue
+            if (-not [datetime]::TryParseExact("$($n.Start)", 'yyyy-MM-dd HH:mm:ss', $whdNi, [Globalization.DateTimeStyles]::None, [ref]$st)) { continue }
+            if (-not [datetime]::TryParseExact("$($n.Seen)",  'yyyy-MM-dd HH:mm:ss', $whdNi, [Globalization.DateTimeStyles]::None, [ref]$se)) { continue }
+            if (-not "$($n.Path)") { continue }
+            $out.Add([pscustomobject]@{ Pid = "$($n.Pid)"; Start = $st; Seen = $se; Path = "$($n.Path)"; Exe = "$($n.Exe)" })
+        }
+    } catch { return @() }
+    return @($out.ToArray())
+}
+function Save-WHDFwNames {
+    param([object[]]$Names)
+    if ($script:WHDFwNamesNoWrite) { return }      # it failed once in this session: do not try (and log) again
+    try {
+        $whdNf = _WHDFwNamesPath
+        $whdNd = Split-Path -Parent $whdNf
+        if (-not (Test-Path -LiteralPath $whdNd)) { New-Item -ItemType Directory -Path $whdNd -Force -EA Stop | Out-Null }
+        $whdNi = [Globalization.CultureInfo]::InvariantCulture
+        $rows = @($Names | ForEach-Object { [ordered]@{ Pid = "$($_.Pid)"; Start = $_.Start.ToString('yyyy-MM-dd HH:mm:ss', $whdNi); Seen = $_.Seen.ToString('yyyy-MM-dd HH:mm:ss', $whdNi); Path = "$($_.Path)"; Exe = "$($_.Exe)" } })
+        $o = [ordered]@{ MachineId = (Get-WHDMachineId); Computer = $env:COMPUTERNAME; Names = $rows }
+        ([pscustomobject]$o | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $whdNf -Encoding UTF8 -EA Stop
+    } catch {
+        # best effort: the view works without the memory (folder protection can refuse the write)
+        $script:WHDFwNamesNoWrite = $true
+        try { Write-WHDLog ("  note: the program names could not be saved ({0}). The view works; names of programs that close are not kept in this session." -f $_.Exception.Message) 'INFO' } catch { }
+    }
+}
+# Rule name of a per-program allow (one place, used by the allow and by the view).
+function Get-WHDProgramAllowName {
+    param([string]$Program, [string]$Protocol, [string]$RemotePort)
+    $exe = if ($Program) { Split-Path $Program -Leaf } else { '' }
+    $safe = ($exe -replace '[^A-Za-z0-9._-]', '_')
+    "WHD-App-{0}-{1}-{2}" -f $safe, $Protocol, $RemotePort
+}
+
+# What the WHD allow-list lets out for ANY program right now (enabled outbound rules of that group):
+# protocol, remote ports, remote addresses. Used to mark old blocked lines that would pass today
+# (example: a program's DNS lines from minutes when the firewall had no rules).
+function Get-WHDAllowListCover {
+    $out = New-Object System.Collections.Generic.List[object]
+    foreach ($r in @(Get-NetFirewallRule -Group $script:WHDFwGroupAllow -EA SilentlyContinue | Where-Object { "$($_.Direction)" -eq 'Outbound' -and "$($_.Action)" -eq 'Allow' -and "$($_.Enabled)" -eq 'True' })) {
+        $pf = $r | Get-NetFirewallPortFilter -EA SilentlyContinue
+        $af = $r | Get-NetFirewallAddressFilter -EA SilentlyContinue
+        if (-not $pf) { continue }
+        if ("$($pf.LocalPort)" -and "$($pf.LocalPort)" -ne 'Any') { continue }                 # tied to a local port (DHCP): not a general allow
+        $apf = $null; try { $apf = $r | Get-NetFirewallApplicationFilter -EA SilentlyContinue } catch { $apf = $null }
+        if ($apf -and "$($apf.Program)" -and "$($apf.Program)" -ne 'Any') { continue }         # tied to one program: not a general allow
+        $out.Add([pscustomobject]@{ Protocol = "$($pf.Protocol)"
+            Ports = @(@($pf.RemotePort) | Where-Object { $null -ne $_ } | ForEach-Object { "$_" })
+            Addrs = @(@($af.RemoteAddress) | Where-Object { $null -ne $_ } | ForEach-Object { "$_" }) })
+    }
+    return @($out.ToArray())
+}
+function Test-WHDAllowListCovers {
+    param([object[]]$Cover, [string]$Protocol, [string]$Port, [string[]]$IPs)
+    if (-not @($IPs).Count) { return $false }
+    # Only plain IPv4 addresses / CIDR are compared; any other address form counts as "not covered".
+    $whdCvPat = '^\d{1,3}(\.\d{1,3}){3}(/\d{1,2})?$'
+    foreach ($c in @($Cover)) {
+        if ($c.Protocol -ne 'Any' -and $c.Protocol -ne $Protocol) { continue }
+        if (@($c.Ports).Count -and ($c.Ports -notcontains 'Any') -and ($c.Ports -notcontains $Port)) { continue }
+        if (-not @($c.Addrs).Count -or ($c.Addrs -contains 'Any')) { return $true }
+        $all = $true
+        try {
+            $ranges = @($c.Addrs | Where-Object { $_ -match $whdCvPat } | ForEach-Object { ,(ConvertTo-WHDIpRange $_) } | Where-Object { $_ })
+            foreach ($ip in @($IPs)) {
+                $a = $null
+                if ("$ip" -match $whdCvPat) { $a = ConvertTo-WHDIpRange $ip }
+                if (-not $a -or -not @($ranges | Where-Object { $a[0] -ge $_[0] -and $a[0] -le $_[1] }).Count) { $all = $false; break }
+            }
+        } catch { $all = $false }
+        if ($all) { return $true }
+    }
+    return $false
+}
+
 # Blocked (DROP) connections, grouped by direction + program + protocol + port.
+# Each row gets a State: can (can be allowed from here) | allowed | allowed-off (allow exists, switched off) |
+# covered (the allow-list lets it out now) | windows (service / System / not TCP-UDP) | inbound |
+# ended (program closed, name not known).
 function Get-WHDBlockedConnections {
     param([int]$Hours = 24, [ValidateSet('Outbound','Inbound','Any')]$Direction = 'Outbound', [ValidateSet('DROP','ALLOW')]$Action = 'DROP')
-    $since = (Get-Date).AddHours(-1 * [math]::Abs($Hours))
+    $now = Get-Date
+    $since = $now.AddHours(-1 * [math]::Abs($Hours))
     $local = @(Get-NetIPAddress -EA SilentlyContinue | ForEach-Object { "$($_.IPAddress)" })
-    $procs = @{}; foreach ($pp in @(Get-Process -EA SilentlyContinue)) { $procs["$($pp.Id)"] = $pp }
+    $procs = @{}
+    foreach ($pp in @(Get-Process -EA SilentlyContinue)) {
+        $whdPs = $null; try { $whdPs = $pp.StartTime } catch { $whdPs = $null }       # protected processes do not show it
+        $whdPp = ''; try { $whdPp = "$($pp.Path)" } catch { $whdPp = '' }
+        $procs["$($pp.Id)"] = [pscustomobject]@{ Path = $whdPp; Exe = "$($pp.ProcessName).exe"; Start = $whdPs }
+    }
+    $boot = $null; try { $boot = (Get-CimInstance -ClassName Win32_OperatingSystem -EA Stop).LastBootUpTime } catch { $boot = $null }
+    $names = @(Read-WHDFwNames)
+    $byPid = @{}; foreach ($n in $names) { if (-not $byPid.ContainsKey($n.Pid)) { $byPid[$n.Pid] = New-Object System.Collections.Generic.List[object] }; $byPid[$n.Pid].Add($n) }
+    $seenNow = @{}
     $groups = @{}
     foreach ($e in @(Read-WHDFirewallLog -Since $since)) {
         if ("$($e.action)" -ne $Action) { continue }
         $dir = switch ("$($e.path)") { 'SEND' { 'Outbound' } 'RECEIVE' { 'Inbound' } default { if ($local -contains "$($e.'dst-ip')") { 'Inbound' } else { 'Outbound' } } }
         if ($Direction -ne 'Any' -and $dir -ne $Direction) { continue }
-        $pidv = "$($e.pid)"; $prog = ''; $exe = '(unknown)'
+        $pidv = "$($e.pid)"; $prog = ''; $exe = '(unknown)'; $ended = $false
         if ($pidv -eq '4' -or $pidv -eq '0') { $prog = 'System'; $exe = 'System' }
-        elseif ($pidv -and $procs.ContainsKey($pidv)) { $prog = "$($procs[$pidv].Path)"; $exe = "$($procs[$pidv].ProcessName).exe" }
-        elseif ($pidv) { $exe = "(pid $pidv, ended)" }
+        elseif ($pidv -and $pidv -ne '-') {
+            $lp = $procs[$pidv]
+            if ($lp -and (-not $lp.Start -or $lp.Start -le $e.when.AddSeconds(2))) {
+                $prog = $lp.Path; $exe = $lp.Exe; $seenNow[$pidv] = $lp        # running, and it started before this line
+            } else {
+                $ended = $true; $exe = '(program has closed)'
+                $hit = $null
+                if ($byPid.ContainsKey($pidv)) {
+                    foreach ($c in $byPid[$pidv]) {
+                        if ($c.Start -gt $e.when.AddSeconds(2)) { continue }                         # started after the line
+                        if ($e.when -gt $c.Seen.AddMinutes(30)) { continue }                        # long after it was last seen running
+                        if ($boot -and $c.Start -lt $boot -and $e.when -gt $boot) { continue }      # a restart lies between
+                        if (-not $hit -or $c.Start -gt $hit.Start) { $hit = $c }
+                    }
+                }
+                if ($hit) { $prog = $hit.Path; $exe = $hit.Exe }
+            }
+        }
         $proto = "$($e.protocol)"
-        $port  = if ($dir -eq 'Inbound') { "$($e.'dst-port')" } else { "$($e.'dst-port')" }
+        $port  = "$($e.'dst-port')"
         $ip    = if ($dir -eq 'Inbound') { "$($e.'src-ip')" } else { "$($e.'dst-ip')" }
-        $key   = "$dir|$exe|$proto|$port"
+        $who   = if ($prog -and $prog -ne 'System') { $prog.ToLower() } else { $exe }
+        $key   = "$dir|$who|$proto|$port"
         if (-not $groups.ContainsKey($key)) {
             $groups[$key] = [pscustomobject]@{ Count = 0; Last = $e.when; First = $e.when; Direction = $dir
                 RawApp = $prog; Program = $prog; Exe = $exe; Protocol = $proto; RemotePort = $port
-                IPs = (New-Object System.Collections.Generic.List[string]); Addresses = '' }
+                IPs = (New-Object System.Collections.Generic.List[string]); Addresses = ''
+                Closed = $ended; State = ''; StateText = ''; Sort = 0 }
         }
         $g = $groups[$key]
         $g.Count++
         if ($e.when -gt $g.Last)  { $g.Last  = $e.when }
         if ($e.when -lt $g.First) { $g.First = $e.when }
+        if (-not $ended) { $g.Closed = $false }
         if ($ip -and -not $g.IPs.Contains($ip)) { $g.IPs.Add($ip) }
     }
+    # remember the names resolved just now (running programs that appear in the log)
+    if ($seenNow.Count) {
+        $whdNi = [Globalization.CultureInfo]::InvariantCulture
+        $keep = New-Object System.Collections.Generic.List[object]
+        $done = @{}
+        foreach ($k in @($seenNow.Keys)) {
+            $lp = $seenNow[$k]
+            if (-not $lp.Path -or -not $lp.Start) { continue }
+            $keep.Add([pscustomobject]@{ Pid = "$k"; Start = $lp.Start; Seen = $now; Path = $lp.Path; Exe = $lp.Exe })
+            $done["$k|" + $lp.Start.ToString('yyyy-MM-dd HH:mm:ss', $whdNi)] = $true
+        }
+        foreach ($n in $names) {
+            if ($done.ContainsKey($n.Pid + '|' + $n.Start.ToString('yyyy-MM-dd HH:mm:ss', $whdNi))) { continue }
+            if ($n.Seen -lt $now.AddDays(-1 * [int]$script:WHDFwNamesKeepDays)) { continue }
+            $keep.Add($n)
+        }
+        if ($keep.Count) { Save-WHDFwNames -Names @($keep.ToArray() | Sort-Object Seen -Descending | Select-Object -First ([int]$script:WHDFwNamesMax)) }
+    }
+    if (-not $groups.Count) { return @() }
+    # what can be done with each row
+    $appRules = @{}
+    foreach ($r in @(Get-NetFirewallRule -Group $script:WHDFwGroupApp -EA SilentlyContinue)) { $appRules["$($r.Name)".ToLower()] = "$($r.Enabled)" }
+    $cover = @(); try { $cover = @(Get-WHDAllowListCover) } catch { $cover = @() }
+    $whdBcGate = 'open'
+    if (Get-Command Get-WHDGateState -EA SilentlyContinue) { try { $whdBcGate = "$((Get-WHDGateState).Mode)" } catch { $whdBcGate = 'open' } }
+    $order = @{ 'can' = 1; 'allowed-off' = 2; 'allowed' = 3; 'covered' = 3; 'windows' = 4; 'inbound' = 5; 'ended' = 6 }
+    $progMax = @{}
     $out = foreach ($g in $groups.Values) {
         $show = @($g.IPs | Select-Object -First 3) -join ', '
         if ($g.IPs.Count -gt 3) { $show += (" (+{0} more)" -f ($g.IPs.Count - 3)) }
         $g.Addresses = $show
+        $leaf = if ($g.Program) { Split-Path $g.Program -Leaf } else { '' }
+        if     ($g.Direction -eq 'Inbound')                                { $g.State = 'inbound';  $g.StateText = 'no - inbound' }
+        elseif (-not $g.Program -and $g.Closed)                             { $g.State = 'ended';    $g.StateText = 'no - program has closed (start it again, then load again)' }
+        elseif (-not $g.Program -and $g.Exe -eq '(unknown)')                { $g.State = 'windows';  $g.StateText = 'no - the log has no process id for it' }
+        elseif (-not $g.Program -or $g.Program -eq 'System' -or $leaf -ieq 'svchost.exe' -or $g.Program -notmatch '^[A-Za-z]:\\') { $g.State = 'windows'; $g.StateText = 'no - Windows service / System' }
+        elseif ($g.Protocol -notin @('TCP','UDP') -or -not $g.RemotePort -or $g.RemotePort -eq '-') { $g.State = 'windows'; $g.StateText = 'no - not TCP/UDP' }
+        else {
+            $rn = (Get-WHDProgramAllowName -Program $g.Program -Protocol $g.Protocol -RemotePort $g.RemotePort).ToLower()
+            if     ($appRules.ContainsKey($rn) -and $appRules[$rn] -eq 'True') { $g.State = 'allowed';     $g.StateText = 'allowed already (older lines)' }
+            elseif ($appRules.ContainsKey($rn))                                { $g.State = 'allowed-off'; $g.StateText = $(if ($whdBcGate -eq 'closed') { 'allow exists, switched off (gate CLOSED)' } else { 'allow exists, but it is switched off' }) }
+            elseif (Test-WHDAllowListCovers -Cover $cover -Protocol $g.Protocol -Port $g.RemotePort -IPs @($g.IPs)) { $g.State = 'covered'; $g.StateText = 'no need - the allow-list lets this out now (older lines)' }
+            else                                                              { $g.State = 'can';         $g.StateText = 'yes' }
+        }
+        $pk = if ($g.Program) { $g.Program.ToLower() } else { $g.Exe }
+        if (-not $progMax.ContainsKey($pk) -or $g.Count -gt $progMax[$pk]) { $progMax[$pk] = $g.Count }
         $g
     }
-    @($out | Sort-Object Count -Descending)
+    # order: what can be allowed first, rows of one program together (busiest program first)
+    @($out | Sort-Object @{ e = { $order[$_.State] } },
+                         @{ e = { $pk2 = if ($_.Program) { $_.Program.ToLower() } else { $_.Exe }; $progMax[$pk2] }; Descending = $true },
+                         @{ e = { if ($_.Program) { $_.Program.ToLower() } else { $_.Exe } } },
+                         @{ e = { $_.Count }; Descending = $true },
+                         @{ e = { "$($_.Protocol)" } },
+                         @{ e = { "$($_.RemotePort)".PadLeft(5, '0') } })      # last two: the same order (and numbers) on every load
 }
 
 # \device\harddiskvolumeN\... -> C:\...  (fltmc is a built-in tool; admin only)
@@ -968,14 +1256,54 @@ function ConvertFrom-WHDDevicePath {
 }
 
 function Show-WHDBlockedConnections {
+    # Numbers are given only to the rows that can be allowed from here; the rest is listed below them.
     param([object[]]$Items)
     if (-not @($Items).Count) { Write-Host '  (no blocked connections recorded in that window - is logging on? menu M)' -ForegroundColor DarkGray; return }
-    Write-Host ('  {0,3}  {1,6}  {2,-16} {3,-6} {4,-6} {5,-24} {6}' -f '#','count','last seen','prot','port','program','addresses') -ForegroundColor White
-    $i = 0
-    foreach ($b in @($Items)) {
-        $i++
-        Write-Host ('  {0,3}  {1,6}  {2,-16} {3,-6} {4,-6} {5,-24} {6}' -f $i, $b.Count, $b.Last.ToString('MM-dd HH:mm:ss'), $b.Protocol, $b.RemotePort, $b.Exe, $b.Addresses)
+    $fmt = '  {0,3}  {1,6}  {2,-14} {3,-5} {4,-6} {5,-26} {6}'
+    $can = @($Items | Where-Object { $_.State -eq 'can' })
+    Write-Host ''
+    Write-Host ('  CAN BE ALLOWED ({0}) - that program, that protocol + port, outbound:' -f $can.Count) -ForegroundColor White
+    if ($can.Count) {
+        Write-Host ($fmt -f '#','count','last seen','prot','port','program','addresses') -ForegroundColor DarkGray
+        $i = 0
+        foreach ($b in $can) {
+            $i++
+            Write-Host ($fmt -f $i, $b.Count, $b.Last.ToString('MM-dd HH:mm:ss'), $b.Protocol, $b.RemotePort, $(if ($b.Closed) { $b.Exe + ' (closed)' } else { $b.Exe }), $b.Addresses)
+        }
+    } else { Write-Host '       (nothing)' -ForegroundColor DarkGray }
+    $done = @($Items | Where-Object { $_.State -in @('allowed','allowed-off','covered') })
+    if ($done.Count) {
+        Write-Host ('  NOTHING TO ALLOW ({0}) - older lines; an allow for it exists, or the allow-list lets it out:' -f $done.Count) -ForegroundColor Green
+        foreach ($b in $done) {
+            Write-Host ($fmt -f '', $b.Count, $b.Last.ToString('MM-dd HH:mm:ss'), $b.Protocol, $b.RemotePort, $b.Exe, $b.StateText) -ForegroundColor DarkGray
+        }
     }
+    $win = @($Items | Where-Object { $_.State -in @('windows','inbound') })
+    if ($win.Count) {
+        Write-Host ('  WINDOWS ITSELF ({0}) - services / System, cannot be allowed from here (open the gate for Windows Update / Store):' -f $win.Count) -ForegroundColor White
+        foreach ($b in @($win | Select-Object -First 8)) { Write-Host ($fmt -f '', $b.Count, $b.Last.ToString('MM-dd HH:mm:ss'), $b.Protocol, $b.RemotePort, $b.Exe, $b.Addresses) -ForegroundColor DarkGray }
+        if ($win.Count -gt 8) { Write-Host ('       ... and {0} more line(s)' -f ($win.Count - 8)) -ForegroundColor DarkGray }
+    }
+    $end = @($Items | Where-Object { $_.State -eq 'ended' })
+    if ($end.Count) {
+        $endN = 0; foreach ($b in $end) { $endN += $b.Count }
+        Write-Host ('  PROGRAMS THAT HAVE CLOSED - name not known ({0} blocked connection(s)): {1}' -f $endN, ((@($end | Select-Object -First 6 | ForEach-Object { "$($_.Protocol) $($_.RemotePort)" }) -join ', '))) -ForegroundColor White
+        Write-Host '       Start the program again and open this view while it runs - WHD then remembers its name.' -ForegroundColor DarkGray
+    }
+}
+
+# Menu V: view, then allow one or several rows (e.g. 1,3 or 1-3) with one question.
+function Invoke-WHDBlockedView {
+    $h = (Read-Host '  Hours to look back [24]').Trim(); if (-not ($h -match '^[0-9]{1,4}$')) { $h = 24 }
+    $items = @(Get-WHDBlockedConnections -Hours ([int]$h))
+    Show-WHDBlockedConnections -Items $items
+    $can = @($items | Where-Object { $_.State -eq 'can' })
+    if (-not $can.Count) { return }
+    $pick = (Read-Host '  Numbers to allow (e.g. 1,3 or 1-3), Enter = back').Trim()
+    if (-not $pick) { return }
+    $sel = ConvertFrom-WHDSelection -Text $pick -Max $can.Count
+    if ($null -eq $sel -or -not @($sel).Count) { Write-Host '  invalid.' -ForegroundColor Yellow; return }
+    Add-WHDProgramAllows -Items @($sel | ForEach-Object { $can[$_ - 1] })
 }
 
 # One-click allow: THAT program, THAT protocol + remote port, any destination
@@ -994,21 +1322,91 @@ function Add-WHDProgramAllow {
         Write-WHDLog ("not allowed from the viewer: only TCP/UDP with a port can be allowed ({0} {1})." -f $Item.Protocol, $Item.RemotePort) 'WARN'; return
     }
     if (-not (Test-Path -LiteralPath $Item.Program)) { Write-WHDLog ("note: program path not found on disk (moved or updated?): {0}" -f $Item.Program) 'WARN' }
-    $safe = ($exe -replace '[^A-Za-z0-9._-]', '_')
-    $name = "WHD-App-{0}-{1}-{2}" -f $safe, $Item.Protocol, $Item.RemotePort
+    $name = Get-WHDProgramAllowName -Program $Item.Program -Protocol $Item.Protocol -RemotePort $Item.RemotePort
+    # v1.5: the rule name is built from the FILE name. An allow of that name for a program in another folder would be
+    # replaced by this one (that program would lose its allow without a word): refuse instead.
+    foreach ($whdPaEx in @(Get-NetFirewallRule -Name $name -EA SilentlyContinue)) {
+        $whdPaProg = ''
+        try { $whdPaProg = "$(@($whdPaEx | Get-NetFirewallApplicationFilter -EA SilentlyContinue)[0].Program)" } catch { $whdPaProg = '' }
+        if ($whdPaProg) { try { $whdPaProg = [Environment]::ExpandEnvironmentVariables($whdPaProg) } catch { } }
+        if ($whdPaProg -and $whdPaProg -ne 'Any' -and $whdPaProg.ToLower() -ne "$($Item.Program)".ToLower()) {
+            if (-not (Test-Path -LiteralPath $whdPaProg)) {
+                # the file the old allow was tied to is gone (the program updated into another folder): the allow moves to the new file
+                Write-WHDLog ("note: the WHD allow of that name was tied to {0}, which is no longer on disk. It is replaced by one for {1}." -f $whdPaProg, $Item.Program) 'WARN'
+            } else {
+                Write-WHDLog ("not allowed: a WHD allow for another program with the same file name is there already ({0}, the file exists), and one rule name cannot serve both. Nothing was changed. Undo that allow first (Undo center) if this program should have it instead." -f $whdPaProg) 'ERR'
+                if ($script:WHDExecute) { New-WHDResult -Action ("allow {0} out on {1} {2}" -f $exe, $Item.Protocol, $Item.RemotePort) -Status 'failed' -Detail 'an allow of that name exists for another program file' | Out-Null }
+                $script:WHDFwAllowRefused = [int]$script:WHDFwAllowRefused + 1
+                return
+            }
+        }
+    }
     Write-WHDLog ("ALLOW PROGRAM: {0}  ({1} port {2}, outbound)" -f $Item.Program, $Item.Protocol, $Item.RemotePort) 'ACT'
     Write-WHDRisk 'caution' ("allows only this program, only {0} to remote port {1}, any destination. Removable in the Undo center or with 'remove program allows'." -f $Item.Protocol, $Item.RemotePort)
     if (-not (Confirm-WHDProceed ("allow {0} out on {1} {2}" -f $exe, $Item.Protocol, $Item.RemotePort))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    # With the update gate CLOSED the per-program allows are switched off. A new allow is saved switched off
+    # and the gate remembers it, so setting the gate to PROGRAMS or OPEN switches it on.
+    $whdGateMode = 'open'
+    if (Get-Command Get-WHDGateState -EA SilentlyContinue) { try { $whdGateMode = "$((Get-WHDGateState).Mode)" } catch { $whdGateMode = 'open' } }
+    $whdAppOn = 'True'; if ($whdGateMode -eq 'closed') { $whdAppOn = 'False' }
     New-WHDFwRule -Params @{ Name = $name; DisplayName = ("WHD Allow {0} ({1} {2})" -f $exe, $Item.Protocol, $Item.RemotePort)
-        Group = $script:WHDFwGroupApp; Direction = 'Outbound'; Action = 'Allow'; Enabled = 'True'; Profile = 'Any'
+        Group = $script:WHDFwGroupApp; Direction = 'Outbound'; Action = 'Allow'; Enabled = $whdAppOn; Profile = 'Any'
         Program = $Item.Program; Protocol = $Item.Protocol; RemotePort = $Item.RemotePort } `
         -Journal @{ Kind = 'fwrule'; RuleName = $name }
+    if ($whdGateMode -eq 'closed') {
+        if (-not $script:WHDExecute) {
+            Write-WHDLog 'would: save this allow switched OFF, because the update gate is CLOSED - it starts working when the gate is set to PROGRAMS (Updates menu P) or OPEN (Updates menu O)' 'DRY'
+        } elseif (@(Get-NetFirewallRule -Name $name -EA SilentlyContinue).Count) {
+            $whdRemOk = $true
+            if (Get-Command Add-WHDGateRemembered -EA SilentlyContinue) {
+                try { Add-WHDGateRemembered -Names @($name) }
+                catch { $whdRemOk = $false; Write-WHDLog ("The allow is saved switched OFF, but the update gate could not note it down ({0}). It will NOT come on by itself with PROGRAMS or OPEN: close the gate again (Updates menu C) and then set P or O, so the gate takes it into account." -f $_.Exception.Message) 'ERR' }
+            }
+            if ($whdRemOk) { Write-WHDLog 'The update gate is CLOSED: the allow is saved, but it is switched OFF until the gate is set to PROGRAMS (Updates menu P) or OPEN (Updates menu O).' 'WARN' }
+        }
+    } elseif ($script:WHDExecute -and $whdGateMode -eq 'programs' -and -not $script:WHDFwAllowBatch -and @(Get-NetFirewallRule -Name $name -EA SilentlyContinue).Count) {
+        Write-WHDLog $script:WHDAllowLiveText 'OK'
+    }
+}
+$script:WHDAllowLiveText = 'Live now: the update gate is on PROGRAMS, so the allow works from this moment. No other step is needed - the gate does not have to be set again.'
+$script:WHDFwAllowBatch = $false
+$script:WHDFwAllowRefused = 0      # allows refused in the running batch (a same-named allow of another program file)
+
+# Several rows at once: the lines are listed, ONE question, then every row.
+function Add-WHDProgramAllows {
+    param([object[]]$Items)
+    $whdAllowList = @($Items | Where-Object { $_ })
+    if (-not $whdAllowList.Count) { return }
+    if ($whdAllowList.Count -eq 1) { Add-WHDProgramAllow -Item $whdAllowList[0]; return }
+    Write-WHDLog ("ALLOW {0} PROGRAM LINE(S) (each: that program, that protocol + port, outbound, any destination):" -f $whdAllowList.Count) 'ACT'
+    foreach ($whdAl in $whdAllowList) { Write-WHDLog ("  {0}  {1} {2}   {3}" -f $whdAl.Exe, $whdAl.Protocol, $whdAl.RemotePort, $whdAl.Program) 'INFO' }
+    if (-not (Confirm-WHDProceed ("allow the {0} line(s) listed above" -f $whdAllowList.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    # The question above covers the whole batch: the single allows do not ask again.
+    $whdAlPrev = $script:WHDConfirm; $whdAlPrevBatch = $script:WHDFwAllowBatch
+    $script:WHDConfirm = { param($m) $true }; $script:WHDFwAllowBatch = $true
+    $script:WHDFwAllowRefused = 0
+    try { foreach ($whdAl in $whdAllowList) { Add-WHDProgramAllow -Item $whdAl } }
+    finally { $script:WHDConfirm = $whdAlPrev; $script:WHDFwAllowBatch = $whdAlPrevBatch }
+    if ($script:WHDExecute -and [int]$script:WHDFwAllowRefused -lt $whdAllowList.Count -and (Get-Command Get-WHDGateState -EA SilentlyContinue)) {
+        try {
+            if ("$((Get-WHDGateState).Mode)" -eq 'programs') {
+                $whdAlMade = @($whdAllowList | Where-Object { $_.Program -and @(Get-NetFirewallRule -Name (Get-WHDProgramAllowName -Program $_.Program -Protocol $_.Protocol -RemotePort $_.RemotePort) -EA SilentlyContinue).Count })
+                if ($whdAlMade.Count) { Write-WHDLog $script:WHDAllowLiveText 'OK' }
+            }
+        } catch { }
+    }
 }
 
 function Remove-WHDProgramAllows {
     Write-WHDLog 'REMOVE all per-program allow rules (group WinHardenDebloat-AppAllow)' 'ACT'
-    if (-not (Confirm-WHDProceed 'remove all per-program allow rules')) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $whdPaNote  = Write-WHDCrossToolNote -Tool 'appclear'      # v1.5: on PROGRAMS these rules ARE what the gate lets out
+    $whdPaNames = @(Get-NetFirewallRule -Group $script:WHDFwGroupApp -EA SilentlyContinue | ForEach-Object { "$($_.Name)" })
+    if (-not (Confirm-WHDProceed ('remove all per-program allow rules' + $whdPaNote.Ask))) { Write-WHDLog 'skipped.' 'WARN'; return }
     Remove-WHDFwGroup -Group $script:WHDFwGroupApp | Out-Null
+    # v1.5: deleted rules come off the gate's list of rules to switch back on
+    if ($script:WHDExecute -and $whdPaNames.Count -and (Get-Command Remove-WHDGateRemembered -EA SilentlyContinue) -and -not @(Get-NetFirewallRule -Group $script:WHDFwGroupApp -EA SilentlyContinue).Count) {
+        try { Remove-WHDGateRemembered -Names $whdPaNames } catch { }
+    }
 }
 
 # =============================================================================
@@ -1344,6 +1742,595 @@ function Update-WHDBlocklistRules {
 }
 
 # =============================================================================
+#  11) RULES WHD DID NOT MAKE  (v1.5, from the 2026-10-06 live test)
+# -----------------------------------------------------------------------------
+#  Windows and program installers write firewall rules of their own - also after
+#  WHD wiped the list, and also while the update gate is CLOSED / on PROGRAMS (the
+#  gate switches other outbound allow rules off only at the moment it is set).
+#  An outbound allow rule that appears later lets its program through the gate; an
+#  inbound allow rule lets its program accept connections from outside.
+#
+#  What counts: a rule that is ON, is an ALLOW rule and is in none of WHD's groups -
+#    * inbound : always;
+#    * outbound: only while outbound is Block (gate CLOSED / PROGRAMS, or
+#      default-deny). With outbound open, an outbound allow rule changes nothing.
+#  WHD shows them (at its start, in the Firewall and Updates menus, in Status and in
+#  the update guard) and asks. Per rule you choose:
+#      o = switch OFF     r = remove     k = keep
+#      p = (outbound rule that names one program file) make a WHD allow for that
+#          program on ONE port and switch the wide rule off.
+#
+#  The rules you keep are listed in restore\update-guard\firewall-known.json (this PC
+#  only). The same file says whether INBOUND rules are watched. Until that is switched
+#  on WHD alerts only for the outbound leak - a stock Windows install has a few hundred
+#  inbound rules of its own. The inbound watch starts only when you say so ("K", then
+#  "S": WHD asks whether the rules present now count as kept or are listed too), or
+#  with a wipe / reset / .wfw import / firewall restore (the inbound rules such a tool
+#  leaves behind count as kept; a rule that appears later is reported).
+# =============================================================================
+$script:WHDFwKnownName   = 'firewall-known.json'
+$script:WHDFwForeignSeen = @{}     # rule names already shown as an alert in this session
+$script:WHDFwForeignMax  = 40      # rows shown on screen at once; "*" always means every row
+# One look at the rule list serves the head lines and the check of one menu draw: the result is reused for a few
+# seconds. Every change WHD makes (Invoke-WHDChange) and every save of the kept list throws it away at once.
+$script:WHDFwScanCache   = $null
+$script:WHDFwScanSeconds = 3
+# How the last reset / wipe / .wfw import ended: done | planned (DRY-RUN) | failed | skipped. The callers offer to
+# set the update gate again only after 'done'.
+$script:WHDFwToolStatus  = ''
+
+# The groups of the rules WHD makes itself (the update gate's group is defined in Updates.ps1).
+function Get-WHDFwOwnGroups {
+    $og = @($script:WHDFwGroupIPv6, $script:WHDFwGroupAllow, $script:WHDFwGroupBlock, $script:WHDFwGroupBase, $script:WHDFwGroupApp)
+    if ("$($script:WHDFwGroupGate)") { $og += "$($script:WHDFwGroupGate)" } else { $og += 'WinHardenDebloat-UpdateGate' }
+    @($og)
+}
+# One rule by its exact name. (-Name accepts wildcards, and a rule made by another program may carry
+# * ? [ ] in its name: such a name is looked up by comparing, never as a pattern.)
+function Get-WHDFwRuleExact {
+    param([string]$Name)
+    if (-not "$Name") { return @() }
+    if ("$Name" -notmatch '[\*\?\[\]]') { return @(Get-NetFirewallRule -Name $Name -EA SilentlyContinue | Where-Object { "$($_.Name)" -eq "$Name" }) }
+    return @(Get-NetFirewallRule -EA SilentlyContinue | Where-Object { "$($_.Name)" -eq "$Name" })
+}
+
+# ---- the list of rules you keep ------------------------------------------------
+# The file holds: Names = the rules YOU kept (answer k);  Base = inbound rules that were counted as kept when the
+# inbound watch started (S, N) or by a wipe / reset / import / restore;  Inbound = are inbound rules watched.
+function _WHDFwKnownPath { Join-Path $script:WHDRoot ('restore\update-guard\' + $script:WHDFwKnownName) }
+# -> Exists, Unreadable (the file is there but cannot be read: treated as empty, and said so), Inbound,
+#    Own (kept by you), Base (counted as kept), Names (both together - what is left out of the list), Saved.
+function Get-WHDFwKnown {
+    $kn = [pscustomobject]@{ Exists = $false; Unreadable = $false; Inbound = $false; Own = @(); Base = @(); Names = @(); Saved = '' }
+    $knFile = _WHDFwKnownPath
+    if (-not (Test-Path -LiteralPath $knFile)) { return $kn }
+    try {
+        $knJ = Get-Content -LiteralPath $knFile -Raw -Encoding UTF8 -EA Stop | ConvertFrom-Json -EA Stop
+        if (-not $knJ) { throw 'empty' }
+        if ("$($knJ.MachineId)".ToLower() -ne (Get-WHDMachineId)) { return $kn }      # another PC's file
+        $kn.Exists  = $true
+        $kn.Inbound = [bool]("$($knJ.Inbound)" -eq 'True')      # are the inbound rules watched (see Start-WHDFwInboundWatch)
+        $kn.Saved   = "$($knJ.Saved)"
+        $kn.Own     = @(@($knJ.Names) | ForEach-Object { "$_" } | Where-Object { $_ })
+        $kn.Base    = @(@($knJ.Base)  | ForEach-Object { "$_" } | Where-Object { $_ })
+        $kn.Names   = @(@($kn.Own) + @($kn.Base) | Where-Object { $_ })
+    } catch { $kn.Unreadable = $true }
+    return $kn
+}
+# Writes the list (EXECUTE only). Returns $true when it was written.
+#   -Names   : the rules you kept (always given: the whole new list)
+#   -Base    : the inbound rules counted as kept; left out = as it is now
+#   -Inbound : $true / $false sets whether the inbound rules are watched; left out = as it is now
+# Written to a second file first and then moved over the old one, so a write that is cut short cannot leave half a file.
+function Save-WHDFwKnown {
+    param([string[]]$Names, $Base = $null, $Inbound = $null)
+    if (-not $script:WHDExecute) { return $false }
+    try {
+        $knNow = Get-WHDFwKnown
+        $knInb = $false
+        if ($null -eq $Inbound) { $knInb = [bool]$knNow.Inbound } else { $knInb = [bool]("$Inbound" -eq 'True') }
+        $knFile = _WHDFwKnownPath
+        $knDir  = Split-Path -Parent $knFile
+        if (-not (Test-Path -LiteralPath $knDir)) { New-Item -ItemType Directory -Path $knDir -Force -EA Stop | Out-Null }
+        $knList = @(@($Names) | ForEach-Object { "$_" } | Where-Object { $_ } | Sort-Object -Unique)
+        $knOwnSet = @{}; foreach ($knO in $knList) { $knOwnSet["$knO".ToLower()] = $true }
+        $knBaseIn = @($knNow.Base); if ($null -ne $Base) { $knBaseIn = @($Base) }
+        $knBase = @(@($knBaseIn) | ForEach-Object { "$_" } | Where-Object { $_ -and -not $knOwnSet.ContainsKey("$_".ToLower()) } | Sort-Object -Unique)
+        $knObj  = [ordered]@{ MachineId = (Get-WHDMachineId); Computer = $env:COMPUTERNAME; Inbound = $knInb
+                              Saved = (Get-Date).ToString('yyyy-MM-dd HH:mm', [Globalization.CultureInfo]::InvariantCulture); Names = $knList; Base = $knBase }
+        if ($knNow.Unreadable) {
+            try { Copy-Item -LiteralPath $knFile -Destination ($knFile + '.bad') -Force -EA Stop } catch { }
+            Write-WHDLog ("The file with your kept rules could not be read and is written anew (a copy of the old one: {0}.bad). What it held is lost: the inbound rules are not watched, and only what is saved now counts as kept." -f $knFile) 'WARN'
+        }
+        $knTmp = $knFile + '.new'
+        ([pscustomobject]$knObj | ConvertTo-Json -Depth 3) | Set-Content -LiteralPath $knTmp -Encoding UTF8 -EA Stop
+        if (Test-Path -LiteralPath $knFile) {
+            # one step where the drive can do it (never a moment without the file); otherwise the plain move
+            try { [System.IO.File]::Replace($knTmp, $knFile, [NullString]::Value) }
+            catch { Move-Item -LiteralPath $knTmp -Destination $knFile -Force -EA Stop }
+        } else { Move-Item -LiteralPath $knTmp -Destination $knFile -EA Stop }
+        $script:WHDFwScanCache = $null
+        return $true
+    } catch {
+        try { Write-WHDLog ("The list of kept firewall rules could not be saved ({0}). No firewall rule is affected; the list (and whether inbound rules are watched) stays as it was." -f $_.Exception.Message) 'WARN' } catch { }
+        return $false
+    }
+}
+# Rule names (lower case) WHD still holds switched OFF (journal kind 'fwoff'), and rule names you REMOVED (answer r).
+# A rule on one of these lists that is ON again is never counted as kept by a tool or by "S, N": it is listed, you decide.
+function _WHDFwDecidedAgainst {
+    $daOut = @{}
+    if (Get-Command Get-WHDFwOffLive -EA SilentlyContinue) { try { foreach ($daE in (Get-WHDFwOffLive).GetEnumerator()) { $daOut["$($daE.Key)"] = 'off' } } catch { } }
+    if (Get-Command Get-WHDFwRemovedNames -EA SilentlyContinue) { try { foreach ($daE in (Get-WHDFwRemovedNames).GetEnumerator()) { if (-not $daOut.ContainsKey("$($daE.Key)")) { $daOut["$($daE.Key)"] = 'removed' } } } catch { } }
+    return $daOut
+}
+# Switches the watch on the INBOUND rules on. Only on an explicit answer (console: K, then S; window: the
+# button "Watch inbound rules..."); WHD never starts it by looking at the list. One question.
+#   -CountPresent : the inbound allow rules that are ON now count as kept - only a rule that appears later is reported
+#                   (left out: a rule you had switched off or removed that is ON again - it is listed).
+#   without it    : every one of them is listed as not decided until you keep it, switch it off or remove it.
+function Start-WHDFwInboundWatch {
+    param([switch]$CountPresent)
+    $swKn = Get-WHDFwKnown
+    if ($swKn.Inbound) { Write-WHDLog 'The inbound rules are watched already.' 'INFO'; return }
+    $swIn = @(Get-WHDForeignRules | Where-Object { -not $_.Leak })
+    $swAgainst = @{}; if ($CountPresent) { $swAgainst = _WHDFwDecidedAgainst }
+    $swTake = @($swIn | Where-Object { -not $swAgainst.ContainsKey("$($_.Name)".ToLower()) })
+    $swLeft = $swIn.Count - $swTake.Count
+    Write-WHDLog ("WATCH THE INBOUND RULES TOO - {0} inbound allow rule(s) that WHD did not make are ON now" -f $swIn.Count) 'ACT'
+    $swAsk = ''
+    if ($CountPresent) {
+        Write-WHDRisk 'reversible' ("No firewall rule is changed. {0} inbound allow rule(s) that are ON now count as kept and are not reported{1}. From now on WHD reports every inbound allow rule that appears later - at its start, in the Firewall and Updates menus, in Status, and the update guard after sign-in." -f $swTake.Count, $(if ($swLeft) { " ($swLeft more that you had switched off or removed are ON again: those are listed)" } else { '' }))
+        $swAsk = ("watch the inbound rules from now on ({0} present now count as kept)" -f $swTake.Count)
+    } else {
+        Write-WHDRisk 'caution' ("No firewall rule is changed. ALL {0} inbound allow rule(s) that are ON now are listed as not decided: WHD at its start, the Firewall and Updates menus, Status and the update guard after every sign-in report them until you keep, switch off or remove each one. Rules that appear later are reported too. On a Windows install with its own rules still in place that is a few hundred rules." -f $swIn.Count)
+        $swAsk = ("watch the inbound rules and list ALL {0} present now as not decided (reported after every sign-in until you decide each one)" -f $swIn.Count)
+    }
+    if (-not (Confirm-WHDProceed $swAsk)) { Write-WHDLog 'skipped.' 'WARN'; return }
+    $swBase = @($swKn.Base)
+    if ($CountPresent) { $swBase = @($swBase) + @($swTake | ForEach-Object { "$($_.Name)" }) }
+    Invoke-WHDChange -Description ("watch the inbound firewall rules ({0})" -f $(if ($CountPresent) { "$($swTake.Count) present now count as kept" } else { "the $($swIn.Count) present now are listed" })) -Force -Journal @{ Hint = 'to end the reports for a rule: keep it (Firewall menu K). To go back to the start: delete restore\update-guard\firewall-known.json (only the outbound leak is reported then).' } -Action {
+        if (-not (Save-WHDFwKnown -Names @($swKn.Own) -Base $swBase -Inbound $true)) { throw 'the list could not be saved' }
+    } | Out-Null
+}
+# After a wipe / reset / .wfw import / firewall restore: what the tool left behind is what you put in. The rules you
+# kept that still exist stay kept; every inbound allow rule not made by WHD that is ON now counts as kept (Base);
+# the inbound rules are watched from then on. NOT counted as kept, so that you decide:
+#   - a rule you had switched OFF (journal kind 'fwoff') or REMOVED that such a tool brought back ON;
+#   - -Pending: inbound rules that were listed as not decided before the tool ran (the watch was on already).
+# (Outbound rules are never taken in here: a kept outbound rule stays on through the update gate.)
+function Set-WHDFwKnownFromNow {
+    param([string]$Why, [string[]]$Pending = @())
+    if (-not $script:WHDExecute) { return }
+    try {
+        $kfOwn  = @(Get-WHDFwOwnGroups)
+        $kfAll  = @(Get-NetFirewallRule -EA Stop)
+        $kfHave = @{}; foreach ($kfR in $kfAll) { $kfHave["$($kfR.Name)".ToLower()] = $true }
+        $kfOld  = Get-WHDFwKnown
+        $kfKeep = @(@($kfOld.Own)  | Where-Object { $kfHave.ContainsKey("$_".ToLower()) })
+        $kfBase = @(@($kfOld.Base) | Where-Object { $kfHave.ContainsKey("$_".ToLower()) })
+        $kfNot  = _WHDFwDecidedAgainst
+        $kfPend = @{}; foreach ($kfP in @($Pending | Where-Object { $_ })) { $kfPend["$kfP".ToLower()] = $true }
+        $kfInAll = @($kfAll | Where-Object { ($kfOwn -notcontains "$($_.Group)") -and "$($_.Enabled)" -eq 'True' -and "$($_.Action)" -eq 'Allow' -and "$($_.Direction)" -eq 'Inbound' } | ForEach-Object { "$($_.Name)" })
+        $kfIn    = @($kfInAll | Where-Object { -not $kfNot.ContainsKey("$_".ToLower()) -and -not $kfPend.ContainsKey("$_".ToLower()) })
+        $kfBack  = @($kfInAll | Where-Object { $kfNot.ContainsKey("$_".ToLower()) })
+        $kfStill = @($kfInAll | Where-Object { $kfPend.ContainsKey("$_".ToLower()) -and -not $kfNot.ContainsKey("$_".ToLower()) })
+        $kfBase  = @(@($kfBase | Where-Object { -not $kfNot.ContainsKey("$_".ToLower()) }) + @($kfIn))
+        if (Save-WHDFwKnown -Names $kfKeep -Base $kfBase -Inbound $true) {
+            if ($kfIn.Count) { Write-WHDLog ("Rules WHD did not make: after the {0} the {1} inbound allow rule(s) that are there now count as kept (not reported). From now on an allow rule that appears is reported (inbound always; outbound while outbound is Block)." -f $Why, $kfIn.Count) 'INFO' }
+            else { Write-WHDLog ("Rules WHD did not make: after the {0} no inbound allow rule was newly counted as kept. From now on an allow rule that appears is reported (inbound always; outbound while outbound is Block)." -f $Why) 'INFO' }
+            if ($kfBack.Count) { Write-WHDLog ("Rules WHD did not make: {0} inbound rule(s) you had switched OFF or removed are ON again after the {1}. They do NOT count as kept and are listed (Firewall or Updates menu K)." -f $kfBack.Count, $Why) 'WARN' }
+            if ($kfStill.Count) { Write-WHDLog ("Rules WHD did not make: {0} inbound rule(s) were listed as not decided before the {1} and still are." -f $kfStill.Count, $Why) 'INFO' }
+        }
+    } catch { try { Write-WHDLog ("The list of kept firewall rules could not be set after the {0}: {1}. It stays as it was (if inbound rules were not watched before, they still are not)." -f $Why, $_.Exception.Message) 'WARN' } catch { } }
+}
+
+# ---- finding them --------------------------------------------------------------
+# Fills in protocol, ports and the program / app / service of one row (read-only; done only for rows that are shown).
+function Add-WHDFwRuleDetail {
+    param($Row)
+    if (-not $Row -or $Row.Detail) { return $Row }
+    $rdPf = $null; $rdAp = $null; $rdSf = $null
+    try { $rdPf = @($Row.Rule | Get-NetFirewallPortFilter -EA SilentlyContinue)[0] } catch { }
+    try { $rdAp = @($Row.Rule | Get-NetFirewallApplicationFilter -EA SilentlyContinue)[0] } catch { }
+    try { $rdSf = @($Row.Rule | Get-NetFirewallServiceFilter -EA SilentlyContinue)[0] } catch { }
+    $rdProg = "$($rdAp.Program)"; if ($rdProg -eq 'Any') { $rdProg = '' }
+    if ($rdProg) { try { $rdProg = [Environment]::ExpandEnvironmentVariables($rdProg) } catch { } }
+    $rdPkg = "$($rdAp.Package)"
+    $rdSvc = "$($rdSf.Service)"; if ($rdSvc -eq 'Any') { $rdSvc = '' }
+    $rdProto = "$($rdPf.Protocol)"; if (-not $rdProto) { $rdProto = 'Any' }
+    $rdLp = (@($rdPf.LocalPort)  | Where-Object { $null -ne $_ -and "$_" }) -join ','; if (-not $rdLp) { $rdLp = 'Any' }
+    $rdRp = (@($rdPf.RemotePort) | Where-Object { $null -ne $_ -and "$_" }) -join ','; if (-not $rdRp) { $rdRp = 'Any' }
+    $rdWho = 'ANY program'
+    if     ($rdProg -and $rdSvc) { $rdWho = "$rdProg (service $rdSvc)" }
+    elseif ($rdProg)             { $rdWho = $rdProg }
+    elseif ($rdPkg)              { $rdWho = 'Store-type app (package rule)' }
+    elseif ($rdSvc)              { $rdWho = "service $rdSvc" }
+    $rdLeaf = ''
+    if ($rdProg) { try { $rdLeaf = "$(Split-Path $rdProg -Leaf)" } catch { $rdLeaf = '' } }
+    $Row.Protocol   = $rdProto
+    $Row.LocalPort  = $rdLp
+    $Row.RemotePort = $rdRp
+    $Row.Program    = $rdProg
+    $Row.Who        = $rdWho
+    # "one port only" works for an outbound rule that names one program file (as Firewall V does: never svchost / a service)
+    $Row.CanPort    = [bool](("$($Row.Direction)" -eq 'Outbound') -and ($rdProg -match '^[A-Za-z]:\\') -and $rdLeaf -and ($rdLeaf -ine 'svchost.exe') -and (-not $rdSvc))
+    $Row.Detail     = $true
+    return $Row
+}
+# Every allow rule that is ON, was not made by WHD and is not on your kept list. Outbound rules only while
+# outbound is Block. Rows the gate leaks through (outbound) come first. Read-only.
+function Get-WHDForeignRules {
+    $frC = $script:WHDFwScanCache
+    if ($frC -and [int]$script:WHDFwScanSeconds -gt 0) {
+        $frAge = ((Get-Date) - $frC.At).TotalSeconds      # (a clock that was set back gives a negative age: read again)
+        if ($frAge -ge 0 -and $frAge -lt [int]$script:WHDFwScanSeconds) { return @($frC.Rows) }
+    }
+    $frOwn = @(Get-WHDFwOwnGroups)
+    $frOutBlock = (@(Get-WHDFwProfiles | ForEach-Object { "$($_.DefaultOutboundAction)" }) -contains 'Block')
+    $frKnown = @{}; foreach ($frN in @((Get-WHDFwKnown).Names)) { $frKnown["$frN".ToLower()] = $true }
+    $frKeptOut = New-Object System.Collections.Generic.List[string]      # outbound rules you kept that are ON while outbound is Block
+    $frRows = @(foreach ($frR in @(Get-NetFirewallRule -EA SilentlyContinue)) {
+        if ($frOwn -contains "$($frR.Group)") { continue }
+        if ("$($frR.Enabled)" -ne 'True' -or "$($frR.Action)" -ne 'Allow') { continue }
+        $frDir = "$($frR.Direction)"
+        if ($frDir -ne 'Inbound' -and -not $frOutBlock) { continue }
+        $frDn = "$($frR.DisplayName)"; if (-not $frDn) { $frDn = "$($frR.Name)" }
+        if ($frKnown.ContainsKey("$($frR.Name)".ToLower())) { if ($frDir -ne 'Inbound') { $frKeptOut.Add($frDn) }; continue }
+        [pscustomobject]@{ Name = "$($frR.Name)"; DisplayName = $frDn; Direction = $frDir; Leak = [bool]($frDir -ne 'Inbound')
+            Protocol = ''; LocalPort = ''; RemotePort = ''; Program = ''; Who = ''; CanPort = $false; Detail = $false; Rule = $frR }
+    })
+    $frSorted = @($frRows | Sort-Object @{ e = { if ($_.Leak) { 0 } else { 1 } } }, @{ e = { "$($_.DisplayName)" } }, @{ e = { "$($_.Name)" } })
+    $script:WHDFwScanCache = [pscustomobject]@{ At = (Get-Date); Rows = $frSorted; KeptOut = @($frKeptOut.ToArray()) }
+    return @($frSorted)
+}
+# The outbound allow rules you chose to keep that are ON while outbound is Block (display names): their programs
+# get through the update gate / default-deny. Not an alert - WHD names them so that they are not forgotten.
+function Get-WHDFwKeptOutNow {
+    try { [void](Get-WHDForeignRules); return @(@($script:WHDFwScanCache.KeptOut) | Where-Object { $_ }) } catch { return @() }
+}
+function Get-WHDFwKeptOutText {
+    $koAll = @(Get-WHDFwKeptOutNow)
+    if (-not $koAll.Count) { return '' }
+    $koUni = @($koAll | Select-Object -Unique)
+    return ("{0} outbound allow rule(s) you chose to keep are ON and get through although outbound is Block: {1}{2}" -f $koAll.Count, ((@($koUni | Select-Object -First 8)) -join ', '), $(if ($koUni.Count -gt 8) { (' and {0} more' -f ($koUni.Count - 8)) } else { '' }))
+}
+# The rows WHD raises an alert for: the outbound leak always; the inbound rules once you switched their watch on.
+function Get-WHDForeignAttention {
+    param([object[]]$Rows)
+    if ($null -eq $Rows) { $Rows = @(Get-WHDForeignRules) }
+    if ((Get-WHDFwKnown).Inbound) { return @($Rows | Where-Object { $_ }) }
+    return @($Rows | Where-Object { $_ -and $_.Leak })
+}
+# One line for the head of a screen. Alert = $true: something to decide; $false: a hint only; Text '' = nothing to say.
+# Unwatched = number of inbound rules that are there but not watched (0 once the watch is on). KeptOut = see Get-WHDFwKeptOutText.
+function Get-WHDForeignSummary {
+    $fsRows = @(Get-WHDForeignRules)
+    $fsAtt  = @(Get-WHDForeignAttention -Rows $fsRows)
+    $fsOut  = @($fsRows | Where-Object { $_.Leak }).Count
+    $fsIn   = $fsRows.Count - $fsOut
+    $fsText = ''; $fsAlert = $false; $fsUnw = 0
+    if (-not (Get-WHDFwKnown).Inbound) { $fsUnw = $fsIn }
+    if ($fsAtt.Count) {
+        $fsAlert = $true
+        $fsAo = @($fsAtt | Where-Object { $_.Leak }).Count
+        $fsAi = $fsAtt.Count - $fsAo
+        $fsThrough = 'default-deny outbound'
+        if ((Get-Command Test-WHDGateClosed -EA SilentlyContinue) -and (Test-WHDGateClosed)) { $fsThrough = ("the update gate ({0})" -f "$((Get-WHDGateState).Mode)".ToUpper()) }
+        $fsBits = @()
+        if ($fsAo) { $fsBits += ("{0} outbound - they get through {1}" -f $fsAo, $fsThrough) }
+        if ($fsAi) { $fsBits += ("{0} inbound - their programs can be reached from outside" -f $fsAi) }
+        $fsText = ("{0} allow rule(s) that WHD did not make are ON: {1}." -f $fsAtt.Count, ($fsBits -join '; '))
+    } elseif ($fsUnw) {
+        $fsText = ("{0} inbound allow rule(s) were not made by WHD. Inbound rules are not watched (console: K, then S starts that; window: 'Watch inbound rules...')." -f $fsUnw)
+    }
+    $fsBad = ''
+    if ((Get-WHDFwKnown).Unreadable) { $fsBad = ("the file with your kept rules cannot be read ({0}). Until it is repaired or deleted WHD treats it as empty: kept rules are listed again and inbound rules are not watched." -f (_WHDFwKnownPath)) }
+    [pscustomobject]@{ Text = $fsText; Alert = $fsAlert; Rows = $fsRows; Attention = $fsAtt; Unwatched = $fsUnw; KeptOut = (Get-WHDFwKeptOutText); FileProblem = $fsBad }
+}
+
+# ---- showing them ----------------------------------------------------------------
+# -NoRead: do not read the rule's details now (three queries per rule); a row without them gets a short line.
+function Get-WHDForeignRowText {
+    param($Row, [switch]$NoRead)
+    if (-not $NoRead) { [void](Add-WHDFwRuleDetail -Row $Row) }
+    if (-not $Row.Detail) { return ('{0,-4} {1}   [{2}]' -f $(if ("$($Row.Direction)" -eq 'Inbound') { 'in' } else { 'out' }), "$($Row.DisplayName)", "$($Row.Name)") }
+    $rtPort = if ("$($Row.Direction)" -eq 'Inbound') { "$($Row.LocalPort)" } else { "$($Row.RemotePort)" }      # the side that says what is open
+    if ($rtPort -eq 'Any') { $rtPort = 'any' }
+    if ($rtPort.Length -gt 11) { $rtPort = $rtPort.Substring(0, 9) + '..' }
+    $rtName = "$($Row.DisplayName)"; if ($rtName.Length -gt 30) { $rtName = $rtName.Substring(0, 28) + '..' }
+    $rtProto = "$($Row.Protocol)"; if ($rtProto -eq 'Any') { $rtProto = 'any' }
+    ('{0,-4} {1,-6} {2,-11} {3,-30} {4}' -f $(if ("$($Row.Direction)" -eq 'Inbound') { 'in' } else { 'out' }), $rtProto, $rtPort, $rtName, "$($Row.Who)")
+}
+function Show-WHDForeignRules {
+    param([object[]]$Rows, [switch]$All)
+    $srList = @($Rows | Where-Object { $_ })
+    $srMax = [int]$script:WHDFwForeignMax; if ($All) { $srMax = $srList.Count }
+    Write-Host ('  {0,3}  {1,-4} {2,-6} {3,-11} {4,-30} {5}' -f '#', 'dir', 'prot', 'port', 'rule', 'program / app') -ForegroundColor DarkGray
+    $srI = 0
+    foreach ($srR in @($srList | Select-Object -First $srMax)) {
+        $srI++
+        Write-Host ('  {0,3}  {1}' -f $srI, (Get-WHDForeignRowText -Row $srR)) -ForegroundColor $(if ($srR.Leak) { 'Yellow' } else { 'Gray' })
+    }
+    if ($srList.Count -gt $srMax) { Write-Host ('       ... and {0} more (L lists every row; * means all {1})' -f ($srList.Count - $srMax), $srList.Count) -ForegroundColor DarkGray }
+}
+
+# ---- doing something about them ---------------------------------------------------
+# Switch one rule off. Journaled as kind 'fwoff': the Undo center switches it on again, and Verify / the update
+# guard report it when something switches it back on. Returns $true when it was done.
+function _WHDFwForeignOff {
+    param($Row)
+    $foName = "$($Row.Name)"; $foDisp = "$($Row.DisplayName)"; $foDir = "$($Row.Direction)"
+    $foJr = @{ Kind = 'fwoff'; RuleName = $foName; RuleDisplay = $foDisp; Direction = $foDir; OldEnabled = 'True'; NewEnabled = 'False' }
+    $foRes = Invoke-WHDChange -Description ("switch OFF firewall rule not made by WHD: {0} [{1}]" -f $foDisp, $foDir) -Force -Journal $foJr -Action {
+        Backup-WHDFirewallOnce
+        $foRule = @(Get-WHDFwRuleExact -Name $foName)
+        if (-not $foRule.Count) { throw 'the rule is no longer there' }
+        $foRule | Set-NetFirewallRule -Enabled False -EA Stop
+        if (@(Get-WHDFwRuleExact -Name $foName | Where-Object { "$($_.Enabled)" -eq 'True' }).Count) { throw 'read-back: the rule is still switched on' }
+    } | Select-Object -Last 1
+    $foDone = [bool]("$($foRes.Status)" -eq 'done')
+    # You switched it off yourself: the update gate must not switch it back on when it opens.
+    if ($foDone -and $script:WHDExecute -and (Get-Command Remove-WHDGateRemembered -EA SilentlyContinue)) { try { Remove-WHDGateRemembered -Names @($foName) } catch { } }
+    return $foDone
+}
+function _WHDFwForeignRemove {
+    param($Row)
+    $frmName = "$($Row.Name)"; $frmDisp = "$($Row.DisplayName)"; $frmDir = "$($Row.Direction)"
+    $frmJr = @{ RemovedRule = $frmName; Direction = $frmDir; Hint = 'restore the firewall saved at the start of that session (Undo center, F - that also reverts the other firewall changes of that session), or let the program that made the rule write it again' }
+    Invoke-WHDChange -Description ("remove firewall rule not made by WHD: {0} [{1}]" -f $frmDisp, $frmDir) -Force -Journal $frmJr -Action {
+        Backup-WHDFirewallOnce
+        $frmRule = @(Get-WHDFwRuleExact -Name $frmName)
+        if (-not $frmRule.Count) { return }      # gone already
+        $frmRule | Remove-NetFirewallRule -EA Stop
+        if (@(Get-WHDFwRuleExact -Name $frmName).Count) { throw 'read-back: the rule is still there' }
+    } | Out-Null
+}
+# Several rules, ONE question. -Action off | remove | keep | port (port: -Port, TCP, outbound; one WHD allow per program file).
+# No Read-Host here: the console view and the window version both call this.
+function Invoke-WHDForeignRuleBatch {
+    param([object[]]$Rows, [ValidateSet('off','remove','keep','port')][string]$Action, [int]$Port = 443)
+    $fbList = @($Rows | Where-Object { $_ })
+    if (-not $fbList.Count) { return }
+    # Details (protocol, ports, program) cost three queries per rule: read them for "one port only" (it needs the
+    # program) and for a list of up to 40 rows; a longer list is logged with direction + name.
+    $fbRead = [bool]($Action -eq 'port' -or $fbList.Count -le 40)
+    if ($fbRead) { foreach ($fbR in $fbList) { [void](Add-WHDFwRuleDetail -Row $fbR) } }
+    if ($Action -eq 'port') {
+        if ($Port -lt 1 -or $Port -gt 65535) { Write-WHDLog ("port {0} is not a port number (1 to 65535) - nothing was changed." -f $Port) 'ERR'; return }
+        foreach ($fbR in @($fbList | Where-Object { -not $_.CanPort })) {
+            Write-WHDLog ("  left out: '{0}' [{1}] - 'one port only' needs an OUTBOUND rule that names one program file (not a Store-type app, a service, or any program). Use switch off, remove or keep for it." -f $fbR.DisplayName, $fbR.Direction) 'WARN'
+        }
+        $fbList = @($fbList | Where-Object { $_.CanPort })
+        if (-not $fbList.Count) { return }
+    }
+    $fbVerb = switch ($Action) { 'off' { 'switch OFF' } 'remove' { 'REMOVE' } 'keep' { 'KEEP as they are' } default { ("replace by a WHD allow on TCP port {0} only" -f $Port) } }
+    Write-WHDLog ("RULES WHD DID NOT MAKE - {0}: {1} rule(s)" -f $fbVerb, $fbList.Count) 'ACT'
+    foreach ($fbR in $fbList) { Write-WHDLog ("  {0}" -f (Get-WHDForeignRowText -Row $fbR -NoRead:(-not $fbRead))) 'INFO' }
+    switch ($Action) {
+        'off'    { Write-WHDRisk 'reversible' 'Each rule stays in Windows'' rule list, switched OFF. The Undo center switches it on again; Verify and the update guard report it if something switches it back on. A program that needs the internet is offline afterwards while outbound is Block - allow it on one port (Firewall V, or "one port only" here).' }
+        'remove' { Write-WHDRisk 'caution' 'Each rule is deleted. WHD saves the firewall once per session, before that session''s first firewall change: Undo center F puts the WHOLE firewall back as it was then, so every later firewall change of that session (a gate change included) is reverted with it. Windows or the program that made a rule may write it again - WHD then reports it again.' }
+        'keep'   { Write-WHDRisk 'caution' 'Each rule stays ON as it is and is not reported again. A kept OUTBOUND rule keeps its program online through the update gate (CLOSED / PROGRAMS): the gate leaves kept rules on; Status and the menu head lines name them while outbound is Block. WHD keeps a rule by its NAME: if the rule is changed later, or another rule gets that name, it still counts as kept. A rule you had switched off before and keep now is no longer held off (Verify, update guard). The rules you kept can be forgotten again (Firewall K, then F).' }
+        default  { Write-WHDRisk 'caution' ("For each program: a WHD allow for that program file - TCP, remote port {0} only, outbound, any destination (the same kind of rule Firewall V makes; with the update gate CLOSED it is saved switched off until PROGRAMS or OPEN). Then the wide rule is switched OFF, not deleted. The allow is tied to that exact file: when the program moves or updates into another folder it is blocked again and shows in Firewall V." -f $Port) }
+    }
+    $fbAsk = switch ($Action) { 'off' { "switch OFF the {0} rule(s) listed above" } 'remove' { "REMOVE the {0} rule(s) listed above" } 'keep' { "keep the {0} rule(s) listed above ON as they are" } default { "replace the {0} rule(s) listed above by a WHD allow on TCP port $Port" } }
+    if (-not (Confirm-WHDProceed ($fbAsk -f $fbList.Count))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    # The question above covers the whole list: the single steps do not ask again.
+    $fbPrev = $script:WHDConfirm; $fbPrevBatch = $script:WHDFwAllowBatch
+    $script:WHDConfirm = { param($m) $true }; $script:WHDFwAllowBatch = $true
+    try {
+        switch ($Action) {
+            'off'    { foreach ($fbR in $fbList) { [void](_WHDFwForeignOff -Row $fbR) } }
+            'remove' { foreach ($fbR in $fbList) { _WHDFwForeignRemove -Row $fbR } }
+            'keep'   {
+                $fbOld = @((Get-WHDFwKnown).Own)
+                $fbAdd = @($fbList | ForEach-Object { "$($_.Name)" })
+                $fbShow = (@($fbList | Select-Object -First 5 | ForEach-Object { "$($_.DisplayName)" }) -join ', '); if ($fbList.Count -gt 5) { $fbShow += (' and {0} more' -f ($fbList.Count - 5)) }
+                Invoke-WHDChange -Description ("keep {0} firewall rule(s) not made by WHD as they are: {1}" -f $fbAdd.Count, $fbShow) -Force -Journal @{ Hint = 'Firewall menu K, then F: forgets the rules you kept (they are then listed again)' } -Action {
+                    if (-not (Save-WHDFwKnown -Names (@($fbOld) + @($fbAdd)))) { throw 'the list of kept rules could not be saved' }
+                } | Out-Null
+                # A rule you switched OFF earlier and keep now: its 'switched off' entries no longer stand, or Verify and the
+                # update guard would report it as changed back and re-apply would switch it off again.
+                if ($script:WHDExecute -and (Get-Command Clear-WHDFwOffEntries -EA SilentlyContinue)) {
+                    $fbKeptNow = @{}; foreach ($fbKn in @((Get-WHDFwKnown).Names)) { $fbKeptNow["$fbKn".ToLower()] = $true }
+                    try {
+                        $fbRet = [int](Clear-WHDFwOffEntries -Names @($fbAdd | Where-Object { $fbKeptNow.ContainsKey("$_".ToLower()) }))
+                        if ($fbRet) { Write-WHDLog ("  {0} earlier 'switched OFF' record(s) of these rules no longer stand (you keep the rules ON now)." -f $fbRet) 'INFO' }
+                    } catch { }
+                }
+            }
+            default  {
+                $fbProg = @{}      # program file -> $true when its WHD allow is there
+                $fbNameOf = @{}    # WHD allow name -> the program file it was made for in this run
+                foreach ($fbR in $fbList) {
+                    $fbKey = "$($fbR.Program)".ToLower()
+                    if (-not $fbProg.ContainsKey($fbKey)) {
+                        $fbItem = [pscustomobject]@{ Direction = 'Outbound'; Program = "$($fbR.Program)"; Exe = "$(Split-Path "$($fbR.Program)" -Leaf)"; Protocol = 'TCP'; RemotePort = "$Port" }
+                        $fbAllowName = Get-WHDProgramAllowName -Program $fbItem.Program -Protocol 'TCP' -RemotePort "$Port"
+                        # The allow's rule name is built from the FILE name: two programs with the same file name in different
+                        # folders would share one rule, and the second would replace the first. Refuse the second.
+                        $fbClash = ''
+                        if ($fbNameOf.ContainsKey($fbAllowName) -and "$($fbNameOf[$fbAllowName])".ToLower() -ne $fbKey) { $fbClash = "$($fbNameOf[$fbAllowName])" }
+                        else {
+                            foreach ($fbEx in @(Get-NetFirewallRule -Name $fbAllowName -EA SilentlyContinue)) {
+                                $fbExProg = ''
+                                try { $fbExProg = "$(@($fbEx | Get-NetFirewallApplicationFilter -EA SilentlyContinue)[0].Program)" } catch { $fbExProg = '' }
+                                if ($fbExProg) { try { $fbExProg = [Environment]::ExpandEnvironmentVariables($fbExProg) } catch { } }
+                                if ($fbExProg -and $fbExProg -ne 'Any' -and $fbExProg.ToLower() -ne $fbKey -and (Test-Path -LiteralPath $fbExProg)) { $fbClash = $fbExProg }
+                            }
+                        }
+                        if ($fbClash) {
+                            Write-WHDLog ("  not done for {0}: a WHD allow for another program with the same file name is there already ({1}), and one rule name cannot serve both. Nothing was changed for it - keep its rule, switch it off, or undo the other allow first (Undo center)." -f $fbItem.Program, $fbClash) 'ERR'
+                            $fbProg[$fbKey] = $false
+                        } else {
+                            $fbNameOf[$fbAllowName] = "$($fbItem.Program)"
+                            Add-WHDProgramAllow -Item $fbItem | Out-Null
+                            $fbProg[$fbKey] = [bool]((-not $script:WHDExecute) -or @(Get-NetFirewallRule -Name $fbAllowName -EA SilentlyContinue).Count)
+                        }
+                    }
+                    if ($fbProg[$fbKey]) { [void](_WHDFwForeignOff -Row $fbR) }
+                    else { Write-WHDLog ("  the WHD allow for {0} could not be made, so its rule '{1}' was left as it is." -f $fbR.Program, $fbR.DisplayName) 'ERR' }
+                }
+                # other wide rules of the same program that were not selected keep it wide open: say so
+                if ($script:WHDExecute) {
+                    $fbLeft = @(Get-WHDForeignRules | Where-Object { $_.Leak } | ForEach-Object { Add-WHDFwRuleDetail -Row $_ } | Where-Object { $_.Program -and $fbProg.ContainsKey("$($_.Program)".ToLower()) })
+                    if ($fbLeft.Count) { Write-WHDLog ("  {0} other outbound rule(s) of the same program(s) are still ON and keep them wide open: {1}. Select them too." -f $fbLeft.Count, ((@($fbLeft | ForEach-Object { "$($_.DisplayName)" }) | Select-Object -Unique) -join ', ')) 'WARN' }
+                }
+            }
+        }
+    } finally { $script:WHDConfirm = $fbPrev; $script:WHDFwAllowBatch = $fbPrevBatch }
+    if ($script:WHDExecute) {
+        $fbRest = @(Get-WHDForeignAttention)
+        if ($fbRest.Count) { Write-WHDLog ("{0} allow rule(s) that WHD did not make are still ON." -f $fbRest.Count) 'WARN' }
+        else { Write-WHDLog 'No allow rule that WHD did not make is left to decide.' 'OK' }
+    }
+}
+# Forget the rules YOU kept (answer k). The rules themselves are not touched; they are listed again. The inbound rules
+# that were counted as kept when the watch started (or by a wipe / reset / import / restore) stay as they are - emptying
+# those too would put every inbound rule of Windows on the list at once.
+function Clear-WHDFwKnown {
+    $ckKn = Get-WHDFwKnown
+    $ckN = @($ckKn.Own).Count
+    Write-WHDLog ("FORGET the firewall rules you kept ({0} name(s))" -f $ckN) 'ACT'
+    if (-not $ckN) { Write-WHDLog 'You have not kept any rule - nothing to forget.' 'INFO'; return }
+    Write-WHDRisk 'reversible' ("No firewall rule is changed. The {0} rule(s) you kept are listed again (outbound ones while outbound is Block, inbound ones while the inbound rules are watched) and you decide again.{1}" -f $ckN, $(if (@($ckKn.Base).Count) { " The $(@($ckKn.Base).Count) inbound rule(s) that were counted as kept at a start stay counted." } else { '' }))
+    if (-not (Confirm-WHDProceed ("forget the {0} firewall rule(s) you kept (they are listed again)" -f $ckN))) { Write-WHDLog 'skipped.' 'WARN'; return }
+    Invoke-WHDChange -Description ("forget the {0} firewall rule(s) you kept" -f $ckN) -Force -Journal @{ Hint = 'keep the rules again (Firewall menu K)' } -Action {
+        if (-not (Save-WHDFwKnown -Names @())) { throw 'the list could not be saved' }
+    } | Out-Null
+}
+
+# Console: the list + one answer line (Firewall menu K, Updates menu K, and by itself when a new rule shows up).
+# While the inbound rules are not watched only the outbound rows are listed and numbered ("*" = those); L lists
+# and numbers every row, the inbound ones included.
+function Invoke-WHDForeignRulesView {
+    param([switch]$Alert)
+    $fvAll = $false
+    while ($true) {
+        $fvEvery = @(Get-WHDForeignRules)
+        $fvKn    = Get-WHDFwKnown
+        $fvRows  = $fvEvery
+        if (-not $fvKn.Inbound -and -not $fvAll) { $fvRows = @($fvEvery | Where-Object { $_.Leak }) }
+        $fvHidden = $fvEvery.Count - $fvRows.Count
+        foreach ($fvR in $fvRows) { $script:WHDFwForeignSeen["$($fvR.Name)".ToLower()] = $true }
+        Write-Host ''
+        Write-Host '  ---------- RULES WHD DID NOT MAKE (allow rules that are ON) ----------' -ForegroundColor White
+        if ($Alert) { Write-Host '  WHD opened this list because a rule is there that neither WHD nor you put in.' -ForegroundColor Yellow }
+        if ($fvKn.Unreadable) { Write-Host ("  !! the file with your kept rules cannot be read ({0}); WHD treats it as empty." -f (_WHDFwKnownPath)) -ForegroundColor Yellow }
+        if (-not $fvRows.Count) {
+            Write-Host '  none to decide.' -ForegroundColor Green
+            if (-not @($fvKn.Own).Count -and $fvKn.Inbound) { return }
+        } else {
+            Show-WHDForeignRules -Rows $fvRows -All:$fvAll
+            Write-Host '  yellow = outbound: gets out although outbound is Block.   gray = inbound: that program can be reached from outside.' -ForegroundColor DarkGray
+            if (-not $script:WHDExecute) { Write-Host '  DRY-RUN: an answer is only previewed. Switch to EXECUTE (main menu 8) to change something.' -ForegroundColor Cyan }
+            Write-Host '  Numbers + action, e.g.  1,3 o    2 r    * k    4 p    (one question for the list)'
+            Write-Host '     o = switch OFF     r = remove     k = keep as it is     p = one port only (outbound rule of one program file)'
+        }
+        if ($fvHidden) { Write-Host ("  {0} inbound allow rule(s) not made by WHD are not listed here (inbound rules are not watched). L lists and numbers them too." -f $fvHidden) -ForegroundColor DarkGray }
+        $fvKo = Get-WHDFwKeptOutText
+        if ($fvKo) { Write-Host ("  kept: {0}" -f $fvKo) -ForegroundColor DarkYellow }
+        if (-not $fvKn.Inbound) { Write-Host '  S = watch the INBOUND rules too (not watched now: WHD alerts only for the outbound ones; it asks how to start)' }
+        if (@($fvKn.Own).Count) { Write-Host ('  F = forget the {0} rule(s) you kept (they are listed again)' -f @($fvKn.Own).Count) }
+        $fvIn = (Read-Host '  Answer (L = list every row, Enter = leave for now)').Trim()
+        if (-not $fvIn) { return }
+        if ($fvIn -match '^[Ll]$') { $fvAll = $true; continue }
+        if ($fvIn -match '^[Ff]$') { Clear-WHDFwKnown; if (-not $script:WHDExecute) { return }; continue }
+        if ($fvIn -match '^[Ss]$') {
+            if ($fvKn.Inbound) { Write-Host '  The inbound rules are watched already.' -ForegroundColor DarkGray; continue }
+            $fvInN = @($fvEvery | Where-Object { -not $_.Leak }).Count
+            Write-Host ("  {0} inbound allow rule(s) that WHD did not make are ON now. How to start:" -f $fvInN)
+            Write-Host '     N = report only rules that appear from NOW on (the ones present now count as kept)'
+            Write-Host '     A = list ALL of them too, until you keep, switch off or remove each one'
+            $fvS = (Read-Host '  N, A, or Enter = do not start').Trim()
+            if     ($fvS -match '^[Nn]$') { Start-WHDFwInboundWatch -CountPresent }
+            elseif ($fvS -match '^[Aa]$') { Start-WHDFwInboundWatch }
+            else   { Write-Host '  not started.' -ForegroundColor DarkGray }
+            if (-not $script:WHDExecute) { return }
+            continue
+        }
+        if ($fvRows.Count -and $fvIn -match '^([0-9,\s\-\*]+?)\s*([OoRrKkPp])$') {
+            $fvSelText = $Matches[1]; $fvAct = "$($Matches[2])".ToLower()
+            $fvSel = ConvertFrom-WHDSelection -Text $fvSelText -Max $fvRows.Count -Star @(1..$fvRows.Count)
+            if ($null -eq $fvSel -or -not @($fvSel).Count) { Write-Host '  invalid.' -ForegroundColor Yellow; continue }
+            $fvPick = @(foreach ($fvN in @($fvSel)) { $fvRows[$fvN - 1] })
+            switch ($fvAct) {
+                'o' { Invoke-WHDForeignRuleBatch -Rows $fvPick -Action off }
+                'r' { Invoke-WHDForeignRuleBatch -Rows $fvPick -Action remove }
+                'k' { Invoke-WHDForeignRuleBatch -Rows $fvPick -Action keep }
+                'p' {
+                    $fvPort = (Read-Host '  Remote TCP port for the WHD allow [443]').Trim(); if (-not $fvPort) { $fvPort = '443' }
+                    if ($fvPort -notmatch '^[0-9]{1,5}$' -or [int]$fvPort -lt 1 -or [int]$fvPort -gt 65535) { Write-Host '  not a port number (1 to 65535).' -ForegroundColor Yellow; continue }
+                    Invoke-WHDForeignRuleBatch -Rows $fvPick -Action port -Port ([int]$fvPort)
+                }
+            }
+            if (-not $script:WHDExecute) { return }      # preview shown once; the same list would only come up again
+            continue
+        }
+        Write-Host '  invalid.' -ForegroundColor Yellow
+    }
+}
+
+# ---- for the update guard's report ---------------------------------------------------
+# The lines of its firewall section and whether they are an alert. Read-only; never throws.
+# An alert: an allow rule WHD did not make is ON (see Get-WHDForeignAttention), or the update gate is not
+# what its record says (its own rules are gone, or something set outbound back to Allow).
+function Get-WHDFirewallGuardReport {
+    $grLines = New-Object System.Collections.Generic.List[string]
+    $grAlert = $false
+    try {
+        $grAll = @(Get-WHDForeignRules)
+        $grAtt = @(Get-WHDForeignAttention -Rows $grAll)
+        if ($grAtt.Count) {
+            $grAlert = $true
+            $grLines.Add(("  !! {0} allow rule(s) that WHD did not make are ON ({1} outbound, {2} inbound):" -f $grAtt.Count, @($grAtt | Where-Object { $_.Leak }).Count, @($grAtt | Where-Object { -not $_.Leak }).Count))
+            foreach ($grRow in @($grAtt | Select-Object -First 25)) { $grLines.Add(("     {0}" -f (Get-WHDForeignRowText -Row $grRow))) }
+            if ($grAtt.Count -gt 25) { $grLines.Add(("     ... and {0} more" -f ($grAtt.Count - 25))) }
+            $grLines.Add('  -> An outbound rule lets its program out although outbound is Block (update gate / default-deny); an inbound rule lets its program be reached from outside.')
+            $grLines.Add('  -> Start WHD: it shows the list and asks (Firewall or Updates menu, K): switch off / remove / keep / one port only.')
+        } elseif ($grAll.Count) {
+            $grLines.Add(("  {0} inbound allow rule(s) were not made by WHD; inbound rules are not watched (WHD console: Firewall or Updates menu K, then S; window: Firewall tab, 'Watch inbound rules...')." -f $grAll.Count))
+        } else { $grLines.Add('  rules WHD did not make: none that are ON and not kept by you') }
+        $grKo = Get-WHDFwKeptOutText
+        if ($grKo) { $grLines.Add(("  kept by you: {0}" -f $grKo)) }
+        if ((Get-WHDFwKnown).Unreadable) { $grLines.Add(("  note: the file with your kept rules cannot be read ({0}); WHD treats it as empty." -f (_WHDFwKnownPath))) }
+        if (Get-Command Get-WHDGateHealth -EA SilentlyContinue) {
+            foreach ($grP in @((Get-WHDGateHealth).Problems)) { $grAlert = $true; $grLines.Add(("  !! UPDATE GATE: {0}" -f $grP)) }
+        }
+    } catch { $grLines.Add(("  check failed: {0}" -f $_.Exception.Message)) }
+    [pscustomobject]@{ Lines = @($grLines.ToArray()); Alert = $grAlert }
+}
+
+# ---- the head lines of the Firewall and Updates menus (and of WHD's start) ------------
+# Read-only. Says when the update gate is not what it is recorded as, and when rules WHD did not make are ON.
+# -AtStart: printed before the main menu / at the end of -Apply, where K is not a key - say where K is.
+function Show-WHDFwAttentionLines {
+    param([switch]$AtStart)
+    $alK = 'K'; if ($AtStart) { $alK = 'Firewall menu (9) or Updates menu (W), then K' }
+    try {
+        if (Get-Command Get-WHDGateHealth -EA SilentlyContinue) {
+            foreach ($alP in @((Get-WHDGateHealth).Problems)) { Write-Host ("  !! UPDATE GATE: {0}" -f $alP) -ForegroundColor Yellow }
+        }
+        $alS = Get-WHDForeignSummary
+        if ($alS.Alert) {
+            Write-Host ("  !! {0}" -f $alS.Text) -ForegroundColor Red
+            Write-Host ("     {0} = look at them and decide (switch off / remove / keep / one port only)" -f $alK) -ForegroundColor Red
+        } elseif ($alS.Text -and -not $AtStart) { Write-Host ("  K: {0}" -f $alS.Text) -ForegroundColor DarkGray }
+        if ($alS.KeptOut) { Write-Host ("  kept: {0}" -f $alS.KeptOut) -ForegroundColor DarkYellow }
+        if ($alS.FileProblem) { Write-Host ("  !! {0}" -f $alS.FileProblem) -ForegroundColor Yellow }
+    } catch { Write-Host ("  (the check for rules WHD did not make failed: {0})" -f $_.Exception.Message) -ForegroundColor DarkGray }
+}
+# Opens the list + question by itself when a rule is there that was not yet shown in this session (console only).
+function Invoke-WHDFwAttentionAsk {
+    try {
+        $aaNew = @(Get-WHDForeignAttention | Where-Object { -not $script:WHDFwForeignSeen.ContainsKey("$($_.Name)".ToLower()) })
+        if (-not $aaNew.Count) { return }
+        Write-WHDLog ("ALERT: {0} allow rule(s) that WHD did not make are ON and were not shown before in this session." -f $aaNew.Count) 'WARN'
+        Invoke-WHDForeignRulesView -Alert
+    } catch { Write-WHDLog ("the check for rules WHD did not make failed: {0}" -f $_.Exception.Message) 'WARN' }
+}
+
+# =============================================================================
 #  MENU
 # =============================================================================
 # One aligned menu row: key gutter (cyan) + label. Single column = never wraps.
@@ -1382,8 +2369,10 @@ function Show-WHDFirewallMenu {
     Write-Host '  Blocked connections' -ForegroundColor DarkGray
     Write-WHDMenuItem 'M' 'Turn ON the Windows Firewall log' '(default file, dropped + allowed, 32,767 KB)'
     Write-WHDMenuItem 'O' 'Turn OFF the Windows Firewall log'
-    Write-WHDMenuItem 'V' 'View blocked connections / allow a program'
+    Write-WHDMenuItem 'V' 'View blocked connections / allow a program' '(several at once: 1,3 or 1-3)'
     Write-WHDMenuItem 'G' 'Remove all per-program allows'
+    Write-Host '  Rules from others' -ForegroundColor DarkGray
+    Write-WHDMenuItem 'K' 'Rules WHD did not make' '(allow rules that are ON: switch off / remove / keep / one port only)'
     Write-Host '  Time sync' -ForegroundColor DarkGray
     Write-WHDMenuItem 'T' 'Use time.cloudflare.com' '(UDP 123 pinned + 1 h time-jump limit)'
     Write-WHDMenuItem 'N' 'Use Windows default time server' '(and default time settings)'
@@ -1404,6 +2393,8 @@ function Show-WHDFirewallMenu {
 function Invoke-WHDFirewallSubmenu {
     $pdir = Join-Path $script:WHDRoot 'profiles'
     while ($true) {
+        # v1.5: a rule that neither WHD nor you put in and that was not shown yet -> the list + question first
+        Invoke-WHDFwAttentionAsk
         Show-WHDMode
         Show-WHDFirewallMenu
         $c = (Read-Host '  Select (Enter accepts the [default] file)').Trim()
@@ -1437,24 +2428,17 @@ function Invoke-WHDFirewallSubmenu {
             }
             '^[Mm]$'{ Enable-WHDConnectionLogging }
             '^[Oo]$'{ Disable-WHDConnectionLogging }
-            '^[Vv]$'{
-                $h = (Read-Host '  Hours to look back [24]').Trim(); if (-not ($h -match '^\d+$')) { $h = 24 }
-                $items = @(Get-WHDBlockedConnections -Hours ([int]$h))
-                Show-WHDBlockedConnections -Items $items
-                if ($items.Count) {
-                    $pick = (Read-Host '  # to allow that program on that port (outbound), Enter = back').Trim()
-                    if ($pick -match '^\d+$' -and [int]$pick -ge 1 -and [int]$pick -le $items.Count) { Add-WHDProgramAllow -Item $items[[int]$pick - 1] }
-                }
-            }
+            '^[Vv]$'{ Invoke-WHDBlockedView }
             '^[Gg]$'{ Remove-WHDProgramAllows }
+            '^[Kk]$'{ Invoke-WHDForeignRulesView }
             '^[Tt]$'{ Invoke-WHDSetTimeSync -Mode Cloudflare }
             '^[Nn]$'{ Invoke-WHDSetTimeSync -Mode Windows }
             '^[Ss]$'{ Show-WHDTimeStatus; Show-WHDConnectionLoggingState }
             '^[Zz]$'{ if (Get-Command Invoke-WHDTimeRegionSubmenu -EA SilentlyContinue) { Invoke-WHDTimeRegionSubmenu } else { Write-WHDLog 'TimeRegion.ps1 not loaded.' 'ERR' } }
             '^[Xx]$'{ $f=(Read-Host '  Export base path [blank = restore\<timestamp>\firewall-policy]').Trim(); if($f){ Export-WHDFirewallPolicy -Path $f } else { Export-WHDFirewallPolicy } }
-            '^[Ii]$'{ $f=(Read-Host '  Import file (.json or .wfw), blank to cancel').Trim(); if($f){ $mode= if($f -match '\.wfw$'){'Wfw'}else{'Json'}; Import-WHDFirewallPolicy -Path $f -Mode $mode } }
+            '^[Ii]$'{ $f=(Read-Host '  Import file (.json or .wfw), blank to cancel').Trim(); if($f){ $mode= if($f -match '\.wfw$'){'Wfw'}else{'Json'}; Import-WHDFirewallPolicy -Path $f -Mode $mode; if ($mode -eq 'Wfw' -and "$($script:WHDFwToolStatus)" -eq 'done' -and (Get-Command Invoke-WHDGateRepairOffer -EA SilentlyContinue)) { Invoke-WHDGateRepairOffer -After 'the import' } } }
             '^[Rr]$'{ Invoke-WHDFirewallReset }
-            '^[Ww]$'{ $yn=(Read-Host '  Apply the WHD baseline right after wiping? [y/N]').Trim(); if($yn -match '^[Yy]'){ Invoke-WHDFirewallWipe -ApplyBaseline } else { Invoke-WHDFirewallWipe } }
+            '^[Ww]$'{ $yn=(Read-Host '  Apply the WHD baseline right after wiping? [y/N]').Trim(); if($yn -match '^[Yy]'){ Invoke-WHDFirewallWipe -ApplyBaseline } else { Invoke-WHDFirewallWipe }; if ("$($script:WHDFwToolStatus)" -eq 'done' -and (Get-Command Invoke-WHDGateRepairOffer -EA SilentlyContinue)) { Invoke-WHDGateRepairOffer -After 'the wipe' } }
             '^[Aa]$'{ $def=Join-Path $pdir 'firewall-baseline.json'; $f=(Read-Host ("  Firewall profile [{0}]" -f $def)).Trim(); if(-not $f){$f=$def}; Invoke-WHDApplyFirewallProfile -Path $f }
             '^[Bb]$'{ return }
             '^[Qq]$'{ $script:WHDQuit = $true; return }
