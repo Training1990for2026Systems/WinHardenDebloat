@@ -5,7 +5,9 @@
 *.swm
 *.esd
 original/
+original_old_*/
 usb/
+usb_old_*/
 usb-custom/
 usb-custom_old_*/
 usb-max/
@@ -17,3 +19,4 @@ mount_*/
 # what the scripts write on this PC
 *.log
 image-contents.txt
+test-results/
