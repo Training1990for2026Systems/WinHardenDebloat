@@ -1,7 +1,7 @@
 > **WinHardenDebloat (WHD)** - by **Training1990for2026Systems** - contact: t90018273@gmail.com
 > License: [MIT](LICENSE) - Security reports: see [SECURITY.md](SECURITY.md) - Built with Claude by Anthropic.
 
-**Version: Classic 1.5** (2026-10-05, additions 2026-10-06; live-tested 2026-10-06 in the console menus - "v1.5 - live test" below says what was run and what was not; the last released version is 1.4.2, see Releases) - runs on Windows PowerShell 5.1, which is built into Windows.
+**Version: Classic 1.5** (2026-10-05, additions 2026-10-06; released 2026-10-10; live-tested 2026-10-06 and 2026-10-08 in the console menus - "v1.5 - live test" below says what was run and what was not) - runs on Windows PowerShell 5.1, which is built into Windows.
 
 # WinHardenDebloat
 
@@ -626,7 +626,7 @@ rules with it - and such a rule lets its program out through a CLOSED or PROGRAM
   not reported (they only restrict). Decisions are tied to the rule's name: when Windows writes a rule again under a new
   name (it does that for some app rules), the new rule is reported as new.
 
-### v1.5 - live test (2026-10-06)
+### v1.5 - live test (2026-10-06 and 2026-10-08)
 
 Fresh Windows 11 Home 26H2 image, console menus (`WHD.ps1`), Windows PowerShell 5.1, DRY-RUN and EXECUTE.
 
@@ -641,11 +641,26 @@ Fresh Windows 11 Home 26H2 image, console menus (`WHD.ps1`), Windows PowerShell 
   - gate P and O, the Updates status, program allows from Firewall V;
   - the Copilot off-switch with the two Edge Update policy values;
   - the update guard: its protected copy refreshed itself with the changed files, and GU installed it again.
+- **Second run, 2026-10-08,** on another fresh Windows 11 Home 26H2 install: four console sessions, the same files
+  (no script changed since 2026-10-06), the update gate OPEN throughout.
+  - AI menu (12 items at once, with the two Edge Update policy values), Store suppression, privacy settings, 20 general
+    apps in two batches, component store clean-up;
+  - two desktop programs uninstalled: both uninstallers ended with an unusual exit code, both programs were then found
+    gone and counted as done (the "still installed" check of 1.4.2);
+  - Security+: the 14 attack-surface rules (audit, then block), old protocols and network services off, password rules;
+    Devices (N); Time & region (time zone, clock by hand); permission profile Lock;
+  - Firewall: IPv6 off, allow-list, firewall log, time sync (T);
+  - the update guard installed and refreshed; its check after a sign-in ran and reported OK;
+  - **Verify: 85 of 85 items pass, later 114 of 114.**
+  - Seen: one Defender definitions update failed ("The remote procedure call failed", gate open); the next one, 90
+    minutes later, worked. Windows refused one value, the taskbar Widgets switch; WHD reported it as blocked and went on.
+- **Run by the author, not in the kept logs:** the firewall policy export. The answers `o` (switch OFF), `p` on a
+  program's rule, `S` (watch inbound rules) and `F` were stepped through once to see that they act; they were not kept
+  in use, so **their results are still open**.
 - **Not yet run on Windows:**
   - the window version (`WHD-GUI.ps1`) of the additions;
-  - the answers `o` (switch OFF) and `p` on a program's rule, `S` (watch inbound rules) and `F`;
   - Undo, Verify and re-apply for a rule that was switched off;
-  - the update guard's report after a sign-in, with its new firewall section;
+  - the update guard's report with its new firewall section (the guard has not raised an alert yet);
   - `.wfw` import, Undo center F, DNS reset and "remove program allows" while the gate is set;
   - a profile run with a wipe while the gate is set.
 
