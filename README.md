@@ -334,6 +334,12 @@ Windows Update still waited for you. The old allow-list keeps HTTPS open to **ev
 
 If networking misbehaves after a restart, undo `proxy` first, then `dialvpn`.
 
+**Side effect of `fileshare`:** with the Workstation service off, Windows locks the buttons under Settings > System > About >
+"Domain or workgroup" (System Properties, tab Computer Name): "Change..." (computer name, workgroup, domain) and
+"Network ID...". Seen on the test PC; that the service is the cause was not confirmed there by switching it on again.
+To use those buttons: undo `fileshare` (Undo center), restart, make the change, then apply `fileshare` again. On
+Windows 11 Home the domain choice and "Network ID..." are not available in any case.
+
 **Do not use N7** (WinHTTP proxy *service* off). It is a test-only item: on the test PC it stopped Windows Connection Manager and
 WLAN AutoConfig from starting, so Wi-Fi showed "Dormant" with no internet (details in `docs\radio-group-test.md`). It is never
 part of NA or a profile. If you did use it: Undo center, that session, then restart.
