@@ -103,7 +103,7 @@ function Invoke-WHDApplyProfile {
     if ($p.network) {
         $nx = $p.network
         if ($nx.firewallWipeFirst) { Write-Host  '   - Network: WIPE ALL firewall rules first (Windows defaults included; .wfw backup taken)' }
-        if ($nx.timeSync)          { Write-Host ("   - Network: time sync {0}{1}" -f $nx.timeSync, $(if ($nx.timeSync -eq 'Cloudflare') { ' (UDP 123 pinned, 1 h jump limit)' } else { '' })) }
+        if ($nx.timeSync)          { Write-Host ("   - Network: time sync {0}{1}" -f $nx.timeSync, $(if ($nx.timeSync -eq 'Cloudflare') { ' (UDP 123 pinned, 1 h jump limit, time service Automatic, Windows start triggers off)' } else { '' })) }
         if ($nx.firewallProfile)   { Write-Host ("   - Network: firewall profile {0}" -f $nx.firewallProfile) }
         if ($nx.dns)               { Write-Host ("   - Network: DNS {0}" -f $(if ($nx.dns -eq 'Cloudflare') { 'Cloudflare 1.1.1.2 + encrypted DoH' } else { $nx.dns })) }
         if ($nx.connectionLogging) { Write-Host  '   - Network: Windows Firewall log ON (default file, dropped + allowed, 32,767 KB)' }
