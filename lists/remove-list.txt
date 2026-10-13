@@ -1,0 +1,128 @@
+# WHD Imaging Helper - what to take out of the Home image. Read by WHD-ImageMenu.ps1 and the scripts in tools\.
+# EXAMPLE - CHANGE BEFORE YOU BUILD: the author's list for one test install. Choose your own in the menu (step 3)
+# after its inventory (step 2), or run tools\List-HomeImage.ps1 to see what your image contains.
+# Lines '# app:X (off - menu)' were switched off in the menu. Windows refused three of the items below on the
+# test build (Microsoft.DesktopAppInstaller, Microsoft.SecHealthUI, capability Language.Basic): it reports them as FAILED.
+# The capabilities Microsoft.Windows.Ethernet.Client.* and Microsoft.Windows.Wifi.Client.* are Windows' own network
+# drivers. Taking them out leaves a PC WITHOUT NETWORK unless its own drivers go into the image (menu step 2 / 4).
+# One item per line:  app:<display name>   feature:<feature name>   capability:<capability name>   service-off:<service name>
+# What is SET in the image (registry values, more services) is in image-settings.txt.
+# A line that starts with # is a comment.
+
+# --- bundled apps (29) ---
+app:Microsoft.Copilot
+app:Microsoft.BingSearch
+app:Microsoft.BingNews
+app:Microsoft.BingWeather
+app:MicrosoftWindows.Client.WebExperience
+app:Microsoft.PowerAutomateDesktop
+app:Microsoft.GamingApp
+app:Microsoft.XboxGamingOverlay
+app:Microsoft.XboxIdentityProvider
+app:Microsoft.XboxSpeechToTextOverlay
+app:Microsoft.Xbox.TCUI
+app:Microsoft.OutlookForWindows
+app:MSTeams
+app:Microsoft.YourPhone
+app:MicrosoftWindows.CrossDevice
+app:MicrosoftCorporationII.QuickAssist
+app:MicrosoftCorporationII.MicrosoftFamily
+app:Clipchamp.Clipchamp
+app:Microsoft.MicrosoftSolitaireCollection
+app:Microsoft.Todos
+app:Microsoft.MicrosoftStickyNotes
+app:Microsoft.WindowsFeedbackHub
+app:Microsoft.GetHelp
+app:Microsoft.Windows.DevHome
+app:Microsoft.Paint
+app:Microsoft.Windows.Photos
+app:Microsoft.WindowsAlarms
+app:Microsoft.WindowsSoundRecorder
+app:Microsoft.ZuneMusic
+
+# --- optional features to switch off (4) ---
+feature:WorkFolders-Client
+feature:Printing-Foundation-InternetPrinting-Client
+feature:MSRDC-Infrastructure
+feature:WindowsMediaPlayer
+
+# --- capabilities to remove (none) ---
+# List-HomeImage.ps1 writes the installed capabilities to image-contents.txt. A line looks like this:
+capability:App.StepsRecorder~~~~0.0.1.0
+
+# --- services to switch off (2) ---
+service-off:LanmanWorkstation
+service-off:LanmanServer
+
+# --- added by WHD-ImageMenu ---
+app:Microsoft.ApplicationCompatibilityEnhancements
+app:Microsoft.AV1VideoExtension
+app:Microsoft.AVCEncoderVideoExtension
+app:Microsoft.DesktopAppInstaller
+app:Microsoft.HEIFImageExtension
+app:Microsoft.HEVCVideoExtension
+app:Microsoft.MPEG2VideoExtension
+app:Microsoft.RawImageExtension
+app:Microsoft.ScreenSketch
+app:Microsoft.SecHealthUI
+app:Microsoft.StorePurchaseApp
+app:Microsoft.VP9VideoExtensions
+app:Microsoft.WebMediaExtensions
+app:Microsoft.WebpImageExtension
+app:Microsoft.WindowsCalculator
+app:Microsoft.WindowsCamera
+app:Microsoft.WindowsNotepad
+app:Microsoft.WindowsStore
+app:Microsoft.WindowsTerminal
+feature:WCF-Services45
+feature:WCF-TCP-PortSharing45
+feature:MediaPlayback
+feature:Printing-PrintToPDFServices-Features
+feature:Windows-Defender-Default-Definitions
+feature:SearchEngine-Client-Package
+feature:Printing-Foundation-Features
+feature:NetFx4-AdvSrvs
+capability:Browser.InternetExplorer~~~~0.0.11.0
+capability:DirectX.Configuration.Database~~~~0.0.1.0
+capability:Hello.Face.20134~~~~0.0.1.0
+capability:Language.Basic~~~en-US~0.0.1.0
+capability:Language.Handwriting~~~en-US~0.0.1.0
+capability:Language.OCR~~~en-US~0.0.1.0
+capability:Language.Speech~~~en-US~0.0.1.0
+capability:Language.TextToSpeech~~~en-US~0.0.1.0
+capability:MathRecognizer~~~~0.0.1.0
+capability:Media.WindowsMediaPlayer~~~~0.0.12.0
+capability:Microsoft.Wallpapers.Extended~~~~0.0.1.0
+capability:Microsoft.Windows.Ethernet.Client.Intel.E1i68x64~~~~0.0.1.0
+capability:Microsoft.Windows.Ethernet.Client.Intel.E2f68~~~~0.0.1.0
+capability:Microsoft.Windows.Ethernet.Client.Realtek.Rtcx21x64~~~~0.0.1.0
+capability:Microsoft.Windows.Ethernet.Client.Vmware.Vmxnet3~~~~0.0.1.0
+capability:Microsoft.Windows.Notepad.System~~~~0.0.1.0
+capability:Microsoft.Windows.PowerShell.ISE~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Broadcom.Bcmpciedhd63~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Broadcom.Bcmwl63al~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Broadcom.Bcmwl63a~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwbw02~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwew00~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwew01~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwlv64~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwns64~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwsw00~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwtw02~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwtw04~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwtw06~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwtw08~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Intel.Netwtw10~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Marvel.Mrvlpcie8897~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Qualcomm.Athw8x~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Qualcomm.Athwnx~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Qualcomm.Qcamain10x64~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Ralink.Netr28x~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Realtek.Rtl8192se~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Realtek.Rtwlane01~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Realtek.Rtwlane13~~~~0.0.1.0
+capability:Microsoft.Windows.Wifi.Client.Realtek.Rtwlane~~~~0.0.1.0
+capability:OneCoreUAP.OneSync~~~~0.0.1.0
+capability:OpenSSH.Client~~~~0.0.1.0
+capability:VBSCRIPT~~~~
+capability:Windows.Kernel.LA57~~~~0.0.1.0

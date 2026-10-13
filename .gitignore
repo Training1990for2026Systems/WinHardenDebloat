@@ -1,0 +1,46 @@
+# WHD Imaging Helper - never commit Windows image files, PC-specific data or work files
+
+# Windows image files (Microsoft's files - not ours to publish)
+*.iso
+*.wim
+*.swm
+*.esd
+install-source.txt
+original/
+original_old_*/
+usb/
+usb_old_*/
+usb-custom/
+usb-custom_old_*/
+usb-max/
+usb-max_old_*/
+from-usb_*/
+setup-files/
+setup-files_old_*/
+mount/
+mount_*/
+mount-menu/
+mount-menu_*/
+mount-inventory/
+mount-inventory_*/
+
+# the drivers of the PC you build on (they name its hardware)
+drivers/
+drivers_old_*/
+drivers-list.txt
+drivers-list_*.txt
+
+# what the scripts write on this PC
+*.log
+image-contents.txt
+image-contents_old_*.txt
+ai-inventory.txt
+ai-inventory_old_*.txt
+ai-removed_*/
+test-results/
+*_before-menu_*.txt
+*_old_*.txt
+publish/
+
+# the private words of tools\Build-PublishCopy.ps1 (they name this PC)
+private-words.txt

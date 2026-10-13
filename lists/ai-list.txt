@@ -1,0 +1,22 @@
+# ai-list.txt - the AI system packages of the image, for WHD-ImageMenu.ps1 (step 5).
+# EXAMPLE - CHANGE BEFORE YOU BUILD: the author's choice for the test install (all 7 on). The menu adds a
+# package it finds in step 2 that is not in this list, switched on.
+# on  = BLOCK (deprovisioned mark, AppLocker deny rule, first sign-in recheck) and REMOVE (its SystemApps
+#       folder and its app entries in the image registry).  off = left as it is.
+# NOT SUPPORTED BY MICROSOFT: a health check can report the missing files, a repair or an update can bring
+# them back or fail. Their WinSxS component files are not touched.
+
+# SystemApps\Microsoft.AIFabric.CBS.1.6_8wekyb3d8bbwe
+ai:Microsoft.AIFabric.CBS.1.6_8wekyb3d8bbwe on
+# SystemApps\Microsoft.Windows.AugLoop.CBS_8wekyb3d8bbwe
+ai:Microsoft.Windows.AugLoop.CBS_8wekyb3d8bbwe on
+# SystemApps\MicrosoftWindows.Client.AIX_cw5n1h2txyewy
+ai:MicrosoftWindows.Client.AIX_cw5n1h2txyewy on
+# SystemApps\MicrosoftWindows.Client.CoreAI_cw5n1h2txyewy
+ai:MicrosoftWindows.Client.CoreAI_cw5n1h2txyewy on
+# SystemApps\SxS\MicrosoftWindows.61869720.Voiess_cw5n1h2txyewy
+ai:MicrosoftWindows.61869720.Voiess_cw5n1h2txyewy on
+# SystemApps\SxS\MicrosoftWindows.61869721.Livtop_cw5n1h2txyewy
+ai:MicrosoftWindows.61869721.Livtop_cw5n1h2txyewy on
+# SystemApps\SxS\MicrosoftWindows.61869722.Speion_cw5n1h2txyewy
+ai:MicrosoftWindows.61869722.Speion_cw5n1h2txyewy on
