@@ -1,24 +1,28 @@
-# Security policy
+# Security
 
-WHD Next (WinHardenDebloat for PowerShell 7.6) changes Windows security and privacy settings, so problems in it matter.
+WHD Next 3.0 changes Windows security settings, so problems in it matter. Thank you for reporting them.
 
 ## Reporting a problem
 
-Please report security problems **privately by e-mail** to **t90018273@gmail.com** (maintainer:
-Training1990for2026Systems), not in a public issue. Include:
+- **A security problem** (WHD weakens something, lets something in, leaks data, or a change it makes can be
+  misused): e-mail **t90018273@gmail.com** with what you saw, the steps, and the WHD version
+  (`WHD.ps1` shows it at start). Please do not open a public issue for it first.
+- **Any other bug:** open an issue on GitHub (Training1990for2026Systems/WinHardenDebloat).
 
-- the WHD version (top of README.md) and Windows edition / build (`winver`),
-- what you ran (menu option or profile) and what happened,
-- the run log from `logs\` with your own computer name, user name and network details removed.
+Attach the log of the run if you can: `logs\run_<time>.log` (and `logs\guard_<time>.log` or
+`restore\update-guard\guard_<time>.txt` for the update guard). Look through it first - it contains your
+computer name and paths.
 
-You will get an answer by e-mail. Please give a reasonable time to fix the problem before talking about it publicly.
+## What WHD does and does not do
 
-## Scope
+- It only changes this PC, only in an administrator window, only with EXECUTE on, and each change asks first
+  (a profile asks once). Dry-run is the default.
+- Every change is written to the change history (`restore\`) before the next one; the Undo center can undo it.
+  A System Restore point is made before the first change of a session.
+- It sends nothing anywhere and uses no web service. It never installs anything without your yes (the
+  starter offers Microsoft's PowerShell 7 installer only).
+- The update guard is alert only: it reads and reports, it never changes a setting.
 
-- In scope: the scripts in this repository (Start-WHD.ps1, WHD.ps1, WHD-GUI.ps1, Inventory.ps1, modules\, tools\) and its profiles.
-- Out of scope: Windows itself, Microsoft Defender, and third-party block lists.
+## Supported versions
 
-## Safe use
-
-WHD is provided under the MIT License, without warranty. Test on a spare PC first, keep the restore point WHD creates
-before the first change, and use a dry run (the default mode) before EXECUTE.
+Only the newest published WHD Next 3.0 gets fixes. It runs on PowerShell 7.6 or a newer stable version.

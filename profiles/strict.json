@@ -1,0 +1,19 @@
+{
+  "kind": "whd-profile",
+  "name": "strict",
+  "title": "Strict - maximum; some features go away",
+  "description": "Average plus: Phone Link and more apps removed (To Do, Quick Assist, new Outlook, Xbox app, Xbox Speech-to-Text), clipboard history off, Defender network protection BLOCK and ransomware folders AUDIT, the Office / Adobe attack-surface rules too (AUDIT), all safe network services off, password + lockout rules, Lockdown app permissions, Bluetooth network / Wi-Fi Direct / WAN Miniports off, the firewall baseline, drivers not through Windows Update, Store and Edge self-updates off. The update gate is NOT closed (your manual choice). Everything is recorded and can be undone in the Undo center.",
+  "ai": { "featureOff": ["copilot", "recall", "recallsnap", "bing", "webexp", "clicktodo", "edgeai", "notepadai", "paintai", "edgelocalai"], "remove": ["copilot", "powerautomate", "bing", "webexp", "phonelink"] },
+  "storeSuppression": true,
+  "general": { "removeRecommended": true, "remove": ["todos", "quickassist", "outlooknew", "xboxapp", "xboxstt"] },
+  "privacyHardening": true,
+  "diagTrackOff": true,
+  "privacy": ["suggestions", "edgebg", "activity", "speech", "edgediag", "clipboard"],
+  "security": { "pua": true, "networkProtection": "Block", "folderProtection": "Audit", "asrGroups": ["standard", "scripts", "office"], "asrMode": "Audit", "protocolsOff": ["llmnr", "netbios", "wpad", "remoteassist"], "servicesOff": ["fileshare", "smb", "dialvpn", "ipsec", "proxy", "faxphone"], "uacAlwaysNotify": true, "passwordPolicy": true, "psTelemetryOff": true },
+  "permissions": "Lockdown",
+  "devices": { "btNetworkOff": true, "wifiDirectOff": true, "wanMiniportsOff": true },
+  "network": { "timeSync": "Cloudflare", "dns": "Cloudflare", "connectionLogging": true, "firewallProfile": "firewall-baseline.json" },
+  "updates": { "policies": ["drivers", "driverpolicy", "store"], "edgeUpdaterOff": true },
+  "componentCleanup": true,
+  "updateGuard": true
+}

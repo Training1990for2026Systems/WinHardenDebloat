@@ -1,0 +1,19 @@
+{
+  "kind": "whd-profile",
+  "name": "minimum",
+  "title": "Minimum - quiet and safe, removes nothing",
+  "description": "Switches off the AI and advertising surfaces and the telemetry service, blocks unwanted apps in Defender and closes two old name-lookup protocols. Removes no app, changes no permission, network or update setting. Everything is recorded and can be undone in the Undo center.",
+  "ai": { "featureOff": ["copilot", "recall", "recallsnap", "bing", "webexp", "clicktodo", "edgeai"], "remove": [] },
+  "storeSuppression": true,
+  "general": { "removeRecommended": false, "remove": [] },
+  "privacyHardening": true,
+  "diagTrackOff": true,
+  "privacy": ["suggestions", "edgebg"],
+  "security": { "pua": true, "networkProtection": "", "folderProtection": "", "asrGroups": [], "asrMode": "Audit", "protocolsOff": ["llmnr", "wpad"], "servicesOff": [], "uacAlwaysNotify": false, "passwordPolicy": false, "psTelemetryOff": true },
+  "permissions": "",
+  "devices": { "btNetworkOff": false, "wifiDirectOff": false, "wanMiniportsOff": false },
+  "network": { "timeSync": "", "dns": "", "connectionLogging": false, "firewallProfile": "" },
+  "updates": { "policies": [], "edgeUpdaterOff": false },
+  "componentCleanup": false,
+  "updateGuard": true
+}

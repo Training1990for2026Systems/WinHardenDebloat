@@ -1,0 +1,19 @@
+{
+  "kind": "whd-profile",
+  "name": "average",
+  "title": "Average - the everyday hardened PC",
+  "description": "Minimum plus: the AI apps and the 'recommended' extra apps removed, more privacy settings, Defender network protection and attack-surface rules in AUDIT, all four old protocols off, UAC Always notify, Balanced app permissions, the Bluetooth network part off, Cloudflare time and DNS, the firewall log on and a component store cleanup. Windows updates stay as they are. Everything is recorded and can be undone in the Undo center.",
+  "ai": { "featureOff": ["copilot", "recall", "recallsnap", "bing", "webexp", "clicktodo", "edgeai", "notepadai", "paintai", "edgelocalai"], "remove": ["copilot", "powerautomate", "bing", "webexp"] },
+  "storeSuppression": true,
+  "general": { "removeRecommended": true, "remove": [] },
+  "privacyHardening": true,
+  "diagTrackOff": true,
+  "privacy": ["suggestions", "edgebg", "activity", "speech", "edgediag"],
+  "security": { "pua": true, "networkProtection": "Audit", "folderProtection": "", "asrGroups": ["standard", "scripts"], "asrMode": "Audit", "protocolsOff": ["llmnr", "netbios", "wpad", "remoteassist"], "servicesOff": ["faxphone"], "uacAlwaysNotify": true, "passwordPolicy": false, "psTelemetryOff": true },
+  "permissions": "Balanced",
+  "devices": { "btNetworkOff": true, "wifiDirectOff": false, "wanMiniportsOff": false },
+  "network": { "timeSync": "Cloudflare", "dns": "Cloudflare", "connectionLogging": true, "firewallProfile": "" },
+  "updates": { "policies": [], "edgeUpdaterOff": false },
+  "componentCleanup": true,
+  "updateGuard": true
+}
