@@ -1,0 +1,25 @@
+{
+  "name": "baseline",
+  "description": "WHD Next 3.0 firewall baseline (same values as WHD Next 2.0). Firewall menu A or Invoke-WHDApplyFirewallProfile. Starts SAFE: default-deny outbound is off until you set it to true. IPv6 suppressed (::1 loopback kept). DNS rules pinned to Cloudflare 1.1.1.2 / 1.0.0.2 (malware filter; menu D sets the resolver + encrypted DoH). HTTP / HTTPS open to any address. Block lists are your own files in this folder (not shipped).",
+  "profileDefaults": { "inbound": "Block", "outbound": "Allow" },
+  "ipv6": { "disable": true, "blockLoopback": false },
+  "allowList": [
+    { "name": "WHDN-Allow-DNS-UDP",  "displayName": "WHD Next Allow DNS (UDP 53)",                  "direction": "Outbound", "protocol": "UDP", "remotePort": 53,  "remoteAddress": ["1.1.1.2", "1.0.0.2"] },
+    { "name": "WHDN-Allow-DNS-TCP",  "displayName": "WHD Next Allow DNS (TCP 53)",                  "direction": "Outbound", "protocol": "TCP", "remotePort": 53,  "remoteAddress": ["1.1.1.2", "1.0.0.2"] },
+    { "name": "WHDN-Allow-DHCP-Out", "displayName": "WHD Next Allow DHCP request (UDP out 68->67)", "direction": "Outbound", "protocol": "UDP", "localPort": 68, "remotePort": 67 },
+    { "name": "WHDN-Allow-DHCP-In",  "displayName": "WHD Next Allow DHCP reply (UDP in <-67)",      "direction": "Inbound",  "protocol": "UDP", "localPort": 68, "remotePort": 67 },
+    { "name": "WHDN-Allow-NTP",      "displayName": "WHD Next Allow NTP (UDP 123)",                 "direction": "Outbound", "protocol": "UDP", "remotePort": 123 },
+    { "name": "WHDN-Allow-HTTPS",    "displayName": "WHD Next Allow HTTPS (TCP 443)",               "direction": "Outbound", "protocol": "TCP", "remotePort": 443 },
+    { "name": "WHDN-Allow-HTTP",     "displayName": "WHD Next Allow HTTP (TCP 80)",                 "direction": "Outbound", "protocol": "TCP", "remotePort": 80 }
+  ],
+  "blacklist": { "ipFile": "blacklist-ip.txt" },
+  "defaultDenyOutbound": false,
+  "rollbackMinutes": 10,
+  "_notes": [
+    "Strict: set defaultDenyOutbound to true - everything outbound is blocked except this allow-list. A scheduled task (WHDN-DefaultDenyRollback, runs Windows' netsh) switches outbound back to Allow after rollbackMinutes unless you confirm with menu 7.",
+    "NTP: when Windows Time points at time.cloudflare.com, the NTP rule is narrowed to Cloudflare's time addresses.",
+    "IP block list: blacklist-ip.txt in this folder (WHD Next 2.0's list is copied here once). It follows the firewall: block rules go in only where something is wide open. Private, multicast and reserved ranges are never blocked.",
+    "Domains: blocked at the resolver (menu D). The hosts sinkhole (menu H, blacklist-hosts.txt) is NOT part of this baseline; add \"hostsFile\": \"blacklist-hosts.txt\" under blacklist to include it.",
+    "Another resolver: change both DNS remoteAddress lists here AND the DNS settings at the top of WHDNext\\Features\\Firewall.ps1."
+  ]
+}

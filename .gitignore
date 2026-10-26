@@ -1,0 +1,23 @@
+# WHD Next 3.0 - never commit PC-specific data or private working files
+logs/
+restore/
+inventory/
+reports/
+archive/
+publish/
+profiles/incoming/
+profiles/*.bak
+profiles/blacklist-*.txt
+*.log
+settings.json
+
+# private working files of this project
+WHD-Next-pwsh-Sync.md
+docs/rebuild-plan.md
+docs/file-hashes.txt
+
+# development only (tests run in the build workspace, not shipped)
+tests/
+
+# development only: the Python code that drew the theme pictures (kept for the record, D70)
+dev/
